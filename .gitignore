@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 results/
 Data/
+*Data
 
 # 
 experiments*/
@@ -24,3 +25,4 @@ Experiments*/
 *.log
 *.err
 *.out
+*.ipynb
