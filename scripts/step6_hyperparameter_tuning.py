@@ -122,7 +122,11 @@ def tune_property_head(args, config, device):
     )
 
     backbone_ckpt = torch.load(results_dir / 'checkpoints' / 'backbone_best.pt', map_location=device)
-    diffusion_model.load_state_dict(backbone_ckpt['model_state_dict'])
+    # Handle torch.compile() state dict (keys have _orig_mod. prefix)
+    state_dict = backbone_ckpt['model_state_dict']
+    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+    diffusion_model.load_state_dict(state_dict)
     diffusion_model = diffusion_model.to(device)
 
     # Create tuner

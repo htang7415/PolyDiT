@@ -80,7 +80,12 @@ def main(args):
         mask_token_id=tokenizer.mask_token_id,
         pad_token_id=tokenizer.pad_token_id
     )
-    model.load_state_dict(checkpoint['model_state_dict'])
+
+    # Handle torch.compile() state dict (keys have _orig_mod. prefix)
+    state_dict = checkpoint['model_state_dict']
+    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
 
@@ -95,13 +100,24 @@ def main(args):
     )
 
     # Sample
-    print(f"\n5. Sampling {args.num_samples} polymers...")
-    _, generated_smiles = sampler.sample_batch(
-        num_samples=args.num_samples,
-        seq_length=tokenizer.max_length,
-        batch_size=config['sampling']['batch_size'],
-        show_progress=True
-    )
+    batch_size = args.batch_size or config['sampling']['batch_size']
+    print(f"\n5. Sampling {args.num_samples} polymers (batch_size={batch_size})...")
+    if args.variable_length:
+        print(f"   Using variable length sampling (range: {args.min_length}-{args.max_length})")
+        _, generated_smiles = sampler.sample_variable_length(
+            num_samples=args.num_samples,
+            length_range=(args.min_length, args.max_length),
+            batch_size=batch_size,
+            samples_per_length=args.samples_per_length,
+            show_progress=True
+        )
+    else:
+        _, generated_smiles = sampler.sample_batch(
+            num_samples=args.num_samples,
+            seq_length=tokenizer.max_length,
+            batch_size=batch_size,
+            show_progress=True
+        )
 
     # Save generated samples
     samples_df = pd.DataFrame({'smiles': generated_smiles})
@@ -205,5 +221,15 @@ if __name__ == '__main__':
                         help='Path to model checkpoint')
     parser.add_argument('--num_samples', type=int, default=50000,
                         help='Number of samples to generate')
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='Batch size for sampling (default: from config)')
+    parser.add_argument('--variable_length', action='store_true',
+                        help='Enable variable length sampling')
+    parser.add_argument('--min_length', type=int, default=20,
+                        help='Minimum sequence length for variable length sampling')
+    parser.add_argument('--max_length', type=int, default=100,
+                        help='Maximum sequence length for variable length sampling')
+    parser.add_argument('--samples_per_length', type=int, default=16,
+                        help='Samples per length in variable length mode (controls diversity)')
     args = parser.parse_args()
     main(args)

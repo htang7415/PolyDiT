@@ -3,9 +3,12 @@
 from typing import Optional, List, Tuple
 import numpy as np
 
-from rdkit import Chem
+from rdkit import Chem, rdBase
 from rdkit.Chem import AllChem, Descriptors
 from rdkit import DataStructs
+
+# Suppress RDKit parse error messages
+rdBase.DisableLog('rdApp.*')
 
 # Import SA score calculator
 from rdkit.Chem import RDConfig
