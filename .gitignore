@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 results/
+results_1
 Data/
 *Data
 Generated_polymers

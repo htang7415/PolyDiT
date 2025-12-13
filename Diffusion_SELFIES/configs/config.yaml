@@ -61,14 +61,14 @@ diffusion:
 
 # Training backbone
 training_backbone:
-  batch_size: 256
-  learning_rate: 3e-4
+  batch_size: 512
+  learning_rate: 1e-4
   weight_decay: 0.01
   warmup_steps: 1000
-  max_steps: 150000
+  max_steps: 1000000
   gradient_clip_norm: 1.0
   eval_every: 1000
-  save_every: 20000
+  save_every: 200000
   num_epochs: 100
 
 # Training property heads
