@@ -1,4 +1,8 @@
-"""Generative evaluation metrics for polymer generation."""
+"""Generative evaluation metrics for polymer generation.
+
+Supports both SELFIES and p-SMILES input formats. When input_format="selfies",
+SELFIES strings are converted to p-SMILES before validation and metric computation.
+"""
 
 import numpy as np
 import pandas as pd
@@ -14,59 +18,100 @@ from ..utils.chemistry import (
     compute_pairwise_diversity,
     batch_compute_fingerprints
 )
+from ..utils.selfies_utils import selfies_to_psmiles, count_placeholder_in_selfies
 
 
 class GenerativeEvaluator:
-    """Evaluate generated polymer samples."""
+    """Evaluate generated polymer samples.
+
+    Supports both SELFIES and p-SMILES input formats. When input_format="selfies",
+    generated SELFIES are converted to p-SMILES before validation.
+    """
 
     def __init__(
         self,
         training_smiles: Set[str],
         fp_type: str = "morgan",
         fp_radius: int = 2,
-        fp_bits: int = 2048
+        fp_bits: int = 2048,
+        input_format: str = "selfies"
     ):
         """Initialize evaluator.
 
         Args:
-            training_smiles: Set of training SMILES for novelty computation.
+            training_smiles: Set of training p-SMILES for novelty computation.
             fp_type: Fingerprint type for diversity.
             fp_radius: Fingerprint radius.
             fp_bits: Number of fingerprint bits.
+            input_format: Input format ("selfies" or "psmiles"). Default "selfies".
         """
         self.training_smiles = training_smiles
         self.fp_type = fp_type
         self.fp_radius = fp_radius
         self.fp_bits = fp_bits
+        self.input_format = input_format
 
     def evaluate(
         self,
-        generated_smiles: List[str],
+        generated_samples: List[str],
         sample_id: str = "sample",
         show_progress: bool = True
     ) -> Dict:
-        """Evaluate generated SMILES.
+        """Evaluate generated samples.
 
         Args:
-            generated_smiles: List of generated SMILES strings.
+            generated_samples: List of generated strings (SELFIES or p-SMILES depending on input_format).
             sample_id: Identifier for this sample set.
             show_progress: Whether to show progress.
 
         Returns:
             Dictionary of metrics.
         """
-        n_total = len(generated_smiles)
+        n_total = len(generated_samples)
+
+        # Convert SELFIES to p-SMILES if needed
+        if self.input_format == "selfies":
+            psmiles_list = []
+            conversion_failures = 0
+            placeholder_errors = 0
+
+            iterator = generated_samples
+            if show_progress:
+                iterator = tqdm(generated_samples, desc="Converting SELFIES to p-SMILES")
+
+            for selfies in iterator:
+                # Check placeholder count in SELFIES
+                placeholder_count = count_placeholder_in_selfies(selfies)
+                if placeholder_count != 2:
+                    placeholder_errors += 1
+
+                # Convert to p-SMILES
+                psmiles = selfies_to_psmiles(selfies)
+                if psmiles is None:
+                    conversion_failures += 1
+                    psmiles_list.append("")  # Placeholder for failed conversion
+                else:
+                    psmiles_list.append(psmiles)
+        else:
+            # Input is already p-SMILES
+            psmiles_list = generated_samples
+            conversion_failures = 0
+            placeholder_errors = 0
 
         # Filter valid molecules
         valid_smiles = []
         validity_results = []
         star_counts = []
 
-        iterator = generated_smiles
+        iterator = psmiles_list
         if show_progress:
-            iterator = tqdm(generated_smiles, desc="Checking validity")
+            iterator = tqdm(psmiles_list, desc="Checking validity")
 
         for smiles in iterator:
+            if not smiles:  # Skip empty strings (failed conversions)
+                validity_results.append(False)
+                continue
+
             is_valid = check_validity(smiles)
             validity_results.append(is_valid)
 
@@ -141,6 +186,17 @@ class GenerativeEvaluator:
             "star_count_distribution": dict(star_counter)
         }
 
+        # Add SELFIES-specific metrics if applicable
+        if self.input_format == "selfies":
+            metrics["conversion_failures"] = conversion_failures
+            metrics["conversion_success_rate"] = round(
+                (n_total - conversion_failures) / n_total if n_total > 0 else 0.0, 4
+            )
+            metrics["placeholder_errors"] = placeholder_errors
+            metrics["placeholder_correct_rate"] = round(
+                (n_total - placeholder_errors) / n_total if n_total > 0 else 0.0, 4
+            )
+
         return metrics
 
     def _compute_stats(self, values: List[float], prefix: str) -> Dict[str, float]:
@@ -170,26 +226,44 @@ class GenerativeEvaluator:
 
     def get_valid_samples(
         self,
-        generated_smiles: List[str],
+        generated_samples: List[str],
         require_two_stars: bool = True
-    ) -> List[str]:
+    ) -> Tuple[List[str], List[str]]:
         """Filter to valid samples.
 
         Args:
-            generated_smiles: List of generated SMILES.
+            generated_samples: List of generated samples (SELFIES or p-SMILES).
             require_two_stars: Whether to require exactly 2 stars.
 
         Returns:
-            List of valid SMILES.
+            Tuple of (valid_psmiles, valid_selfies).
+            If input_format is "psmiles", valid_selfies will be empty.
         """
-        valid = []
-        for smiles in generated_smiles:
-            if not check_validity(smiles):
+        valid_psmiles = []
+        valid_selfies = []
+
+        for sample in generated_samples:
+            # Convert if needed
+            if self.input_format == "selfies":
+                psmiles = selfies_to_psmiles(sample)
+                if psmiles is None:
+                    continue
+                selfies = sample
+            else:
+                psmiles = sample
+                selfies = None
+
+            # Check validity
+            if not check_validity(psmiles):
                 continue
-            if require_two_stars and count_stars(smiles) != 2:
+            if require_two_stars and count_stars(psmiles) != 2:
                 continue
-            valid.append(smiles)
-        return valid
+
+            valid_psmiles.append(psmiles)
+            if selfies is not None:
+                valid_selfies.append(selfies)
+
+        return valid_psmiles, valid_selfies
 
     def compute_sa_stats(self, smiles_list: List[str]) -> Dict[str, float]:
         """Compute SA score statistics.

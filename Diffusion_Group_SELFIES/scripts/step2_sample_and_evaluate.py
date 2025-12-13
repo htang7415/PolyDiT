@@ -16,7 +16,7 @@ import numpy as np
 from src.utils.config import load_config
 from src.utils.plotting import PlotUtils
 from src.utils.chemistry import compute_sa_score
-from src.data.tokenizer import PSmilesTokenizer
+from src.data.tokenizer import GroupSELFIESTokenizer
 from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
 from src.sampling.sampler import ConstrainedSampler
@@ -46,7 +46,7 @@ def main(args):
 
     # Load tokenizer
     print("\n1. Loading tokenizer...")
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    tokenizer = GroupSELFIESTokenizer.load(results_dir / 'tokenizer.pkl')
 
     # Load training data for novelty computation
     print("\n2. Loading training data...")

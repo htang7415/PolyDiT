@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Step 0: Prepare data and build vocabulary."""
+"""Step 0: Prepare data and build Group SELFIES vocabulary and grammar."""
 
 import os
 import sys
@@ -16,7 +16,7 @@ import numpy as np
 from src.utils.config import load_config
 from src.utils.plotting import PlotUtils
 from src.data.data_loader import PolymerDataLoader
-from src.data.tokenizer import PSmilesTokenizer
+from src.data.tokenizer import GroupSELFIESTokenizer
 
 
 def main(args):
@@ -37,7 +37,7 @@ def main(args):
     data_loader = PolymerDataLoader(config)
 
     print("=" * 50)
-    print("Step 0: Data Preparation")
+    print("Step 0: Data Preparation (Group SELFIES)")
     print("=" * 50)
 
     # Prepare unlabeled data
@@ -46,14 +46,24 @@ def main(args):
     train_df = unlabeled_data['train']
     val_df = unlabeled_data['val']
 
-    # Build tokenizer vocabulary from training data only
-    print("\n2. Building tokenizer vocabulary...")
-    tokenizer = PSmilesTokenizer(max_length=config['tokenizer']['max_length'])
-    vocab = tokenizer.build_vocab(train_df['p_smiles'].tolist())
-    print(f"Vocabulary size: {tokenizer.vocab_size}")
+    # Build tokenizer vocabulary and grammar from training data only
+    print("\n2. Building Group SELFIES grammar and vocabulary...")
+    tokenizer = GroupSELFIESTokenizer(max_length=config['tokenizer']['max_length'])
 
-    # Save tokenizer
-    tokenizer_path = results_dir / 'tokenizer.json'
+    # Get max_groups from config if available
+    max_groups = config.get('group_selfies', {}).get('max_groups', 10000)
+
+    vocab, grammar = tokenizer.build_vocab_and_grammar(
+        train_df['p_smiles'].tolist(),
+        max_groups=max_groups,
+        verbose=True
+    )
+    print(f"Vocabulary size: {tokenizer.vocab_size}")
+    print(f"Placeholder token: {tokenizer.get_placeholder_token()}")
+    print(f"Placeholder token ID: {tokenizer.get_placeholder_token_id()}")
+
+    # Save tokenizer (pickle format for grammar)
+    tokenizer_path = results_dir / 'tokenizer.pkl'
     tokenizer.save(tokenizer_path)
     print(f"Tokenizer saved to: {tokenizer_path}")
 
@@ -93,12 +103,14 @@ def main(args):
         tokens = tokenizer.tokenize(smiles)
         # Create token -> vocab ID hashmap
         token_ids = {tok: tokenizer.vocab.get(tok, tokenizer.unk_token_id) for tok in tokens}
-        reconstructed = tokenizer.detokenize(tokens)
+        decoded = tokenizer.detokenize(tokens)
         examples.append({
             'original_smiles': smiles,
             'num_tokens': len(tokens),
+            'group_selfies_tokens': str(tokens),
             'tokens_hashmap': str(token_ids),
-            'reconstructed_smiles': reconstructed
+            'decoded_smiles': decoded,
+            'roundtrip_match': tokenizer.verify_roundtrip(smiles)
         })
 
     examples_df = pd.DataFrame(examples)
@@ -156,9 +168,9 @@ def main(args):
     plotter.histogram(
         data=[train_lengths, val_lengths],
         labels=['Train', 'Val'],
-        xlabel='Token Length',
+        xlabel='Token Length (Group SELFIES)',
         ylabel='Count',
-        title='Token Length Distribution',
+        title='Group SELFIES Token Length Distribution',
         save_path=figures_dir / 'length_hist_train_val.png',
         bins=50,
         style='step'
@@ -181,16 +193,23 @@ def main(args):
     train_df.to_csv(results_dir / 'train_unlabeled.csv', index=False)
     val_df.to_csv(results_dir / 'val_unlabeled.csv', index=False)
 
+    # Print summary
     print("\n" + "=" * 50)
     print("Data preparation complete!")
+    print("=" * 50)
     print(f"Train samples: {len(train_df)}")
     print(f"Val samples: {len(val_df)}")
     print(f"Vocabulary size: {tokenizer.vocab_size}")
+    print(f"Placeholder token: {tokenizer.get_placeholder_token()}")
+    print(f"Train roundtrip accuracy: {100*train_valid/train_total:.2f}%")
+    print(f"Val roundtrip accuracy: {100*val_valid/val_total:.2f}%")
+    print(f"Avg train token length: {np.mean(train_lengths):.2f}")
+    print(f"Avg val token length: {np.mean(val_lengths):.2f}")
     print("=" * 50)
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Prepare data and build vocabulary')
+    parser = argparse.ArgumentParser(description='Prepare data and build Group SELFIES vocabulary')
     parser.add_argument('--config', type=str, default='configs/config.yaml',
                         help='Path to config file')
     args = parser.parse_args()

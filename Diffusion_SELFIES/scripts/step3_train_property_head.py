@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 
 from src.utils.config import load_config
 from src.utils.plotting import PlotUtils
-from src.data.tokenizer import PSmilesTokenizer
+from src.data.selfies_tokenizer import SelfiesTokenizer
 from src.data.data_loader import PolymerDataLoader
 from src.data.dataset import PropertyDataset, collate_fn
 from src.model.backbone import DiffusionBackbone
@@ -47,8 +47,8 @@ def main(args):
     print("=" * 50)
 
     # Load tokenizer
-    print("\n1. Loading tokenizer...")
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    print("\n1. Loading SELFIES tokenizer...")
+    tokenizer = SelfiesTokenizer.load(results_dir / 'tokenizer.json')
 
     # Load property data
     print("\n2. Loading property data...")

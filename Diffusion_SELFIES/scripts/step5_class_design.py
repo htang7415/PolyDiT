@@ -16,7 +16,7 @@ import numpy as np
 from src.utils.config import load_config
 from src.utils.plotting import PlotUtils
 from src.utils.chemistry import compute_sa_score
-from src.data.tokenizer import PSmilesTokenizer
+from src.data.selfies_tokenizer import SelfiesTokenizer
 from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
 from src.model.property_head import PropertyHead, PropertyPredictor
@@ -49,13 +49,13 @@ def main(args):
     print("=" * 50)
 
     # Load tokenizer
-    print("\n1. Loading tokenizer...")
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    print("\n1. Loading SELFIES tokenizer...")
+    tokenizer = SelfiesTokenizer.load(results_dir / 'tokenizer.json')
 
-    # Load training data for novelty
+    # Load training data for novelty (use p_smiles for comparison)
     print("\n2. Loading training data...")
     train_df = pd.read_csv(results_dir / 'train_unlabeled.csv')
-    training_smiles = set(train_df['p_smiles'].tolist())
+    training_smiles = set(train_df['p_smiles'].tolist())  # p-SMILES for novelty computation
 
     # Create classifier
     print("\n3. Creating polymer classifier...")

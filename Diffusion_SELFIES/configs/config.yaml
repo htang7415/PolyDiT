@@ -21,13 +21,19 @@ data:
 
 # Tokenizer
 tokenizer:
+  type: "selfies"  # Tokenizer type: "selfies" or "psmiles"
   special_tokens:
     pad: "[PAD]"
     mask: "[MASK]"
     bos: "[BOS]"
     eos: "[EOS]"
     unk: "[UNK]"
-  max_length: 128
+  max_length: 256  # Increased from 128 for SELFIES (typically 1.5-2x longer than p-SMILES)
+
+# SELFIES conversion settings
+selfies:
+  placeholder: "[I+3]"  # Placeholder for polymer attachment point '*'
+  verify_roundtrip: true  # Validate p-SMILES <-> SELFIES conversions
 
 # Backbone model (GPT-2-small-like)
 backbone:
@@ -55,7 +61,7 @@ diffusion:
 
 # Training backbone
 training_backbone:
-  batch_size: 512
+  batch_size: 256
   learning_rate: 3e-4
   weight_decay: 0.01
   warmup_steps: 1000

@@ -1,4 +1,7 @@
-"""Polymer class detection and class-guided design."""
+"""Polymer class detection and class-guided design.
+
+Generates SELFIES strings, converts to p-SMILES for validation and classification.
+"""
 
 import torch
 import numpy as np
@@ -8,6 +11,7 @@ from rdkit import Chem
 from tqdm import tqdm
 
 from ..utils.chemistry import check_validity, count_stars, compute_sa_score
+from ..utils.selfies_utils import selfies_to_psmiles
 from .generative_metrics import GenerativeEvaluator
 
 
@@ -146,7 +150,10 @@ class PolymerClassifier:
 
 
 class ClassGuidedDesigner:
-    """Class-guided polymer design."""
+    """Class-guided polymer design.
+
+    Generates SELFIES strings, converts to p-SMILES for validation and classification.
+    """
 
     def __init__(
         self,
@@ -161,10 +168,10 @@ class ClassGuidedDesigner:
         """Initialize class-guided designer.
 
         Args:
-            sampler: Constrained sampler.
-            tokenizer: Tokenizer.
-            classifier: Polymer classifier.
-            training_smiles: Training SMILES set.
+            sampler: Constrained sampler (generates SELFIES).
+            tokenizer: Tokenizer (SelfiesTokenizer).
+            classifier: Polymer classifier (uses p-SMILES).
+            training_smiles: Training p-SMILES set.
             property_predictor: Optional property predictor.
             device: Device.
             normalization_params: Dict with 'mean' and 'std' for denormalizing predictions.
@@ -176,7 +183,8 @@ class ClassGuidedDesigner:
         self.property_predictor = property_predictor
         self.device = device
         self.normalization_params = normalization_params or {'mean': 0.0, 'std': 1.0}
-        self.evaluator = GenerativeEvaluator(training_smiles)
+        # Use input_format="selfies" since sampler generates SELFIES
+        self.evaluator = GenerativeEvaluator(training_smiles, input_format="selfies")
 
     def design_by_class(
         self,
@@ -201,40 +209,45 @@ class ClassGuidedDesigner:
         if show_progress:
             print(f"Generating {num_candidates} candidates for class: {target_class}")
 
-        # Generate candidates
-        _, all_smiles = self.sampler.sample_batch(
+        # Generate candidates (sampler returns SELFIES)
+        _, all_selfies = self.sampler.sample_batch(
             num_candidates, seq_length, batch_size, show_progress
         )
 
-        # Filter valid
-        valid_smiles = []
-        for smiles in all_smiles:
-            if check_validity(smiles) and count_stars(smiles) == 2:
-                valid_smiles.append(smiles)
+        # Convert SELFIES to p-SMILES and filter valid
+        valid_selfies = []
+        valid_psmiles = []
+        for selfies in all_selfies:
+            psmiles = selfies_to_psmiles(selfies)
+            if psmiles is not None and check_validity(psmiles) and count_stars(psmiles) == 2:
+                valid_selfies.append(selfies)
+                valid_psmiles.append(psmiles)
 
         if show_progress:
-            print(f"Valid candidates: {len(valid_smiles)}")
+            print(f"Valid candidates: {len(valid_selfies)}")
 
-        if len(valid_smiles) == 0:
+        if len(valid_selfies) == 0:
             return self._empty_class_results(target_class, num_candidates)
 
-        # Filter by class
-        class_matches = self.classifier.filter_by_class(valid_smiles, target_class)
+        # Filter by class (using p-SMILES)
+        class_matches_psmiles = self.classifier.filter_by_class(valid_psmiles, target_class)
+        # Get corresponding SELFIES
+        class_matches_selfies = [valid_selfies[valid_psmiles.index(s)] for s in class_matches_psmiles]
 
         if show_progress:
-            print(f"Class matches: {len(class_matches)}")
+            print(f"Class matches: {len(class_matches_psmiles)}")
 
         # Compute metrics (round floats to 4 decimal places)
         results = {
             "target_class": target_class,
             "n_generated": num_candidates,
-            "n_valid": len(valid_smiles),
-            "n_class_matches": len(class_matches),
-            "class_success_rate": round(len(class_matches) / len(valid_smiles), 4) if valid_smiles else 0.0,
+            "n_valid": len(valid_selfies),
+            "n_class_matches": len(class_matches_psmiles),
+            "class_success_rate": round(len(class_matches_psmiles) / len(valid_selfies), 4) if valid_selfies else 0.0,
         }
 
-        # Generative metrics on ALL generated samples (not just class matches)
-        gen_metrics = self.evaluator.evaluate(all_smiles, "all_generated", show_progress=False)
+        # Generative metrics on ALL generated SELFIES (evaluator handles conversion internally)
+        gen_metrics = self.evaluator.evaluate(all_selfies, "all_generated", show_progress=False)
         results.update({
             "validity": gen_metrics["validity"],
             "uniqueness": gen_metrics["uniqueness"],
@@ -244,9 +257,9 @@ class ClassGuidedDesigner:
             "std_sa": gen_metrics["std_sa"],
         })
 
-        # Additional metrics for class matches specifically
-        if class_matches:
-            class_gen_metrics = self.evaluator.evaluate(class_matches, target_class, show_progress=False)
+        # Additional metrics for class matches specifically (use SELFIES for evaluation)
+        if class_matches_selfies:
+            class_gen_metrics = self.evaluator.evaluate(class_matches_selfies, target_class, show_progress=False)
             results.update({
                 "uniqueness_class": class_gen_metrics["uniqueness"],
                 "novelty_class": class_gen_metrics["novelty"],
@@ -263,7 +276,9 @@ class ClassGuidedDesigner:
                 "std_sa_class": 0.0,
             })
 
-        results["class_matches_smiles"] = class_matches
+        # Store both SELFIES and p-SMILES
+        results["class_matches_selfies"] = class_matches_selfies
+        results["class_matches_smiles"] = class_matches_psmiles  # p-SMILES for backwards compatibility
 
         return results
 
@@ -297,33 +312,39 @@ class ClassGuidedDesigner:
         if show_progress:
             print(f"Joint design: {target_class} with property={target_value}+/-{epsilon}")
 
-        # Generate candidates
-        _, all_smiles = self.sampler.sample_batch(
+        # Generate candidates (sampler returns SELFIES)
+        _, all_selfies = self.sampler.sample_batch(
             num_candidates, seq_length, batch_size, show_progress
         )
 
-        # Filter valid
-        valid_smiles = []
-        for smiles in all_smiles:
-            if check_validity(smiles) and count_stars(smiles) == 2:
-                valid_smiles.append(smiles)
+        # Convert SELFIES to p-SMILES and filter valid
+        valid_selfies = []
+        valid_psmiles = []
+        for selfies in all_selfies:
+            psmiles = selfies_to_psmiles(selfies)
+            if psmiles is not None and check_validity(psmiles) and count_stars(psmiles) == 2:
+                valid_selfies.append(selfies)
+                valid_psmiles.append(psmiles)
 
-        if len(valid_smiles) == 0:
+        if len(valid_selfies) == 0:
             return self._empty_joint_results(target_class, target_value, epsilon, num_candidates)
 
-        # Filter by class
-        class_matches = self.classifier.filter_by_class(valid_smiles, target_class)
+        # Filter by class (using p-SMILES)
+        class_matches_psmiles = self.classifier.filter_by_class(valid_psmiles, target_class)
+        # Get corresponding SELFIES
+        class_matches_selfies = [valid_selfies[valid_psmiles.index(s)] for s in class_matches_psmiles]
 
-        if len(class_matches) == 0:
+        if len(class_matches_psmiles) == 0:
             return self._empty_joint_results(target_class, target_value, epsilon, num_candidates,
-                                             n_valid=len(valid_smiles))
+                                             n_valid=len(valid_selfies))
 
-        # Predict properties for class matches
-        predictions = self._predict_batch(class_matches, batch_size)
+        # Predict properties for class matches (use SELFIES for tokenization)
+        predictions = self._predict_batch(class_matches_selfies, batch_size)
 
         # Find joint hits
         joint_hits_mask = np.abs(predictions - target_value) < epsilon
-        joint_hits_smiles = [s for s, h in zip(class_matches, joint_hits_mask) if h]
+        joint_hits_selfies = [s for s, h in zip(class_matches_selfies, joint_hits_mask) if h]
+        joint_hits_psmiles = [s for s, h in zip(class_matches_psmiles, joint_hits_mask) if h]
         joint_hits_predictions = predictions[joint_hits_mask]
 
         # Compute metrics (round floats to 4 decimal places)
@@ -332,26 +353,26 @@ class ClassGuidedDesigner:
             "target_value": round(target_value, 4),
             "epsilon": round(epsilon, 4),
             "n_generated": num_candidates,
-            "n_valid": len(valid_smiles),
-            "n_class_matches": len(class_matches),
-            "n_joint_hits": len(joint_hits_smiles),
-            "class_success_rate": round(len(class_matches) / len(valid_smiles), 4) if valid_smiles else 0.0,
-            "joint_success_rate": round(len(joint_hits_smiles) / len(valid_smiles), 4) if valid_smiles else 0.0,
+            "n_valid": len(valid_selfies),
+            "n_class_matches": len(class_matches_psmiles),
+            "n_joint_hits": len(joint_hits_psmiles),
+            "class_success_rate": round(len(class_matches_psmiles) / len(valid_selfies), 4) if valid_selfies else 0.0,
+            "joint_success_rate": round(len(joint_hits_psmiles) / len(valid_selfies), 4) if valid_selfies else 0.0,
             "pred_mean_class": round(float(np.mean(predictions)), 4),
             "pred_std_class": round(float(np.std(predictions)), 4),
             "pred_mean_joint": round(float(np.mean(joint_hits_predictions)), 4) if len(joint_hits_predictions) > 0 else 0.0,
             "pred_std_joint": round(float(np.std(joint_hits_predictions)), 4) if len(joint_hits_predictions) > 0 else 0.0,
         }
 
-        # SA statistics (round to 4 decimal places)
-        if class_matches:
-            sa_class = [compute_sa_score(s) for s in class_matches]
+        # SA statistics (use p-SMILES for SA computation)
+        if class_matches_psmiles:
+            sa_class = [compute_sa_score(s) for s in class_matches_psmiles]
             sa_class = [s for s in sa_class if s is not None]
             results["sa_mean_class"] = round(float(np.mean(sa_class)), 4) if sa_class else 0.0
             results["sa_std_class"] = round(float(np.std(sa_class)), 4) if sa_class else 0.0
 
-        if joint_hits_smiles:
-            sa_joint = [compute_sa_score(s) for s in joint_hits_smiles]
+        if joint_hits_psmiles:
+            sa_joint = [compute_sa_score(s) for s in joint_hits_psmiles]
             sa_joint = [s for s in sa_joint if s is not None]
             results["sa_mean_joint"] = round(float(np.mean(sa_joint)), 4) if sa_joint else 0.0
             results["sa_std_joint"] = round(float(np.std(sa_joint)), 4) if sa_joint else 0.0
@@ -359,18 +380,21 @@ class ClassGuidedDesigner:
             results["sa_mean_joint"] = 0.0
             results["sa_std_joint"] = 0.0
 
-        results["class_matches_smiles"] = class_matches
-        results["joint_hits_smiles"] = joint_hits_smiles
+        # Store both SELFIES and p-SMILES
+        results["class_matches_selfies"] = class_matches_selfies
+        results["class_matches_smiles"] = class_matches_psmiles  # p-SMILES for backwards compatibility
+        results["joint_hits_selfies"] = joint_hits_selfies
+        results["joint_hits_smiles"] = joint_hits_psmiles  # p-SMILES for backwards compatibility
 
         return results
 
-    def _predict_batch(self, smiles_list: List[str], batch_size: int) -> np.ndarray:
-        """Predict properties for SMILES list."""
+    def _predict_batch(self, selfies_list: List[str], batch_size: int) -> np.ndarray:
+        """Predict properties for SELFIES list."""
         self.property_predictor.eval()
         predictions = []
 
-        for i in range(0, len(smiles_list), batch_size):
-            batch = smiles_list[i:i+batch_size]
+        for i in range(0, len(selfies_list), batch_size):
+            batch = selfies_list[i:i+batch_size]
             encoded = self.tokenizer.batch_encode(batch)
             input_ids = torch.tensor(encoded['input_ids'], device=self.device)
             attention_mask = torch.tensor(encoded['attention_mask'], device=self.device)

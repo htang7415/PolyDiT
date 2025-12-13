@@ -5,6 +5,7 @@ __pycache__/
 results/
 Data/
 *Data
+Generated_polymers
 
 # 
 experiments*/

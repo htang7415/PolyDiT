@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from src.utils.config import load_config
 from src.utils.plotting import PlotUtils
-from src.data.tokenizer import PSmilesTokenizer
+from src.data.tokenizer import GroupSELFIESTokenizer
 from src.data.dataset import PolymerDataset, collate_fn
 from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
@@ -45,7 +45,7 @@ def main(args):
 
     # Load tokenizer
     print("\n1. Loading tokenizer...")
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    tokenizer = GroupSELFIESTokenizer.load(results_dir / 'tokenizer.pkl')
     print(f"Vocabulary size: {tokenizer.vocab_size}")
 
     # Load data

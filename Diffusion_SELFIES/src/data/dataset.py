@@ -3,29 +3,30 @@
 import torch
 from torch.utils.data import Dataset
 import pandas as pd
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from tqdm import tqdm
 
 from .tokenizer import PSmilesTokenizer
+from .selfies_tokenizer import SelfiesTokenizer
 
 
 class PolymerDataset(Dataset):
-    """Dataset for unlabeled polymer SMILES (diffusion training)."""
+    """Dataset for unlabeled polymer SELFIES/SMILES (diffusion training)."""
 
     def __init__(
         self,
         df: pd.DataFrame,
-        tokenizer: PSmilesTokenizer,
-        smiles_col: str = 'p_smiles',
+        tokenizer: Union[PSmilesTokenizer, SelfiesTokenizer],
+        smiles_col: str = 'selfies',
         max_length: Optional[int] = None,
         cache_tokenization: bool = False
     ):
         """Initialize dataset.
 
         Args:
-            df: DataFrame with SMILES data.
-            tokenizer: Tokenizer instance.
-            smiles_col: Name of SMILES column.
+            df: DataFrame with SELFIES/SMILES data.
+            tokenizer: Tokenizer instance (SelfiesTokenizer or PSmilesTokenizer).
+            smiles_col: Name of SELFIES/SMILES column (default: 'selfies').
             max_length: Maximum sequence length (overrides tokenizer).
             cache_tokenization: Whether to pre-tokenize and cache all samples.
         """
@@ -87,9 +88,9 @@ class PropertyDataset(Dataset):
     def __init__(
         self,
         df: pd.DataFrame,
-        tokenizer: PSmilesTokenizer,
+        tokenizer: Union[PSmilesTokenizer, SelfiesTokenizer],
         property_name: str,
-        smiles_col: str = 'p_smiles',
+        smiles_col: str = 'selfies',
         max_length: Optional[int] = None,
         normalize: bool = False,
         mean: Optional[float] = None,
@@ -99,10 +100,10 @@ class PropertyDataset(Dataset):
         """Initialize dataset.
 
         Args:
-            df: DataFrame with SMILES and property data.
-            tokenizer: Tokenizer instance.
+            df: DataFrame with SELFIES/SMILES and property data.
+            tokenizer: Tokenizer instance (SelfiesTokenizer or PSmilesTokenizer).
             property_name: Name of property column.
-            smiles_col: Name of SMILES column.
+            smiles_col: Name of SELFIES/SMILES column (default: 'selfies').
             max_length: Maximum sequence length.
             normalize: Whether to normalize property values.
             mean: Mean for normalization (computed from data if not provided).

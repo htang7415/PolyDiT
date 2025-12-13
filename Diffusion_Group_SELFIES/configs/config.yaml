@@ -19,8 +19,9 @@ data:
   property_val_ratio: 0.1
   property_test_ratio: 0.1
 
-# Tokenizer
+# Tokenizer (Group SELFIES)
 tokenizer:
+  type: "group_selfies"
   special_tokens:
     pad: "[PAD]"
     mask: "[MASK]"
@@ -28,6 +29,12 @@ tokenizer:
     eos: "[EOS]"
     unk: "[UNK]"
   max_length: 128
+  placeholder: "[I+3]"  # Placeholder for '*' (polymer connection point)
+
+# Group SELFIES settings
+group_selfies:
+  max_groups: 2000          # Maximum number of groups in grammar
+  diversity_selection: "simple"  # Selection method for fragments
 
 # Backbone model (GPT-2-small-like)
 backbone:

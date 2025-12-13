@@ -16,11 +16,12 @@ import numpy as np
 from src.utils.config import load_config
 from src.utils.plotting import PlotUtils
 from src.utils.chemistry import compute_sa_score
-from src.data.tokenizer import PSmilesTokenizer
+from src.data.selfies_tokenizer import SelfiesTokenizer
 from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
 from src.sampling.sampler import ConstrainedSampler
 from src.evaluation.generative_metrics import GenerativeEvaluator
+from src.utils.selfies_utils import selfies_to_psmiles
 
 
 def main(args):
@@ -45,13 +46,13 @@ def main(args):
     print("=" * 50)
 
     # Load tokenizer
-    print("\n1. Loading tokenizer...")
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    print("\n1. Loading SELFIES tokenizer...")
+    tokenizer = SelfiesTokenizer.load(results_dir / 'tokenizer.json')
 
-    # Load training data for novelty computation
+    # Load training data for novelty computation (use p_smiles for comparison)
     print("\n2. Loading training data...")
     train_df = pd.read_csv(results_dir / 'train_unlabeled.csv')
-    training_smiles = set(train_df['p_smiles'].tolist())
+    training_smiles = set(train_df['p_smiles'].tolist())  # p-SMILES for novelty computation
     print(f"Training set size: {len(training_smiles)}")
 
     # Load model
@@ -99,12 +100,12 @@ def main(args):
         device=device
     )
 
-    # Sample
+    # Sample (outputs SELFIES)
     batch_size = args.batch_size or config['sampling']['batch_size']
     print(f"\n5. Sampling {args.num_samples} polymers (batch_size={batch_size})...")
     if args.variable_length:
         print(f"   Using variable length sampling (range: {args.min_length}-{args.max_length})")
-        _, generated_smiles = sampler.sample_variable_length(
+        _, generated_selfies = sampler.sample_variable_length(
             num_samples=args.num_samples,
             length_range=(args.min_length, args.max_length),
             batch_size=batch_size,
@@ -112,23 +113,32 @@ def main(args):
             show_progress=True
         )
     else:
-        _, generated_smiles = sampler.sample_batch(
+        _, generated_selfies = sampler.sample_batch(
             num_samples=args.num_samples,
             seq_length=tokenizer.max_length,
             batch_size=batch_size,
             show_progress=True
         )
 
-    # Save generated samples
-    samples_df = pd.DataFrame({'smiles': generated_smiles})
-    samples_df.to_csv(metrics_dir / 'generated_samples.csv', index=False)
-    print(f"Saved {len(generated_smiles)} generated samples")
+    # Save generated samples (both SELFIES and converted p-SMILES)
+    print(f"Converting {len(generated_selfies)} generated SELFIES to p-SMILES...")
+    generated_psmiles = []
+    for selfies in generated_selfies:
+        psmiles = selfies_to_psmiles(selfies)
+        generated_psmiles.append(psmiles if psmiles else "")
 
-    # Evaluate
+    samples_df = pd.DataFrame({
+        'selfies': generated_selfies,
+        'p_smiles': generated_psmiles
+    })
+    samples_df.to_csv(metrics_dir / 'generated_samples.csv', index=False)
+    print(f"Saved {len(generated_selfies)} generated samples")
+
+    # Evaluate (evaluator handles SELFIES -> p-SMILES conversion internally)
     print("\n6. Evaluating generative metrics...")
-    evaluator = GenerativeEvaluator(training_smiles)
+    evaluator = GenerativeEvaluator(training_smiles, input_format="selfies")
     metrics = evaluator.evaluate(
-        generated_smiles,
+        generated_selfies,
         sample_id=f'uncond_{args.num_samples}_best_checkpoint',
         show_progress=True
     )
@@ -139,6 +149,8 @@ def main(args):
 
     # Print metrics
     print("\nGenerative Metrics:")
+    print(f"  Conversion success rate: {metrics.get('conversion_success_rate', 1.0):.4f}")
+    print(f"  Placeholder correct rate: {metrics.get('placeholder_correct_rate', 1.0):.4f}")
     print(f"  Validity: {metrics['validity']:.4f}")
     print(f"  Uniqueness: {metrics['uniqueness']:.4f}")
     print(f"  Novelty: {metrics['novelty']:.4f}")
@@ -155,13 +167,13 @@ def main(args):
         dpi=config['plotting']['dpi']
     )
 
-    # Get valid samples
-    valid_smiles = evaluator.get_valid_samples(generated_smiles, require_two_stars=True)
+    # Get valid samples (returns tuple: valid_psmiles, valid_selfies)
+    valid_psmiles, valid_selfies = evaluator.get_valid_samples(generated_selfies, require_two_stars=True)
 
-    # SA histogram: train vs generated
+    # SA histogram: train vs generated (using p-SMILES for SA computation)
     train_sa = [compute_sa_score(s) for s in list(training_smiles)[:5000]]
     train_sa = [s for s in train_sa if s is not None]
-    gen_sa = [compute_sa_score(s) for s in valid_smiles[:5000]]
+    gen_sa = [compute_sa_score(s) for s in valid_psmiles[:5000]]
     gen_sa = [s for s in gen_sa if s is not None]
 
     plotter.histogram(
@@ -175,14 +187,14 @@ def main(args):
         style='step'
     )
 
-    # Length histogram: train vs generated
+    # Length histogram: train vs generated (p-SMILES length)
     train_lengths = [len(s) for s in list(training_smiles)[:5000]]
-    gen_lengths = [len(s) for s in valid_smiles[:5000]]
+    gen_lengths = [len(s) for s in valid_psmiles[:5000]]
 
     plotter.histogram(
         data=[train_lengths, gen_lengths],
         labels=['Train', 'Generated'],
-        xlabel='SMILES Length',
+        xlabel='p-SMILES Length',
         ylabel='Count',
         title='Length: Train vs Generated',
         save_path=figures_dir / 'length_hist_train_vs_uncond.png',
@@ -190,11 +202,11 @@ def main(args):
         style='step'
     )
 
-    # Star count histogram
+    # Star count histogram (using p-SMILES)
     from collections import Counter
     from src.utils.chemistry import count_stars
 
-    star_counts = [count_stars(s) for s in valid_smiles]
+    star_counts = [count_stars(s) for s in valid_psmiles]
     star_counter = Counter(star_counts)
 
     plotter.bar_chart(

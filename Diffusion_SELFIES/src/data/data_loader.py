@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from sklearn.model_selection import train_test_split
 
 from ..utils.chemistry import canonicalize_smiles, is_valid_psmiles, compute_sa_score
+from ..utils.selfies_utils import psmiles_to_selfies, verify_roundtrip
 
 
 class PolymerDataLoader:
@@ -113,6 +114,51 @@ class PolymerDataLoader:
 
         return df.reset_index(drop=True)
 
+    def convert_to_selfies(
+        self,
+        df: pd.DataFrame,
+        smiles_col: str = 'p_smiles'
+    ) -> pd.DataFrame:
+        """Convert p-SMILES to SELFIES and add 'selfies' column.
+
+        Args:
+            df: DataFrame with p-SMILES column.
+            smiles_col: Name of p-SMILES column.
+
+        Returns:
+            DataFrame with 'selfies' column added. Rows with failed conversions are removed.
+        """
+        df = df.copy()
+
+        # Convert all p-SMILES to SELFIES
+        print(f"Converting {len(df)} p-SMILES to SELFIES...")
+        df['selfies'] = df[smiles_col].apply(psmiles_to_selfies)
+
+        # Count conversion failures
+        failed = df['selfies'].isna().sum()
+        if failed > 0:
+            print(f"Warning: {failed}/{len(df)} conversions failed")
+
+        # Remove failed conversions
+        df = df[df['selfies'].notna()].copy()
+
+        # Verify round-trip for a sample (first 100 or all if less)
+        if self.config.get('selfies', {}).get('verify_roundtrip', False):
+            sample_size = min(100, len(df))
+            print(f"Verifying round-trip conversion for {sample_size} samples...")
+            roundtrip_success = 0
+            for idx in range(sample_size):
+                success, _, _ = verify_roundtrip(df.iloc[idx][smiles_col])
+                if success:
+                    roundtrip_success += 1
+
+            roundtrip_rate = roundtrip_success / sample_size
+            print(f"Round-trip success: {roundtrip_success}/{sample_size} ({100*roundtrip_rate:.2f}%)")
+
+        print(f"Successfully converted {len(df)} p-SMILES to SELFIES")
+
+        return df.reset_index(drop=True)
+
     def compute_sa_scores(
         self,
         df: pd.DataFrame,
@@ -191,10 +237,10 @@ class PolymerDataLoader:
         )
 
     def prepare_unlabeled_data(self) -> Dict[str, pd.DataFrame]:
-        """Prepare unlabeled data: load, clean, split.
+        """Prepare unlabeled data: load, clean, split, convert to SELFIES.
 
         Returns:
-            Dictionary with 'train' and 'val' DataFrames.
+            Dictionary with 'train' and 'val' DataFrames (with both 'p_smiles' and 'selfies' columns).
         """
         # Load data
         df = self.load_unlabeled_data()
@@ -203,6 +249,9 @@ class PolymerDataLoader:
         # Clean and filter
         df = self.clean_and_filter(df)
         print(f"After cleaning: {len(df)} valid p-SMILES")
+
+        # Convert to SELFIES
+        df = self.convert_to_selfies(df)
 
         # Compute SA scores
         df = self.compute_sa_scores(df)
@@ -214,13 +263,13 @@ class PolymerDataLoader:
         return {'train': train_df, 'val': val_df}
 
     def prepare_property_data(self, property_name: str) -> Dict[str, pd.DataFrame]:
-        """Prepare property data: load, clean, split.
+        """Prepare property data: load, clean, split, convert to SELFIES.
 
         Args:
             property_name: Name of the property.
 
         Returns:
-            Dictionary with 'train', 'val', and 'test' DataFrames.
+            Dictionary with 'train', 'val', and 'test' DataFrames (with both 'p_smiles' and 'selfies' columns).
         """
         # Load data
         df = self.load_property_data(property_name)
@@ -229,6 +278,9 @@ class PolymerDataLoader:
         # Clean and filter
         df = self.clean_and_filter(df)
         print(f"After cleaning: {len(df)} valid p-SMILES")
+
+        # Convert to SELFIES
+        df = self.convert_to_selfies(df)
 
         # Compute SA scores
         df = self.compute_sa_scores(df)

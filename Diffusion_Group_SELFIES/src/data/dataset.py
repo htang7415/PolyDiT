@@ -1,4 +1,4 @@
-"""PyTorch Dataset classes for polymer data."""
+"""PyTorch Dataset classes for polymer data with Group SELFIES tokenization."""
 
 import torch
 from torch.utils.data import Dataset
@@ -6,16 +6,19 @@ import pandas as pd
 from typing import Dict, List, Optional
 from tqdm import tqdm
 
-from .tokenizer import PSmilesTokenizer
+from .tokenizer import GroupSELFIESTokenizer
 
 
 class PolymerDataset(Dataset):
-    """Dataset for unlabeled polymer SMILES (diffusion training)."""
+    """Dataset for unlabeled polymer data (diffusion training).
+
+    Uses Group SELFIES tokenization internally while storing p-SMILES.
+    """
 
     def __init__(
         self,
         df: pd.DataFrame,
-        tokenizer: PSmilesTokenizer,
+        tokenizer: GroupSELFIESTokenizer,
         smiles_col: str = 'p_smiles',
         max_length: Optional[int] = None,
         cache_tokenization: bool = False
@@ -82,12 +85,15 @@ class PolymerDataset(Dataset):
 
 
 class PropertyDataset(Dataset):
-    """Dataset for property prediction (supervised training)."""
+    """Dataset for property prediction (supervised training).
+
+    Uses Group SELFIES tokenization internally while storing p-SMILES.
+    """
 
     def __init__(
         self,
         df: pd.DataFrame,
-        tokenizer: PSmilesTokenizer,
+        tokenizer: GroupSELFIESTokenizer,
         property_name: str,
         smiles_col: str = 'p_smiles',
         max_length: Optional[int] = None,

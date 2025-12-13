@@ -1,4 +1,7 @@
-"""Property-guided inverse design (generate-then-filter)."""
+"""Property-guided inverse design (generate-then-filter).
+
+Generates SELFIES strings, converts to p-SMILES for validation and metrics.
+"""
 
 import torch
 import numpy as np
@@ -7,11 +10,15 @@ from typing import List, Dict, Optional, Tuple
 from tqdm import tqdm
 
 from ..utils.chemistry import check_validity, count_stars, compute_sa_score
+from ..utils.selfies_utils import selfies_to_psmiles
 from .generative_metrics import GenerativeEvaluator
 
 
 class InverseDesigner:
-    """Inverse design via generate-then-filter approach."""
+    """Inverse design via generate-then-filter approach.
+
+    Generates SELFIES strings, converts to p-SMILES for validation and metrics.
+    """
 
     def __init__(
         self,
@@ -25,10 +32,10 @@ class InverseDesigner:
         """Initialize inverse designer.
 
         Args:
-            sampler: Constrained sampler for generation.
+            sampler: Constrained sampler for generation (generates SELFIES).
             property_predictor: Property prediction model.
-            tokenizer: Tokenizer instance.
-            training_smiles: Set of training SMILES for novelty.
+            tokenizer: Tokenizer instance (SelfiesTokenizer).
+            training_smiles: Set of training p-SMILES for novelty.
             device: Device for computation.
             normalization_params: Dict with 'mean' and 'std' for denormalizing predictions.
         """
@@ -38,7 +45,8 @@ class InverseDesigner:
         self.training_smiles = training_smiles
         self.device = device
         self.normalization_params = normalization_params or {'mean': 0.0, 'std': 1.0}
-        self.evaluator = GenerativeEvaluator(training_smiles)
+        # Use input_format="selfies" since sampler generates SELFIES
+        self.evaluator = GenerativeEvaluator(training_smiles, input_format="selfies")
 
     def design(
         self,
@@ -62,32 +70,36 @@ class InverseDesigner:
         Returns:
             Dictionary with results.
         """
-        # Generate candidates
+        # Generate candidates (sampler returns SELFIES)
         if show_progress:
             print(f"Generating {num_candidates} candidates...")
 
-        _, all_smiles = self.sampler.sample_batch(
+        _, all_selfies = self.sampler.sample_batch(
             num_candidates, seq_length, batch_size, show_progress
         )
 
-        # Filter to valid molecules with exactly 2 stars
-        valid_smiles = []
-        for smiles in all_smiles:
-            if check_validity(smiles) and count_stars(smiles) == 2:
-                valid_smiles.append(smiles)
+        # Convert SELFIES to p-SMILES and filter to valid molecules with exactly 2 stars
+        valid_selfies = []
+        valid_psmiles = []
+        for selfies in all_selfies:
+            psmiles = selfies_to_psmiles(selfies)
+            if psmiles is not None and check_validity(psmiles) and count_stars(psmiles) == 2:
+                valid_selfies.append(selfies)
+                valid_psmiles.append(psmiles)
 
         if show_progress:
-            print(f"Valid candidates: {len(valid_smiles)} / {num_candidates}")
+            print(f"Valid candidates: {len(valid_selfies)} / {num_candidates}")
 
-        if len(valid_smiles) == 0:
+        if len(valid_selfies) == 0:
             return self._empty_results(target_value, epsilon, num_candidates)
 
-        # Predict properties
-        predictions = self._predict_batch(valid_smiles, batch_size, show_progress)
+        # Predict properties (use SELFIES for tokenization)
+        predictions = self._predict_batch(valid_selfies, batch_size, show_progress)
 
         # Find hits
         hits_mask = np.abs(predictions - target_value) < epsilon
-        hits_smiles = [s for s, h in zip(valid_smiles, hits_mask) if h]
+        hits_selfies = [s for s, h in zip(valid_selfies, hits_mask) if h]
+        hits_psmiles = [s for s, h in zip(valid_psmiles, hits_mask) if h]
         hits_predictions = predictions[hits_mask]
 
         # Compute metrics (round floats to 4 decimal places)
@@ -95,17 +107,17 @@ class InverseDesigner:
             "target_value": round(target_value, 4),
             "epsilon": round(epsilon, 4),
             "n_generated": num_candidates,
-            "n_valid": len(valid_smiles),
-            "n_hits": len(hits_smiles),
-            "success_rate": round(len(hits_smiles) / len(valid_smiles), 4) if valid_smiles else 0.0,
+            "n_valid": len(valid_selfies),
+            "n_hits": len(hits_selfies),
+            "success_rate": round(len(hits_selfies) / len(valid_selfies), 4) if valid_selfies else 0.0,
             "pred_mean_valid": round(float(np.mean(predictions)), 4),
             "pred_std_valid": round(float(np.std(predictions)), 4),
             "pred_mean_hits": round(float(np.mean(hits_predictions)), 4) if len(hits_predictions) > 0 else 0.0,
             "pred_std_hits": round(float(np.std(hits_predictions)), 4) if len(hits_predictions) > 0 else 0.0,
         }
 
-        # Generative metrics for all generated samples (validity = n_valid / n_total)
-        gen_metrics = self.evaluator.evaluate(all_smiles, "all_generated", show_progress=False)
+        # Generative metrics for all generated SELFIES (evaluator handles conversion internally)
+        gen_metrics = self.evaluator.evaluate(all_selfies, "all_generated", show_progress=False)
         results.update({
             "validity": gen_metrics["validity"],
             "uniqueness": gen_metrics["uniqueness"],
@@ -113,15 +125,15 @@ class InverseDesigner:
             "avg_diversity": gen_metrics["avg_diversity"],
         })
 
-        # SA statistics (round to 4 decimal places)
-        sa_valid = self._compute_sa_scores(valid_smiles)
+        # SA statistics (use p-SMILES for SA computation)
+        sa_valid = self._compute_sa_scores(valid_psmiles)
         results.update({
             "sa_mean_valid": round(float(np.mean(sa_valid)), 4) if sa_valid else 0.0,
             "sa_std_valid": round(float(np.std(sa_valid)), 4) if sa_valid else 0.0,
         })
 
-        if hits_smiles:
-            sa_hits = self._compute_sa_scores(hits_smiles)
+        if hits_psmiles:
+            sa_hits = self._compute_sa_scores(hits_psmiles)
             results.update({
                 "sa_mean_hits": round(float(np.mean(sa_hits)), 4) if sa_hits else 0.0,
                 "sa_std_hits": round(float(np.std(sa_hits)), 4) if sa_hits else 0.0,
@@ -129,10 +141,12 @@ class InverseDesigner:
         else:
             results.update({"sa_mean_hits": 0.0, "sa_std_hits": 0.0})
 
-        # Store samples (round predictions to 4 decimal places)
-        results["valid_smiles"] = valid_smiles
+        # Store samples (both SELFIES and p-SMILES)
+        results["valid_selfies"] = valid_selfies
+        results["valid_smiles"] = valid_psmiles  # p-SMILES for backwards compatibility
         results["predictions"] = [round(p, 4) for p in predictions.tolist()]
-        results["hits_smiles"] = hits_smiles
+        results["hits_selfies"] = hits_selfies
+        results["hits_smiles"] = hits_psmiles  # p-SMILES for backwards compatibility
         results["hits_predictions"] = [round(p, 4) for p in hits_predictions.tolist()] if len(hits_predictions) > 0 else []
 
         return results
@@ -180,14 +194,14 @@ class InverseDesigner:
 
     def _predict_batch(
         self,
-        smiles_list: List[str],
+        selfies_list: List[str],
         batch_size: int,
         show_progress: bool = True
     ) -> np.ndarray:
-        """Predict properties for a batch of SMILES.
+        """Predict properties for a batch of SELFIES.
 
         Args:
-            smiles_list: List of SMILES.
+            selfies_list: List of SELFIES strings.
             batch_size: Batch size.
             show_progress: Whether to show progress.
 
@@ -197,18 +211,18 @@ class InverseDesigner:
         self.property_predictor.eval()
         predictions = []
 
-        num_batches = (len(smiles_list) + batch_size - 1) // batch_size
+        num_batches = (len(selfies_list) + batch_size - 1) // batch_size
         iterator = range(num_batches)
         if show_progress:
             iterator = tqdm(iterator, desc="Predicting")
 
         for i in iterator:
             start = i * batch_size
-            end = min(start + batch_size, len(smiles_list))
-            batch_smiles = smiles_list[start:end]
+            end = min(start + batch_size, len(selfies_list))
+            batch_selfies = selfies_list[start:end]
 
-            # Encode
-            encoded = self.tokenizer.batch_encode(batch_smiles)
+            # Encode SELFIES
+            encoded = self.tokenizer.batch_encode(batch_selfies)
             input_ids = torch.tensor(encoded['input_ids'], device=self.device)
             attention_mask = torch.tensor(encoded['attention_mask'], device=self.device)
 
@@ -273,8 +287,10 @@ class InverseDesigner:
             "sa_std_valid": 0.0,
             "sa_mean_hits": 0.0,
             "sa_std_hits": 0.0,
-            "valid_smiles": [],
+            "valid_selfies": [],
+            "valid_smiles": [],  # p-SMILES for backwards compatibility
             "predictions": [],
-            "hits_smiles": [],
+            "hits_selfies": [],
+            "hits_smiles": [],  # p-SMILES for backwards compatibility
             "hits_predictions": []
         }

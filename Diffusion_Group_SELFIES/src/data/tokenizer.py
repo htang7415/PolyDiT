@@ -1,143 +1,278 @@
-"""p-SMILES Tokenizer with deterministic, invertible tokenization."""
+"""Group SELFIES Tokenizer with grammar-based, invertible tokenization."""
 
 import re
-import json
+import pickle
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from tqdm import tqdm
+
+from rdkit import Chem
+from rdkit import RDLogger
+from group_selfies import GroupGrammar, fragment_mols, Group
+from group_selfies.utils import fragment_utils as fu
+
+# Silence RDKit warnings
+RDLogger.DisableLog('rdApp.*')
 
 
-class PSmilesTokenizer:
-    """Deterministic, invertible tokenizer for p-SMILES strings.
+def _select_diverse_set_simple(l, k, weights=None):
+    """Simple non-recursive replacement for fragment_utils.select_diverse_set.
 
-    Tokenization rules (priority order):
-    1. Bracket tokens: [...] blocks -> one token
-    2. Ring indices with %: %10, %11, etc. -> one token
-    3. Multi-character atoms: Cl, Br, Si, etc. -> one token
-    4. Single-character tokens: atoms, digits, symbols
+    Avoids RDKit Tanimoto distance computation and recursion issues.
+    """
+    if not l:
+        return []
+    if k >= len(l):
+        return list(l)
+    if weights is not None:
+        items = list(zip(l, weights))
+        items.sort(key=lambda x: x[1], reverse=True)
+        return [x[0] for x in items[:k]]
+    return list(l)[:k]
+
+
+# Patch the fragment_utils to use simple selection
+fu.select_diverse_set = _select_diverse_set_simple
+
+
+class GroupSELFIESTokenizer:
+    """Grammar-based tokenizer for Group SELFIES representation.
+
+    Converts p-SMILES to Group SELFIES tokens using a data-dependent grammar.
+    The grammar is built from training molecules and must be saved/loaded with
+    the tokenizer.
+
+    Tokenization flow:
+        p-SMILES (with *) -> p-SMILES (with [I+3]) -> RDKit Mol -> Group SELFIES tokens
+
+    Detokenization flow:
+        Group SELFIES tokens -> RDKit Mol -> p-SMILES (with [I+3]) -> p-SMILES (with *)
     """
 
-    # Multi-character atoms (must be matched before single chars)
-    MULTI_CHAR_ATOMS = [
-        'Cl', 'Br', 'Si', 'Na', 'Li', 'Ca', 'Mg', 'Al', 'Sn', 'Sb', 'Se',
-        'Fe', 'Cu', 'Zn', 'Ni', 'Co', 'Mn', 'Cr', 'Ti', 'Pt', 'Pd', 'Au',
-        'Ag', 'Hg', 'Pb', 'Bi', 'As', 'Te', 'Ge', 'Ga', 'In', 'Tl'
-    ]
-
-    # Single-character atoms
-    SINGLE_ATOMS = list('BCNOFPSIHcnosp')
-
-    # Symbols
-    SYMBOLS = list('=-#/\\().@+')
-
-    # Digits
-    DIGITS = list('0123456789')
-
-    # Special tokens
+    # Special tokens (same as p-SMILES tokenizer for compatibility)
     SPECIAL_TOKENS = ['[PAD]', '[MASK]', '[BOS]', '[EOS]', '[UNK]']
+
+    # Placeholder for '*' (polymer connection point)
+    # Using [I+3] as it's unlikely to appear in real molecules
+    PLACEHOLDER_SMILES = "[I+3]"
 
     def __init__(
         self,
+        grammar: Optional[GroupGrammar] = None,
         vocab: Optional[Dict[str, int]] = None,
         max_length: int = 128
     ):
         """Initialize tokenizer.
 
         Args:
+            grammar: Pre-built GroupGrammar for encoding/decoding.
             vocab: Pre-built vocabulary (token -> id mapping).
             max_length: Maximum sequence length.
         """
+        self.grammar = grammar
         self.max_length = max_length
         self.vocab = vocab if vocab else {}
         self.id_to_token = {v: k for k, v in self.vocab.items()} if vocab else {}
 
-        # Compile regex patterns
-        self._compile_patterns()
+        # Cache placeholder token info
+        self._placeholder_token = None
+        self._placeholder_token_id = None
 
-    def _compile_patterns(self):
-        """Compile regex patterns for tokenization."""
-        # Pattern for bracket tokens: [...]
-        self.bracket_pattern = re.compile(r'\[[^\[\]]+\]')
-        # Pattern for ring indices with %
-        self.ring_pattern = re.compile(r'%\d{2}')
-        # Pattern for multi-character atoms
-        self.multi_atom_pattern = re.compile(
-            '|'.join(sorted(self.MULTI_CHAR_ATOMS, key=len, reverse=True))
-        )
+    def _star_to_placeholder(self, smiles: str) -> str:
+        """Replace '*' with placeholder SMILES atom."""
+        return smiles.replace("*", self.PLACEHOLDER_SMILES)
+
+    def _placeholder_to_star(self, smiles: str) -> str:
+        """Replace placeholder atom back to '*'."""
+        return smiles.replace(self.PLACEHOLDER_SMILES, "*")
+
+    def _smiles_to_mol(self, smiles: str) -> Optional[Chem.Mol]:
+        """Convert SMILES string to RDKit Mol object."""
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            return mol
+        except Exception:
+            return None
+
+    def _mol_to_smiles(self, mol: Chem.Mol, canonical: bool = True) -> Optional[str]:
+        """Convert RDKit Mol to SMILES string."""
+        try:
+            return Chem.MolToSmiles(mol, canonical=canonical)
+        except Exception:
+            return None
 
     def tokenize(self, smiles: str) -> List[str]:
-        """Tokenize a p-SMILES string.
+        """Tokenize a p-SMILES string to Group SELFIES tokens.
 
         Args:
-            smiles: Input p-SMILES string.
+            smiles: Input p-SMILES string (with '*' for polymer connections).
 
         Returns:
-            List of tokens.
+            List of Group SELFIES tokens.
         """
+        if self.grammar is None:
+            raise ValueError("Grammar not initialized. Call build_vocab_and_grammar first.")
+
+        # Replace * with placeholder
+        smiles_ph = self._star_to_placeholder(smiles)
+
+        # Convert to RDKit Mol
+        mol = self._smiles_to_mol(smiles_ph)
+        if mol is None:
+            # Return UNK token for invalid SMILES
+            return ['[UNK]']
+
+        try:
+            # Encode to Group SELFIES
+            gsf_string = self.grammar.full_encoder(mol)
+
+            # Parse Group SELFIES string into tokens
+            # Group SELFIES format: [token1][token2][token3]...
+            tokens = self._parse_gsf_string(gsf_string)
+            return tokens
+        except Exception:
+            return ['[UNK]']
+
+    def _parse_gsf_string(self, gsf_string: str) -> List[str]:
+        """Parse a Group SELFIES string into individual tokens.
+
+        Group SELFIES tokens are bracket-enclosed: [token1][token2]...
+        """
+        if not gsf_string:
+            return []
+
         tokens = []
+        # Match all bracket-enclosed tokens
+        pattern = re.compile(r'\[[^\[\]]+\]|:[0-9]+[A-Za-z0-9]+')
+
         i = 0
-        n = len(smiles)
-
-        while i < n:
-            # Try bracket token first
-            if smiles[i] == '[':
-                match = self.bracket_pattern.match(smiles, i)
+        while i < len(gsf_string):
+            # Check for bracket token
+            if gsf_string[i] == '[':
+                match = re.match(r'\[[^\[\]]+\]', gsf_string[i:])
                 if match:
                     tokens.append(match.group())
-                    i = match.end()
+                    i += len(match.group())
                     continue
 
-            # Try ring index with %
-            if smiles[i] == '%':
-                match = self.ring_pattern.match(smiles, i)
+            # Check for group reference (e.g., :0G10)
+            if gsf_string[i] == ':':
+                match = re.match(r':[0-9]+[A-Za-z0-9]+', gsf_string[i:])
                 if match:
                     tokens.append(match.group())
-                    i = match.end()
+                    i += len(match.group())
                     continue
 
-            # Try multi-character atoms
-            match = self.multi_atom_pattern.match(smiles, i)
-            if match:
-                tokens.append(match.group())
-                i = match.end()
-                continue
-
-            # Single character token
-            tokens.append(smiles[i])
+            # Single character (should be rare in Group SELFIES)
+            tokens.append(gsf_string[i])
             i += 1
 
         return tokens
 
-    def detokenize(self, tokens: List[str]) -> str:
-        """Convert tokens back to p-SMILES string.
-
-        Args:
-            tokens: List of tokens.
-
-        Returns:
-            Reconstructed p-SMILES string.
-        """
+    def _tokens_to_gsf_string(self, tokens: List[str]) -> str:
+        """Convert tokens back to Group SELFIES string."""
         # Filter out special tokens
         filtered = [t for t in tokens if t not in self.SPECIAL_TOKENS]
         return ''.join(filtered)
 
-    def build_vocab(self, smiles_list: List[str]) -> Dict[str, int]:
-        """Build vocabulary from a list of SMILES strings.
+    def detokenize(self, tokens: List[str]) -> str:
+        """Convert Group SELFIES tokens back to p-SMILES string.
 
         Args:
-            smiles_list: List of SMILES strings.
+            tokens: List of Group SELFIES tokens.
 
         Returns:
-            Vocabulary dictionary (token -> id).
+            Reconstructed p-SMILES string (with '*').
         """
-        # Start with special tokens
+        if self.grammar is None:
+            raise ValueError("Grammar not initialized. Call build_vocab_and_grammar first.")
+
+        # Filter out special tokens
+        filtered = [t for t in tokens if t not in self.SPECIAL_TOKENS]
+
+        if not filtered:
+            return ""
+
+        # Reconstruct Group SELFIES string
+        gsf_string = ''.join(filtered)
+
+        try:
+            # Decode to RDKit Mol
+            mol = self.grammar.decoder(gsf_string)
+            if mol is None:
+                return ""
+
+            # Convert to SMILES (with placeholder)
+            smiles_ph = self._mol_to_smiles(mol)
+            if smiles_ph is None:
+                return ""
+
+            # Replace placeholder back to *
+            return self._placeholder_to_star(smiles_ph)
+        except Exception:
+            return ""
+
+    def build_vocab_and_grammar(
+        self,
+        smiles_list: List[str],
+        max_groups: int = 10000,
+        verbose: bool = True
+    ) -> Tuple[Dict[str, int], GroupGrammar]:
+        """Build vocabulary and grammar from a list of SMILES strings.
+
+        Args:
+            smiles_list: List of p-SMILES strings.
+            max_groups: Maximum number of groups in grammar.
+            verbose: Whether to show progress bars.
+
+        Returns:
+            Tuple of (vocabulary dict, GroupGrammar).
+        """
+        # Convert to placeholder SMILES and create RDKit mols
+        mols_for_grammar = []
+        valid_smiles = []
+
+        iterator = tqdm(smiles_list, desc="Building grammar") if verbose else smiles_list
+        for smiles in iterator:
+            smiles_ph = self._star_to_placeholder(smiles)
+            mol = self._smiles_to_mol(smiles_ph)
+            if mol is not None:
+                mols_for_grammar.append(mol)
+                valid_smiles.append(smiles)
+
+        if not mols_for_grammar:
+            raise ValueError("No valid molecules found for grammar building.")
+
+        print(f"Building grammar from {len(mols_for_grammar)} valid molecules...")
+
+        # Fragment molecules to get groups
+        raw_groups = fragment_mols(mols_for_grammar)
+        if not raw_groups:
+            raise RuntimeError("fragment_mols returned no groups; cannot build GroupGrammar.")
+
+        # Limit number of groups
+        if len(raw_groups) > max_groups:
+            raw_groups = raw_groups[:max_groups]
+
+        # Create Group objects
+        groups = [Group(name=f"G{i}", canonsmiles=g) for i, g in enumerate(raw_groups)]
+        self.grammar = GroupGrammar(groups)
+
+        print(f"Grammar built with {len(groups)} groups.")
+
+        # Build vocabulary from tokenized training data
         vocab = {token: idx for idx, token in enumerate(self.SPECIAL_TOKENS)}
         current_id = len(self.SPECIAL_TOKENS)
 
         # Collect all unique tokens
         all_tokens = set()
-        for smiles in smiles_list:
+        iterator = tqdm(valid_smiles, desc="Building vocabulary") if verbose else valid_smiles
+        for smiles in iterator:
             tokens = self.tokenize(smiles)
             all_tokens.update(tokens)
+
+        # Remove special tokens that might have been added
+        all_tokens -= set(self.SPECIAL_TOKENS)
 
         # Sort tokens for deterministic ordering
         sorted_tokens = sorted(all_tokens)
@@ -151,7 +286,26 @@ class PSmilesTokenizer:
         self.vocab = vocab
         self.id_to_token = {v: k for k, v in vocab.items()}
 
-        return vocab
+        print(f"Vocabulary built with {len(vocab)} tokens.")
+
+        # Find placeholder token ID
+        self._find_placeholder_token()
+
+        return vocab, self.grammar
+
+    def _find_placeholder_token(self):
+        """Find the token(s) representing the placeholder atom."""
+        # Tokenize a simple molecule with placeholder
+        test_smiles = "*C*"
+        tokens = self.tokenize(test_smiles)
+
+        # Find tokens that represent the placeholder
+        # The placeholder [I+3] typically becomes [IH0+3] or similar in Group SELFIES
+        for token in tokens:
+            if 'I' in token and '+3' in token:
+                self._placeholder_token = token
+                self._placeholder_token_id = self.vocab.get(token)
+                break
 
     def encode(
         self,
@@ -268,18 +422,41 @@ class PSmilesTokenizer:
     def verify_roundtrip(self, smiles: str) -> bool:
         """Verify that tokenization is invertible for a given string.
 
+        Uses canonical SMILES comparison to check molecular identity.
+
         Args:
-            smiles: Input SMILES string.
+            smiles: Input p-SMILES string.
 
         Returns:
-            True if detokenize(tokenize(smiles)) == smiles.
+            True if the decoded molecule matches the original.
         """
-        tokens = self.tokenize(smiles)
-        reconstructed = self.detokenize(tokens)
-        return reconstructed == smiles
+        try:
+            # Tokenize and detokenize
+            tokens = self.tokenize(smiles)
+            decoded = self.detokenize(tokens)
+
+            if not decoded:
+                return False
+
+            # Compare canonical forms
+            smiles_ph_orig = self._star_to_placeholder(smiles)
+            smiles_ph_dec = self._star_to_placeholder(decoded)
+
+            mol_orig = self._smiles_to_mol(smiles_ph_orig)
+            mol_dec = self._smiles_to_mol(smiles_ph_dec)
+
+            if mol_orig is None or mol_dec is None:
+                return False
+
+            canon_orig = self._mol_to_smiles(mol_orig)
+            canon_dec = self._mol_to_smiles(mol_dec)
+
+            return canon_orig == canon_dec
+        except Exception:
+            return False
 
     def save(self, path: str) -> None:
-        """Save tokenizer to file.
+        """Save tokenizer to file (pickle format for grammar).
 
         Args:
             path: Path to save the tokenizer.
@@ -289,14 +466,17 @@ class PSmilesTokenizer:
 
         data = {
             'vocab': self.vocab,
-            'max_length': self.max_length
+            'max_length': self.max_length,
+            'grammar': self.grammar,
+            'placeholder_token': self._placeholder_token,
+            'placeholder_token_id': self._placeholder_token_id
         }
 
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
+        with open(path, 'wb') as f:
+            pickle.dump(data, f)
 
     @classmethod
-    def load(cls, path: str) -> 'PSmilesTokenizer':
+    def load(cls, path: str) -> 'GroupSELFIESTokenizer':
         """Load tokenizer from file.
 
         Args:
@@ -305,10 +485,18 @@ class PSmilesTokenizer:
         Returns:
             Loaded tokenizer instance.
         """
-        with open(path, 'r') as f:
-            data = json.load(f)
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
 
-        return cls(vocab=data['vocab'], max_length=data['max_length'])
+        tokenizer = cls(
+            grammar=data['grammar'],
+            vocab=data['vocab'],
+            max_length=data['max_length']
+        )
+        tokenizer._placeholder_token = data.get('placeholder_token')
+        tokenizer._placeholder_token_id = data.get('placeholder_token_id')
+
+        return tokenizer
 
     @property
     def vocab_size(self) -> int:
@@ -340,6 +528,19 @@ class PSmilesTokenizer:
         """Return UNK token ID."""
         return self.vocab['[UNK]']
 
+    def get_placeholder_token_id(self) -> Optional[int]:
+        """Return the token ID for the placeholder (represents '*')."""
+        return self._placeholder_token_id
+
+    def get_placeholder_token(self) -> Optional[str]:
+        """Return the placeholder token string."""
+        return self._placeholder_token
+
     def get_star_token_id(self) -> int:
-        """Return the token ID for '*'."""
-        return self.vocab.get('*', self.unk_token_id)
+        """Return the token ID for '*' (placeholder token).
+
+        For backward compatibility with sampler.
+        """
+        if self._placeholder_token_id is not None:
+            return self._placeholder_token_id
+        return self.unk_token_id

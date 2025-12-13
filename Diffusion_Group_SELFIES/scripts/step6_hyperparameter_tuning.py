@@ -13,7 +13,7 @@ import torch
 import pandas as pd
 
 from src.utils.config import load_config
-from src.data.tokenizer import PSmilesTokenizer
+from src.data.tokenizer import GroupSELFIESTokenizer
 from src.data.data_loader import PolymerDataLoader
 from src.data.dataset import PolymerDataset, PropertyDataset
 from src.model.backbone import DiffusionBackbone
@@ -28,7 +28,7 @@ def tune_backbone(args, config, device):
     step_dir.mkdir(parents=True, exist_ok=True)
 
     # Load tokenizer
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    tokenizer = GroupSELFIESTokenizer.load(results_dir / 'tokenizer.pkl')
 
     # Load data
     train_df = pd.read_csv(results_dir / 'train_unlabeled.csv')
@@ -75,7 +75,7 @@ def tune_property_head(args, config, device):
     step_dir.mkdir(parents=True, exist_ok=True)
 
     # Load tokenizer
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    tokenizer = GroupSELFIESTokenizer.load(results_dir / 'tokenizer.pkl')
 
     # Load property data
     data_loader = PolymerDataLoader(config)

@@ -16,7 +16,8 @@ import numpy as np
 from src.utils.config import load_config
 from src.utils.plotting import PlotUtils
 from src.data.data_loader import PolymerDataLoader
-from src.data.tokenizer import PSmilesTokenizer
+from src.data.selfies_tokenizer import SelfiesTokenizer
+from src.utils.selfies_utils import verify_roundtrip, count_placeholder_in_selfies
 
 
 def main(args):
@@ -46,66 +47,91 @@ def main(args):
     train_df = unlabeled_data['train']
     val_df = unlabeled_data['val']
 
-    # Build tokenizer vocabulary from training data only
-    print("\n2. Building tokenizer vocabulary...")
-    tokenizer = PSmilesTokenizer(max_length=config['tokenizer']['max_length'])
-    vocab = tokenizer.build_vocab(train_df['p_smiles'].tolist())
-    print(f"Vocabulary size: {tokenizer.vocab_size}")
+    # Build SELFIES tokenizer vocabulary from training data only
+    print("\n2. Building SELFIES tokenizer vocabulary...")
+    tokenizer = SelfiesTokenizer(max_length=config['tokenizer']['max_length'])
+    vocab = tokenizer.build_vocab(train_df['selfies'].tolist())
+    print(f"SELFIES vocabulary size: {tokenizer.vocab_size}")
+    print(f"  (p-SMILES vocab was typically ~50-100, SELFIES is larger due to bracket notation)")
 
     # Save tokenizer
     tokenizer_path = results_dir / 'tokenizer.json'
     tokenizer.save(tokenizer_path)
     print(f"Tokenizer saved to: {tokenizer_path}")
 
-    # Verify round-trip invertibility
-    print("\n3. Verifying tokenization invertibility...")
+    # Verify SELFIES tokenization round-trip invertibility
+    print("\n3. Verifying SELFIES tokenization invertibility...")
     train_valid = 0
     train_total = len(train_df)
-    for smiles in train_df['p_smiles']:
-        if tokenizer.verify_roundtrip(smiles):
+    for selfies in train_df['selfies']:
+        if tokenizer.verify_roundtrip(selfies):
             train_valid += 1
 
     val_valid = 0
     val_total = len(val_df)
-    for smiles in val_df['p_smiles']:
-        if tokenizer.verify_roundtrip(smiles):
+    for selfies in val_df['selfies']:
+        if tokenizer.verify_roundtrip(selfies):
             val_valid += 1
 
-    print(f"Train roundtrip: {train_valid}/{train_total} ({100*train_valid/train_total:.2f}%)")
-    print(f"Val roundtrip: {val_valid}/{val_total} ({100*val_valid/val_total:.2f}%)")
+    print(f"Train SELFIES tokenization roundtrip: {train_valid}/{train_total} ({100*train_valid/train_total:.2f}%)")
+    print(f"Val SELFIES tokenization roundtrip: {val_valid}/{val_total} ({100*val_valid/val_total:.2f}%)")
+
+    # Verify p-SMILES <-> SELFIES conversion round-trip (sample of 100)
+    print("\n4. Verifying p-SMILES <-> SELFIES conversion roundtrip...")
+    sample_size = min(100, len(train_df))
+    conversion_success = 0
+    placeholder_count_errors = 0
+
+    for idx in range(sample_size):
+        success, selfies, recon_psmiles = verify_roundtrip(train_df.iloc[idx]['p_smiles'])
+        if success:
+            conversion_success += 1
+        # Also check placeholder count in SELFIES
+        if count_placeholder_in_selfies(train_df.iloc[idx]['selfies']) != 2:
+            placeholder_count_errors += 1
+
+    print(f"p-SMILES <-> SELFIES conversion roundtrip: {conversion_success}/{sample_size} ({100*conversion_success/sample_size:.2f}%)")
+    print(f"SELFIES with exactly 2 [I+3] placeholders: {sample_size - placeholder_count_errors}/{sample_size} ({100*(sample_size - placeholder_count_errors)/sample_size:.2f}%)")
 
     # Save roundtrip results
     roundtrip_df = pd.DataFrame({
-        'split': ['train', 'val'],
-        'total': [train_total, val_total],
-        'valid': [train_valid, val_valid],
-        'pct': [100*train_valid/train_total, 100*val_valid/val_total]
+        'test': ['SELFIES tokenization (train)', 'SELFIES tokenization (val)',
+                 'p-SMILES <-> SELFIES conversion', 'Placeholder count validation'],
+        'total': [train_total, val_total, sample_size, sample_size],
+        'valid': [train_valid, val_valid, conversion_success, sample_size - placeholder_count_errors],
+        'pct': [100*train_valid/train_total, 100*val_valid/val_total,
+                100*conversion_success/sample_size, 100*(sample_size - placeholder_count_errors)/sample_size]
     })
     roundtrip_df.to_csv(metrics_dir / 'tokenizer_roundtrip.csv', index=False)
 
     # Save 10 example roundtrips for demonstration
-    print("   Saving tokenization examples...")
+    print("\n5. Saving tokenization examples...")
     random.seed(config['data']['random_seed'])
-    sample_smiles = random.sample(train_df['p_smiles'].tolist(), min(10, len(train_df)))
+    sample_indices = random.sample(range(len(train_df)), min(10, len(train_df)))
 
     examples = []
-    for smiles in sample_smiles:
-        tokens = tokenizer.tokenize(smiles)
-        # Create token -> vocab ID hashmap
-        token_ids = {tok: tokenizer.vocab.get(tok, tokenizer.unk_token_id) for tok in tokens}
+    for idx in sample_indices:
+        psmiles = train_df.iloc[idx]['p_smiles']
+        selfies = train_df.iloc[idx]['selfies']
+        tokens = tokenizer.tokenize(selfies)
+        # Create token -> vocab ID hashmap (show first 20 tokens to avoid overflow)
+        token_ids = {tok: tokenizer.vocab.get(tok, tokenizer.unk_token_id) for tok in tokens[:20]}
         reconstructed = tokenizer.detokenize(tokens)
         examples.append({
-            'original_smiles': smiles,
+            'original_psmiles': psmiles,
+            'selfies': selfies,
             'num_tokens': len(tokens),
-            'tokens_hashmap': str(token_ids),
-            'reconstructed_smiles': reconstructed
+            'first_20_tokens': str(tokens[:20]),
+            'token_ids_sample': str(token_ids),
+            'reconstructed_selfies': reconstructed,
+            'roundtrip_match': (reconstructed == selfies)
         })
 
     examples_df = pd.DataFrame(examples)
     examples_df.to_csv(metrics_dir / 'tokenizer_examples.csv', index=False)
 
     # Compute statistics
-    print("\n4. Computing statistics...")
+    print("\n6. Computing statistics...")
     train_stats = data_loader.get_statistics(train_df)
     val_stats = data_loader.get_statistics(val_df)
 
@@ -116,10 +142,10 @@ def main(args):
     ])
     stats_df.to_csv(metrics_dir / 'unlabeled_data_stats.csv', index=False)
 
-    # Compute token lengths
-    print("\n5. Computing token length distributions...")
-    train_lengths = [len(tokenizer.tokenize(s)) for s in train_df['p_smiles']]
-    val_lengths = [len(tokenizer.tokenize(s)) for s in val_df['p_smiles']]
+    # Compute SELFIES token lengths
+    print("\n7. Computing SELFIES token length distributions...")
+    train_lengths = [len(tokenizer.tokenize(s)) for s in train_df['selfies']]
+    val_lengths = [len(tokenizer.tokenize(s)) for s in val_df['selfies']]
 
     # Length statistics
     length_stats = pd.DataFrame({
@@ -127,9 +153,19 @@ def main(args):
         'mean': [np.mean(train_lengths), np.mean(val_lengths)],
         'std': [np.std(train_lengths), np.std(val_lengths)],
         'min': [np.min(train_lengths), np.min(val_lengths)],
-        'max': [np.max(train_lengths), np.max(val_lengths)]
+        'max': [np.max(train_lengths), np.max(val_lengths)],
+        'p95': [np.percentile(train_lengths, 95), np.percentile(val_lengths, 95)],
+        'p99': [np.percentile(train_lengths, 99), np.percentile(val_lengths, 99)]
     })
     length_stats.to_csv(metrics_dir / 'length_stats.csv', index=False)
+
+    print(f"  Mean token length: train={np.mean(train_lengths):.1f}, val={np.mean(val_lengths):.1f}")
+    print(f"  Max token length: train={np.max(train_lengths)}, val={np.max(val_lengths)}")
+    print(f"  99th percentile: train={np.percentile(train_lengths, 99):.1f}, val={np.percentile(val_lengths, 99):.1f}")
+    if np.max(train_lengths) > config['tokenizer']['max_length']:
+        print(f"  WARNING: Some sequences exceed max_length={config['tokenizer']['max_length']}!")
+        exceeds = sum(1 for l in train_lengths if l > config['tokenizer']['max_length'])
+        print(f"  {exceeds}/{len(train_lengths)} sequences will be truncated")
 
     # SA score statistics
     train_sa = train_df['sa_score'].dropna().values
@@ -145,20 +181,20 @@ def main(args):
     sa_stats.to_csv(metrics_dir / 'sa_stats.csv', index=False)
 
     # Create plots
-    print("\n6. Creating plots...")
+    print("\n8. Creating plots...")
     plotter = PlotUtils(
         figure_size=tuple(config['plotting']['figure_size']),
         font_size=config['plotting']['font_size'],
         dpi=config['plotting']['dpi']
     )
 
-    # Length histogram
+    # SELFIES token length histogram
     plotter.histogram(
         data=[train_lengths, val_lengths],
         labels=['Train', 'Val'],
-        xlabel='Token Length',
+        xlabel='SELFIES Token Length',
         ylabel='Count',
-        title='Token Length Distribution',
+        title='SELFIES Token Length Distribution',
         save_path=figures_dir / 'length_hist_train_val.png',
         bins=50,
         style='step'
@@ -176,10 +212,12 @@ def main(args):
         style='step'
     )
 
-    # Save processed data
-    print("\n7. Saving processed data...")
+    # Save processed data (with both p_smiles and selfies columns)
+    print("\n9. Saving processed data...")
     train_df.to_csv(results_dir / 'train_unlabeled.csv', index=False)
     val_df.to_csv(results_dir / 'val_unlabeled.csv', index=False)
+    print(f"  Saved train_unlabeled.csv with columns: {list(train_df.columns)}")
+    print(f"  Saved val_unlabeled.csv with columns: {list(val_df.columns)}")
 
     print("\n" + "=" * 50)
     print("Data preparation complete!")
