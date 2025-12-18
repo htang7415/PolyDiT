@@ -6,7 +6,7 @@ paths:
   polymer_file: "Data/Polymer/SMiPoly_polymers.gz"
   property_dir: "Data/Property"
   results_dir: "results"
-  checkpoints_dir: "results/checkpoints"
+  checkpoints_dir: "results/checkpoints/graph_backbone_best.pt"
   figures_dir: "results/figures"
   metrics_dir: "results/metrics"
 

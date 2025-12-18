@@ -148,6 +148,84 @@ def _tokenize_batch_worker(smiles_batch, grammar, placeholder_smiles):
     return batch_tokens
 
 
+def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles):
+    """Worker function to verify roundtrip for a batch of SMILES in parallel.
+
+    Args:
+        smiles_batch: List of p-SMILES strings to verify
+        grammar: GroupGrammar object for encoding/decoding
+        placeholder_smiles: Placeholder string to replace '*'
+
+    Returns:
+        Tuple of (valid_count, total_count)
+    """
+    import re
+    from rdkit import Chem, RDLogger
+
+    # Silence RDKit warnings in worker
+    RDLogger.DisableLog('rdApp.*')
+
+    valid_count = 0
+    total_count = len(smiles_batch)
+
+    for smiles in smiles_batch:
+        try:
+            # Step 1: Tokenize (encode)
+            smiles_ph = smiles.replace("*", placeholder_smiles)
+            mol_orig = Chem.MolFromSmiles(smiles_ph)
+            if mol_orig is None:
+                continue
+
+            # Encode to Group SELFIES
+            gsf_string = grammar.full_encoder(mol_orig)
+
+            # Parse into tokens (simplified from _parse_gsf_string)
+            tokens = []
+            i = 0
+            while i < len(gsf_string):
+                if gsf_string[i] == '[':
+                    match = re.match(r'\[[^\[\]]+\]', gsf_string[i:])
+                    if match:
+                        tokens.append(match.group())
+                        i += len(match.group())
+                        continue
+                if gsf_string[i] == ':':
+                    match = re.match(r':[0-9]+[A-Za-z0-9]+', gsf_string[i:])
+                    if match:
+                        tokens.append(match.group())
+                        i += len(match.group())
+                        continue
+                tokens.append(gsf_string[i])
+                i += 1
+
+            # Step 2: Detokenize (decode)
+            decoded_gsf_string = ''.join(tokens)
+            mol_decoded = grammar.decoder(decoded_gsf_string)
+            if mol_decoded is None:
+                continue
+
+            smiles_decoded_ph = Chem.MolToSmiles(mol_decoded)
+            if smiles_decoded_ph is None:
+                continue
+
+            smiles_decoded = smiles_decoded_ph.replace(placeholder_smiles, "*")
+
+            # Step 3: Compare canonical forms
+            canon_orig = Chem.MolToSmiles(mol_orig)
+            mol_dec = Chem.MolFromSmiles(smiles_decoded.replace("*", placeholder_smiles))
+            if mol_dec is None:
+                continue
+            canon_dec = Chem.MolToSmiles(mol_dec)
+
+            if canon_orig == canon_dec:
+                valid_count += 1
+
+        except Exception:
+            continue
+
+    return (valid_count, total_count)
+
+
 class GroupSELFIESTokenizer:
     """Grammar-based tokenizer for Group SELFIES representation.
 
@@ -567,6 +645,74 @@ class GroupSELFIESTokenizer:
             print(f"Found {len(all_tokens)} unique tokens")
 
         return all_tokens
+
+    def parallel_verify_roundtrip(
+        self,
+        smiles_list: List[str],
+        num_workers: int,
+        chunk_size: int = 1000,
+        verbose: bool = True
+    ) -> Tuple[int, int]:
+        """Verify roundtrip invertibility in parallel.
+
+        Args:
+            smiles_list: List of p-SMILES strings to verify
+            num_workers: Number of parallel workers
+            chunk_size: Number of SMILES per chunk
+            verbose: Show progress bars
+
+        Returns:
+            Tuple of (valid_count, total_count)
+        """
+        if self.grammar is None:
+            raise ValueError("Grammar not initialized. Call build_vocab_and_grammar first.")
+
+        # Split into chunks
+        chunks = [
+            smiles_list[i:i + chunk_size]
+            for i in range(0, len(smiles_list), chunk_size)
+        ]
+
+        if verbose:
+            print(f"Verifying {len(smiles_list)} molecules using {num_workers} workers...")
+            print(f"Split into {len(chunks)} chunks of ~{chunk_size} molecules each")
+
+        # Create worker function with grammar and placeholder bound
+        worker_func = partial(_verify_roundtrip_worker, grammar=self.grammar, placeholder_smiles=self.PLACEHOLDER_SMILES)
+
+        # Process chunks in parallel
+        total_valid = 0
+        total_count = 0
+
+        if num_workers <= 1:
+            # Sequential fallback
+            iterator = tqdm(chunks, desc="Verifying roundtrip") if verbose else chunks
+            for chunk in iterator:
+                valid, count = worker_func(chunk)
+                total_valid += valid
+                total_count += count
+        else:
+            # Parallel processing
+            with Pool(processes=num_workers) as pool:
+                if verbose:
+                    results = list(tqdm(
+                        pool.imap_unordered(worker_func, chunks),
+                        total=len(chunks),
+                        desc="Verifying roundtrip"
+                    ))
+                else:
+                    results = pool.map(worker_func, chunks)
+
+                # Aggregate results
+                for valid, count in results:
+                    total_valid += valid
+                    total_count += count
+
+        if verbose:
+            accuracy = 100 * total_valid / total_count if total_count > 0 else 0
+            print(f"Roundtrip accuracy: {total_valid}/{total_count} ({accuracy:.2f}%)")
+
+        return (total_valid, total_count)
 
     def _find_placeholder_token(self):
         """Find the token(s) representing the placeholder atom."""

@@ -86,22 +86,42 @@ def main(args):
     tokenizer.save(tokenizer_path)
     print(f"Tokenizer saved to: {tokenizer_path}")
 
-    # Verify round-trip invertibility
+    # Verify round-trip invertibility (PARALLELIZED)
     print("\n3. Verifying tokenization invertibility...")
-    train_valid = 0
-    train_total = len(train_df)
-    for smiles in train_df['p_smiles']:
-        if tokenizer.verify_roundtrip(smiles):
-            train_valid += 1
 
-    val_valid = 0
-    val_total = len(val_df)
-    for smiles in val_df['p_smiles']:
-        if tokenizer.verify_roundtrip(smiles):
-            val_valid += 1
+    # Verify train set
+    if num_workers > 1:
+        train_valid, train_total = tokenizer.parallel_verify_roundtrip(
+            train_df['p_smiles'].tolist(),
+            num_workers=num_workers,
+            chunk_size=chunk_size,
+            verbose=True
+        )
+    else:
+        # Sequential fallback
+        train_valid = 0
+        train_total = len(train_df)
+        for smiles in train_df['p_smiles']:
+            if tokenizer.verify_roundtrip(smiles):
+                train_valid += 1
+        print(f"Train roundtrip: {train_valid}/{train_total} ({100*train_valid/train_total:.2f}%)")
 
-    print(f"Train roundtrip: {train_valid}/{train_total} ({100*train_valid/train_total:.2f}%)")
-    print(f"Val roundtrip: {val_valid}/{val_total} ({100*val_valid/val_total:.2f}%)")
+    # Verify validation set
+    if num_workers > 1:
+        val_valid, val_total = tokenizer.parallel_verify_roundtrip(
+            val_df['p_smiles'].tolist(),
+            num_workers=num_workers,
+            chunk_size=chunk_size,
+            verbose=True
+        )
+    else:
+        # Sequential fallback
+        val_valid = 0
+        val_total = len(val_df)
+        for smiles in val_df['p_smiles']:
+            if tokenizer.verify_roundtrip(smiles):
+                val_valid += 1
+        print(f"Val roundtrip: {val_valid}/{val_total} ({100*val_valid/val_total:.2f}%)")
 
     # Save roundtrip results
     roundtrip_df = pd.DataFrame({
