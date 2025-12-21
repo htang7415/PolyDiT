@@ -31,6 +31,14 @@ def _to_int(value, name: str) -> int:
         raise ValueError(f"{name} must be integer-like, got {value!r} ({type(value).__name__})")
 
 
+def _is_cuda_device(device) -> bool:
+    """Return True if the provided device resolves to CUDA."""
+    try:
+        return torch.device(device).type == 'cuda'
+    except (TypeError, ValueError):
+        return str(device).startswith('cuda')
+
+
 class PropertyTrainer:
     """Trainer for property prediction heads."""
 
@@ -80,8 +88,9 @@ class PropertyTrainer:
 
         # Optimization config
         opt_config = config.get('optimization', {})
-        self.use_amp = opt_config.get('use_amp', False) and device == 'cuda'
+        self.use_amp = opt_config.get('use_amp', False) and _is_cuda_device(device)
         self.compile_model = opt_config.get('compile_model', False)
+        self.compile_mode = opt_config.get('compile_mode', 'default')
         self.grad_accum_steps = opt_config.get('gradient_accumulation_steps', 1)
 
         # Enable cuDNN benchmark for consistent input sizes
@@ -92,9 +101,9 @@ class PropertyTrainer:
         self.scaler = GradScaler(enabled=self.use_amp)
 
         # Compile model for faster execution
-        if self.compile_model and device == 'cuda':
-            print("Compiling model with torch.compile()...")
-            self.model = torch.compile(self.model, mode="reduce-overhead")
+        if self.compile_model and _is_cuda_device(device):
+            print(f"Compiling model with torch.compile(mode='{self.compile_mode}')...")
+            self.model = torch.compile(self.model, mode=self.compile_mode)
 
         # Training config
         train_config = config['training_property']
@@ -123,6 +132,21 @@ class PropertyTrainer:
         self.train_losses = []
         self.val_losses = []
         self.global_step = 0
+
+    def _maybe_mark_cudagraph_step_begin(self) -> None:
+        """Mark the beginning of a cudagraph step if supported."""
+        if not self.compile_model or not _is_cuda_device(self.device):
+            return
+
+        compiler_mod = getattr(torch, "compiler", None)
+        if compiler_mod is None:
+            return
+
+        mark_step = getattr(compiler_mod, "cudagraph_mark_step_begin", None)
+        if mark_step is None:
+            return
+
+        mark_step()
 
     def train(self) -> Dict:
         """Run training loop.
@@ -217,6 +241,7 @@ class PropertyTrainer:
         labels = batch['labels'].to(self.device)
 
         # Forward pass with AMP
+        self._maybe_mark_cudagraph_step_begin()
         with autocast('cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             outputs = self.model.compute_loss(input_ids, labels, attention_mask)
             loss = outputs['loss'] / self.grad_accum_steps
@@ -248,6 +273,7 @@ class PropertyTrainer:
                 attention_mask = batch['attention_mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
 
+                self._maybe_mark_cudagraph_step_begin()
                 with autocast('cuda', dtype=torch.bfloat16, enabled=self.use_amp):
                     outputs = self.model.compute_loss(input_ids, labels, attention_mask)
                 total_loss += outputs['loss'].item()
@@ -271,6 +297,7 @@ class PropertyTrainer:
                 attention_mask = batch['attention_mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
 
+                self._maybe_mark_cudagraph_step_begin()
                 with autocast('cuda', dtype=torch.bfloat16, enabled=self.use_amp):
                     preds = self.model.predict(input_ids, attention_mask)
                 all_preds.extend(preds.cpu().numpy().tolist())
@@ -392,6 +419,7 @@ class PropertyTrainer:
                 attention_mask = batch['attention_mask'].to(self.device)
                 labels = batch['labels'].to(self.device)
 
+                self._maybe_mark_cudagraph_step_begin()
                 with autocast('cuda', dtype=torch.bfloat16, enabled=self.use_amp):
                     preds = self.model.predict(input_ids, attention_mask)
                 all_preds.extend(preds.cpu().numpy().tolist())

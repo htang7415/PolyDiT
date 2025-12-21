@@ -22,7 +22,6 @@ echo "  Polymer class: ${POLYMER_CLASS}"
 echo "  Class target: ${CLASS_TARGET_VALUE}"
 echo "  Class epsilon: ${CLASS_EPSILON}"
 
-./scripts/run_step0.sh
 ./scripts/run_step1.sh
 ./scripts/run_step2.sh "${NUM_SAMPLES}"
 ./scripts/run_step3.sh "${PROPERTY}"

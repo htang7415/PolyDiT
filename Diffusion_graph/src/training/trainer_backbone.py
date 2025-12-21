@@ -133,6 +133,21 @@ class BackboneTrainer:
         self.val_losses = []
         self.learning_rates = []
 
+    def _maybe_mark_cudagraph_step_begin(self) -> None:
+        """Mark the beginning of a cudagraph step if supported."""
+        if not self.compile_model or self.device != 'cuda':
+            return
+
+        compiler_mod = getattr(torch, "compiler", None)
+        if compiler_mod is None:
+            return
+
+        mark_step = getattr(compiler_mod, "cudagraph_mark_step_begin", None)
+        if mark_step is None:
+            return
+
+        mark_step()
+
     def train(self) -> Dict:
         """Run training loop.
 
@@ -230,6 +245,7 @@ class BackboneTrainer:
         attention_mask = batch['attention_mask'].to(self.device)
 
         # Forward pass with AMP
+        self._maybe_mark_cudagraph_step_begin()
         with autocast('cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             outputs = self.model(input_ids, attention_mask)
             loss = outputs['loss'] / self.grad_accum_steps
@@ -271,6 +287,7 @@ class BackboneTrainer:
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
 
+                self._maybe_mark_cudagraph_step_begin()
                 with autocast('cuda', dtype=torch.bfloat16, enabled=self.use_amp):
                     outputs = self.model(input_ids, attention_mask)
                 total_loss += outputs['loss'].item()

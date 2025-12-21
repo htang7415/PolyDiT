@@ -12,7 +12,7 @@ POLYMER_CLASS=${6:-polyamide}
 CLASS_TARGET_VALUE=${7:-300}
 CLASS_EPSILON=${8:-10.0}
 
-echo "Running Steps 0-6..."
+echo "Running Steps 1-6..."
 echo "  Property: ${PROPERTY}"
 echo "  Targets: ${TARGETS}"
 echo "  Epsilon: ${EPSILON}"
@@ -22,7 +22,6 @@ echo "  Polymer class: ${POLYMER_CLASS}"
 echo "  Class target: ${CLASS_TARGET_VALUE}"
 echo "  Class epsilon: ${CLASS_EPSILON}"
 
-./scripts/run_step0.sh
 ./scripts/run_step1.sh
 ./scripts/run_step2.sh "${NUM_SAMPLES}"
 ./scripts/run_step3.sh "${PROPERTY}"
