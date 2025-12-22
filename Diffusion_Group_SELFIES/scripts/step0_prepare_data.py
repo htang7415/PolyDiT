@@ -97,7 +97,7 @@ def main(args):
 
     # Verify train set
     if num_workers > 1:
-        train_valid, train_total = tokenizer.parallel_verify_roundtrip(
+        train_valid, train_total, train_failures = tokenizer.parallel_verify_roundtrip(
             train_df['p_smiles'].tolist(),
             num_workers=num_workers,
             chunk_size=chunk_size,
@@ -107,6 +107,7 @@ def main(args):
         # Sequential fallback
         train_valid = 0
         train_total = len(train_df)
+        train_failures = []
         for smiles in train_df['p_smiles']:
             if tokenizer.verify_roundtrip(smiles):
                 train_valid += 1
@@ -114,7 +115,7 @@ def main(args):
 
     # Verify validation set
     if num_workers > 1:
-        val_valid, val_total = tokenizer.parallel_verify_roundtrip(
+        val_valid, val_total, val_failures = tokenizer.parallel_verify_roundtrip(
             val_df['p_smiles'].tolist(),
             num_workers=num_workers,
             chunk_size=chunk_size,
@@ -124,6 +125,7 @@ def main(args):
         # Sequential fallback
         val_valid = 0
         val_total = len(val_df)
+        val_failures = []
         for smiles in val_df['p_smiles']:
             if tokenizer.verify_roundtrip(smiles):
                 val_valid += 1

@@ -170,16 +170,17 @@ def _tokenize_batch_worker(smiles_batch, grammar, placeholder_smiles):
     return batch_tokens
 
 
-def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles):
+def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles, max_failures=5):
     """Worker function to verify roundtrip for a batch of SMILES in parallel.
 
     Args:
         smiles_batch: List of p-SMILES strings to verify
         grammar: GroupGrammar object for encoding/decoding
         placeholder_smiles: Placeholder string to replace '*'
+        max_failures: Maximum number of failures to collect for diagnostics
 
     Returns:
-        Tuple of (valid_count, total_count)
+        Tuple of (valid_count, total_count, failures)
     """
     import re
     from rdkit import Chem, RDLogger
@@ -189,6 +190,7 @@ def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles):
 
     valid_count = 0
     total_count = len(smiles_batch)
+    failures = []  # Collect first N failures for diagnostics
 
     for smiles in smiles_batch:
         try:
@@ -197,6 +199,9 @@ def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles):
             mol_orig = Chem.MolFromSmiles(smiles_ph)
             if mol_orig is None:
                 continue
+
+            # Copy mol and get canonical BEFORE encoder mutates it
+            canon_orig = Chem.MolToSmiles(Chem.Mol(mol_orig))
 
             # Encode to Group SELFIES
             with _suppress_stdout_stderr():
@@ -226,6 +231,12 @@ def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles):
             with _suppress_stdout_stderr():
                 mol_decoded = grammar.decoder(decoded_gsf_string)
             if mol_decoded is None:
+                if len(failures) < max_failures:
+                    failures.append({
+                        'smiles': smiles,
+                        'gsf_string': gsf_string,
+                        'error': 'decode_returned_none'
+                    })
                 continue
 
             smiles_decoded_ph = Chem.MolToSmiles(mol_decoded)
@@ -235,7 +246,6 @@ def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles):
             smiles_decoded = smiles_decoded_ph.replace(placeholder_smiles, "*")
 
             # Step 3: Compare canonical forms
-            canon_orig = Chem.MolToSmiles(mol_orig)
             mol_dec = Chem.MolFromSmiles(smiles_decoded.replace("*", placeholder_smiles))
             if mol_dec is None:
                 continue
@@ -243,11 +253,26 @@ def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles):
 
             if canon_orig == canon_dec:
                 valid_count += 1
+            else:
+                if len(failures) < max_failures:
+                    failures.append({
+                        'smiles': smiles,
+                        'gsf_string': gsf_string,
+                        'decoded': smiles_decoded,
+                        'canon_orig': canon_orig,
+                        'canon_dec': canon_dec,
+                        'error': 'canonical_mismatch'
+                    })
 
-        except Exception:
+        except Exception as e:
+            if len(failures) < max_failures:
+                failures.append({
+                    'smiles': smiles,
+                    'error': f'exception: {str(e)}'
+                })
             continue
 
-    return (valid_count, total_count)
+    return (valid_count, total_count, failures)
 
 
 class GroupSELFIESTokenizer:
@@ -674,8 +699,9 @@ class GroupSELFIESTokenizer:
         smiles_list: List[str],
         num_workers: int,
         chunk_size: int = 1000,
-        verbose: bool = True
-    ) -> Tuple[int, int]:
+        verbose: bool = True,
+        max_failures: int = 20
+    ) -> Tuple[int, int, List[dict]]:
         """Verify roundtrip invertibility in parallel.
 
         Args:
@@ -683,9 +709,10 @@ class GroupSELFIESTokenizer:
             num_workers: Number of parallel workers
             chunk_size: Number of SMILES per chunk
             verbose: Show progress bars
+            max_failures: Maximum number of failures to collect for diagnostics
 
         Returns:
-            Tuple of (valid_count, total_count)
+            Tuple of (valid_count, total_count, failures)
         """
         if self.grammar is None:
             raise ValueError("Grammar not initialized. Call build_vocab_and_grammar first.")
@@ -706,14 +733,17 @@ class GroupSELFIESTokenizer:
         # Process chunks in parallel
         total_valid = 0
         total_count = 0
+        all_failures = []
 
         if num_workers <= 1:
             # Sequential fallback
             iterator = tqdm(chunks, desc="Verifying roundtrip") if verbose else chunks
             for chunk in iterator:
-                valid, count = worker_func(chunk)
+                valid, count, failures = worker_func(chunk)
                 total_valid += valid
                 total_count += count
+                if len(all_failures) < max_failures:
+                    all_failures.extend(failures[:max_failures - len(all_failures)])
         else:
             # Parallel processing
             with Pool(processes=num_workers) as pool:
@@ -727,15 +757,24 @@ class GroupSELFIESTokenizer:
                     results = pool.map(worker_func, chunks)
 
                 # Aggregate results
-                for valid, count in results:
+                for valid, count, failures in results:
                     total_valid += valid
                     total_count += count
+                    if len(all_failures) < max_failures:
+                        all_failures.extend(failures[:max_failures - len(all_failures)])
 
         if verbose:
             accuracy = 100 * total_valid / total_count if total_count > 0 else 0
             print(f"Roundtrip accuracy: {total_valid}/{total_count} ({accuracy:.2f}%)")
 
-        return (total_valid, total_count)
+            if all_failures:
+                print(f"\nFirst {len(all_failures)} failures:")
+                for f in all_failures[:5]:
+                    error_type = f.get('error', 'unknown')
+                    smiles = f.get('smiles', 'N/A')[:50]
+                    print(f"  {error_type}: {smiles}")
+
+        return (total_valid, total_count, all_failures)
 
     def _find_placeholder_token(self):
         """Find the token(s) representing the placeholder atom."""
