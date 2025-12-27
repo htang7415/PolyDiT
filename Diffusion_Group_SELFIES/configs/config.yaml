@@ -37,8 +37,8 @@ group_selfies:
   diversity_selection: "simple"  # Selection method for fragments
 
   # Sampling settings for efficient grammar building
-  grammar_sample_size: 500000         # Sample size for grammar building (0 = use all)
-  roundtrip_test_size: 500000         # Sample size for roundtrip verification (0 = use all)
+  grammar_sample_size: 0         # Sample size for grammar building (0 = use all)
+  roundtrip_test_size: 0         # Sample size for roundtrip verification (0 = use all)
 
   # Parallelization settings for vocabulary building
   parallel:
