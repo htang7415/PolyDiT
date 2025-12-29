@@ -42,6 +42,61 @@ proxy_backbone:
   ffn_hidden_size: 1024
   dropout: 0.1
 
+# Model size presets for scaling law experiments (graph-specific)
+model_sizes:
+  small:
+    # Architecture (~14M params)
+    hidden_size: 384
+    num_layers: 6
+    num_heads: 6
+    ffn_hidden_size: 1536
+    dropout: 0.1
+    # Training
+    max_steps: 200000
+    warmup_steps: 1000
+    batch_size: 256
+    gradient_accumulation_steps: 4
+    learning_rate: 3.0e-4
+  medium:
+    # Architecture (~55M params)
+    hidden_size: 640
+    num_layers: 10
+    num_heads: 10
+    ffn_hidden_size: 2560
+    dropout: 0.1
+    # Training
+    max_steps: 200000
+    warmup_steps: 2000
+    batch_size: 256
+    gradient_accumulation_steps: 4
+    learning_rate: 3.0e-4
+  large:
+    # Architecture (~140M params)
+    hidden_size: 896
+    num_layers: 14
+    num_heads: 8
+    ffn_hidden_size: 3584
+    dropout: 0.1
+    # Training
+    max_steps: 300000
+    warmup_steps: 3000
+    batch_size: 128
+    gradient_accumulation_steps: 8
+    learning_rate: 1.0e-4
+  xl:
+    # Architecture (~350M params)
+    hidden_size: 1152
+    num_layers: 18
+    num_heads: 16
+    ffn_hidden_size: 4608
+    dropout: 0.1
+    # Training
+    max_steps: 400000
+    warmup_steps: 4000
+    batch_size: 64
+    gradient_accumulation_steps: 16
+    learning_rate: 1.0e-4
+
 # Diffusion settings
 diffusion:
   num_steps: 50
@@ -70,7 +125,7 @@ training_property:
   num_epochs: 500
   patience: 30
   freeze_backbone: true
-  finetune_last_layers: 8
+  finetune_last_layers: 6
   default_timestep: 1
 
 # Optimization settings for A100 GPU
@@ -86,18 +141,18 @@ optimization:
 
 # Property head architecture
 property_head:
-  hidden_sizes: [256, 1024, 512, 128]
+  hidden_sizes: [256, 1024, 128]
   dropout: 0.1
 
 # Sampling
 sampling:
-  num_samples: 10000
+  num_samples: 20000
   batch_size: 256
   temperature: 1.0
 
 # Inverse design
 inverse_design:
-  num_candidates: 5000
+  num_candidates: 10000
   epsilon: 30.0
 
 # Polymer classes (SMARTS patterns)

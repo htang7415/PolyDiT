@@ -155,20 +155,18 @@ def main(args):
             random.seed(config['data']['random_seed'] + 200)
             val_smiles_for_test = random.sample(val_smiles_for_test, val_test_size)
 
-    # Verify train set (MUST be sequential - GroupGrammar is not process-safe)
-    # Quick test proved: sequential = 99.39%, parallel = 0.01% accuracy
-    # Grammar.decoder() fails in worker processes due to pickling/fork issues
+    # Verify train set (parallel now works - grammar recreated in each worker)
     train_valid, train_total, train_failures = tokenizer.parallel_verify_roundtrip(
         train_smiles_for_test,
-        num_workers=1,  # Force sequential - grammar.decoder() fails in parallel workers
+        num_workers=num_workers,  # Parallel works: workers recreate grammar from group_smiles
         chunk_size=chunk_size,
         verbose=True
     )
 
-    # Verify validation set (MUST be sequential - same reason as above)
+    # Verify validation set
     val_valid, val_total, val_failures = tokenizer.parallel_verify_roundtrip(
         val_smiles_for_test,
-        num_workers=1,  # Force sequential - grammar.decoder() fails in parallel workers
+        num_workers=num_workers,  # Parallel works: workers recreate grammar from group_smiles
         chunk_size=chunk_size,
         verbose=True
     )

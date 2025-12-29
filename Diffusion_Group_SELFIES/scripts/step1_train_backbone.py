@@ -15,6 +15,10 @@ from torch.utils.data import DataLoader
 
 from src.utils.config import load_config, save_config
 from src.utils.plotting import PlotUtils
+from src.utils.model_scales import (
+    get_model_config, get_training_config, estimate_params,
+    get_results_dir, print_model_info
+)
 from src.data.tokenizer import GroupSELFIESTokenizer
 from src.data.dataset import PolymerDataset, collate_fn
 from src.model.backbone import DiffusionBackbone
@@ -32,8 +36,9 @@ def main(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
 
-    # Create output directories
-    results_dir = Path(config['paths']['results_dir'])
+    # Override results_dir if model_size specified
+    base_results_dir = config['paths']['results_dir']
+    results_dir = Path(get_results_dir(args.model_size, base_results_dir))
     step_dir = results_dir / 'step1_backbone'
     metrics_dir = step_dir / 'metrics'
     figures_dir = step_dir / 'figures'
@@ -49,15 +54,40 @@ def main(args):
     print("Step 1: Training Diffusion Backbone")
     print("=" * 50)
 
-    # Load tokenizer
+    # Get model and training config based on model_size
+    backbone_config = get_model_config(args.model_size, config, model_type='sequence')
+    if args.model_size:
+        training_config = get_training_config(args.model_size, config, model_type='sequence')
+        # Override training_backbone config
+        config['training_backbone']['batch_size'] = training_config['batch_size']
+        config['training_backbone']['learning_rate'] = training_config['learning_rate']
+        config['training_backbone']['max_steps'] = training_config['max_steps']
+        config['training_backbone']['warmup_steps'] = training_config['warmup_steps']
+        config['optimization']['gradient_accumulation_steps'] = training_config['gradient_accumulation_steps']
+
+    # Load tokenizer (from base results dir which has the tokenizer)
     print("\n1. Loading tokenizer...")
-    tokenizer = GroupSELFIESTokenizer.load(results_dir / 'tokenizer.pkl')
+    tokenizer_path = results_dir / 'tokenizer.pkl'
+    if not tokenizer_path.exists():
+        # Fall back to base results dir
+        tokenizer_path = Path(base_results_dir) / 'tokenizer.pkl'
+    tokenizer = GroupSELFIESTokenizer.load(tokenizer_path)
     print(f"Vocabulary size: {tokenizer.vocab_size}")
 
-    # Load data
+    # Print model info if model_size specified
+    if args.model_size:
+        print_model_info(args.model_size, backbone_config, training_config,
+                        tokenizer.vocab_size, model_type='sequence')
+
+    # Load data (from base results dir which has the data)
     print("\n2. Loading data...")
-    train_df = pd.read_csv(results_dir / 'train_unlabeled.csv')
-    val_df = pd.read_csv(results_dir / 'val_unlabeled.csv')
+    train_path = results_dir / 'train_unlabeled.csv'
+    val_path = results_dir / 'val_unlabeled.csv'
+    if not train_path.exists():
+        train_path = Path(base_results_dir) / 'train_unlabeled.csv'
+        val_path = Path(base_results_dir) / 'val_unlabeled.csv'
+    train_df = pd.read_csv(train_path)
+    val_df = pd.read_csv(val_path)
 
     # Get optimization settings
     opt_config = config.get('optimization', {})
@@ -96,7 +126,6 @@ def main(args):
 
     # Create model
     print("\n3. Creating model...")
-    backbone_config = config['backbone']
     backbone = DiffusionBackbone(
         vocab_size=tokenizer.vocab_size,
         hidden_size=backbone_config['hidden_size'],
@@ -179,6 +208,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train diffusion backbone')
     parser.add_argument('--config', type=str, default='configs/config.yaml',
                         help='Path to config file')
+    parser.add_argument('--model_size', type=str, default=None,
+                        choices=['small', 'medium', 'large', 'xl'],
+                        help='Model size preset (small: ~12M, medium: ~50M, large: ~150M, xl: ~400M)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
     args = parser.parse_args()

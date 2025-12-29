@@ -225,12 +225,12 @@ def _get_lengths_worker(smiles_batch, grammar, placeholder_smiles):
     return lengths
 
 
-def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles, max_failures=5):
+def _verify_roundtrip_worker(smiles_batch, group_smiles, placeholder_smiles, max_failures=5):
     """Worker function to verify roundtrip for a batch of SMILES in parallel.
 
     Args:
         smiles_batch: List of p-SMILES strings to verify
-        grammar: GroupGrammar object for encoding/decoding
+        group_smiles: List of canonical SMILES for grammar groups (serializable)
         placeholder_smiles: Placeholder string to replace '*'
         max_failures: Maximum number of failures to collect for diagnostics
 
@@ -239,9 +239,14 @@ def _verify_roundtrip_worker(smiles_batch, grammar, placeholder_smiles, max_fail
     """
     import re
     from rdkit import Chem, RDLogger
+    from group_selfies import GroupGrammar, Group
 
     # Silence RDKit warnings in worker
     RDLogger.DisableLog('rdApp.*')
+
+    # Recreate grammar in worker (avoids pickling issues with GroupGrammar)
+    groups = [Group(name=f"G{i}", canonsmiles=g) for i, g in enumerate(group_smiles)]
+    grammar = GroupGrammar(groups)
 
     valid_count = 0
     total_count = len(smiles_batch)
@@ -596,6 +601,7 @@ class GroupSELFIESTokenizer:
         # Create Group objects
         groups = [Group(name=f"G{i}", canonsmiles=g) for i, g in enumerate(raw_groups)]
         self.grammar = GroupGrammar(groups)
+        self.group_smiles = raw_groups  # Store for parallel verification (serializable)
 
         print(f"Grammar built with {len(groups)} groups.")
 
@@ -803,8 +809,9 @@ class GroupSELFIESTokenizer:
             print(f"Verifying {len(smiles_list)} molecules using {num_workers} workers...")
             print(f"Split into {len(chunks)} chunks of ~{chunk_size} molecules each")
 
-        # Create worker function with grammar and placeholder bound
-        worker_func = partial(_verify_roundtrip_worker, grammar=self.grammar, placeholder_smiles=self.PLACEHOLDER_SMILES)
+        # Create worker function with group_smiles (serializable) and placeholder bound
+        # Note: We pass group_smiles instead of grammar to avoid pickling issues
+        worker_func = partial(_verify_roundtrip_worker, group_smiles=self.group_smiles, placeholder_smiles=self.PLACEHOLDER_SMILES)
 
         # Process chunks in parallel
         total_valid = 0

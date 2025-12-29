@@ -13,6 +13,7 @@ import torch
 import pandas as pd
 
 from src.utils.config import load_config, save_config
+from src.utils.model_scales import get_model_config, get_results_dir
 from src.data.tokenizer import PSmilesTokenizer
 from src.data.data_loader import PolymerDataLoader
 from src.data.dataset import PolymerDataset, PropertyDataset
@@ -22,18 +23,26 @@ from src.training.hyperparameter_tuning import BackboneTuner, PropertyHeadTuner
 from src.utils.reproducibility import seed_everything, save_run_metadata
 
 
-def tune_backbone(args, config, device):
+def tune_backbone(args, config, results_dir, device):
     """Tune backbone hyperparameters."""
-    results_dir = Path(config['paths']['results_dir'])
     step_dir = results_dir / 'step6_tuning'
     step_dir.mkdir(parents=True, exist_ok=True)
 
     # Load tokenizer
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    base_results_dir = Path(config['paths']['results_dir'])
+    tokenizer_path = results_dir / 'tokenizer.json'
+    if not tokenizer_path.exists():
+        tokenizer_path = base_results_dir / 'tokenizer.json'
+    tokenizer = PSmilesTokenizer.load(tokenizer_path)
 
     # Load data
-    train_df = pd.read_csv(results_dir / 'train_unlabeled.csv')
-    val_df = pd.read_csv(results_dir / 'val_unlabeled.csv')
+    train_path = results_dir / 'train_unlabeled.csv'
+    val_path = results_dir / 'val_unlabeled.csv'
+    if not train_path.exists():
+        train_path = base_results_dir / 'train_unlabeled.csv'
+        val_path = base_results_dir / 'val_unlabeled.csv'
+    train_df = pd.read_csv(train_path)
+    val_df = pd.read_csv(val_path)
 
     # Create datasets
     train_dataset = PolymerDataset(train_df, tokenizer)
@@ -69,14 +78,17 @@ def tune_backbone(args, config, device):
     return results
 
 
-def tune_property_head(args, config, device):
+def tune_property_head(args, config, results_dir, device):
     """Tune property head hyperparameters."""
-    results_dir = Path(config['paths']['results_dir'])
     step_dir = results_dir / 'step6_tuning'
     step_dir.mkdir(parents=True, exist_ok=True)
 
     # Load tokenizer
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    base_results_dir = Path(config['paths']['results_dir'])
+    tokenizer_path = results_dir / 'tokenizer.json'
+    if not tokenizer_path.exists():
+        tokenizer_path = base_results_dir / 'tokenizer.json'
+    tokenizer = PSmilesTokenizer.load(tokenizer_path)
 
     # Load property data
     data_loader = PolymerDataLoader(config)
@@ -99,8 +111,10 @@ def tune_property_head(args, config, device):
         normalize=True, mean=mean, std=std
     )
 
+    # Get model config
+    backbone_config = get_model_config(args.model_size, config, model_type='sequence')
+
     # Load backbone
-    backbone_config = config['backbone']
     backbone = DiffusionBackbone(
         vocab_size=tokenizer.vocab_size,
         hidden_size=backbone_config['hidden_size'],
@@ -168,7 +182,9 @@ def main(args):
     # Load config
     config = load_config(args.config)
 
-    results_dir = Path(config['paths']['results_dir'])
+    # Override results_dir if model_size specified
+    base_results_dir = config['paths']['results_dir']
+    results_dir = Path(get_results_dir(args.model_size, base_results_dir))
     step_dir = results_dir / 'step6_tuning'
     step_dir.mkdir(parents=True, exist_ok=True)
 
@@ -187,12 +203,12 @@ def main(args):
 
     if args.mode == 'backbone':
         print("\nTuning backbone hyperparameters...")
-        results = tune_backbone(args, config, device)
+        results = tune_backbone(args, config, results_dir, device)
     elif args.mode == 'property':
         if not args.property:
             raise ValueError("--property required for property head tuning")
         print(f"\nTuning property head for {args.property}...")
-        results = tune_property_head(args, config, device)
+        results = tune_property_head(args, config, results_dir, device)
     else:
         raise ValueError(f"Unknown tuning mode: {args.mode}")
 
@@ -205,6 +221,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Hyperparameter tuning')
     parser.add_argument('--config', type=str, default='configs/config.yaml',
                         help='Path to config file')
+    parser.add_argument('--model_size', type=str, default=None,
+                        choices=['small', 'medium', 'large', 'xl'],
+                        help='Model size preset')
     parser.add_argument('--mode', type=str, required=True, choices=['backbone', 'property'],
                         help='Tuning mode')
     parser.add_argument('--property', type=str, default=None,

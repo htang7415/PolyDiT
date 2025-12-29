@@ -16,6 +16,7 @@ import numpy as np
 from src.utils.config import load_config, save_config
 from src.utils.plotting import PlotUtils
 from src.utils.chemistry import compute_sa_score
+from src.utils.model_scales import get_model_config, get_results_dir
 from src.data.tokenizer import PSmilesTokenizer
 from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
@@ -34,8 +35,11 @@ def main(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
 
+    # Override results_dir if model_size specified
+    base_results_dir = config['paths']['results_dir']
+    results_dir = Path(get_results_dir(args.model_size, base_results_dir))
+
     # Create output directories
-    results_dir = Path(config['paths']['results_dir'])
     step_dir = results_dir / f'step4_{args.property}'
     metrics_dir = step_dir / 'metrics'
     figures_dir = step_dir / 'figures'
@@ -49,20 +53,29 @@ def main(args):
 
     print("=" * 50)
     print(f"Step 4: Inverse Design for {args.property}")
+    if args.model_size:
+        print(f"Model Size: {args.model_size}")
     print("=" * 50)
 
-    # Load tokenizer
+    # Load tokenizer (from base results dir which has the tokenizer)
     print("\n1. Loading tokenizer...")
-    tokenizer = PSmilesTokenizer.load(results_dir / 'tokenizer.json')
+    tokenizer_path = results_dir / 'tokenizer.json'
+    if not tokenizer_path.exists():
+        tokenizer_path = Path(base_results_dir) / 'tokenizer.json'
+    tokenizer = PSmilesTokenizer.load(tokenizer_path)
 
-    # Load training data for novelty
+    # Load training data for novelty (from base results dir)
     print("\n2. Loading training data...")
-    train_df = pd.read_csv(results_dir / 'train_unlabeled.csv')
+    train_path = results_dir / 'train_unlabeled.csv'
+    if not train_path.exists():
+        train_path = Path(base_results_dir) / 'train_unlabeled.csv'
+    train_df = pd.read_csv(train_path)
     training_smiles = set(train_df['p_smiles'].tolist())
 
     # Load diffusion model
     print("\n3. Loading diffusion model...")
-    backbone_config = config['backbone']
+    # Get backbone config based on model_size
+    backbone_config = get_model_config(args.model_size, config, model_type='sequence')
     backbone = DiffusionBackbone(
         vocab_size=tokenizer.vocab_size,
         hidden_size=backbone_config['hidden_size'],
@@ -211,6 +224,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Property-guided inverse design')
     parser.add_argument('--config', type=str, default='configs/config.yaml',
                         help='Path to config file')
+    parser.add_argument('--model_size', type=str, default=None,
+                        choices=['small', 'medium', 'large', 'xl'],
+                        help='Model size preset (small: ~12M, medium: ~50M, large: ~150M, xl: ~400M)')
     parser.add_argument('--property', type=str, required=True,
                         help='Property name (e.g., Tg, Tm)')
     parser.add_argument('--targets', type=str, default=None,

@@ -18,6 +18,7 @@ from collections import Counter
 from src.utils.config import load_config, save_config
 from src.utils.plotting import PlotUtils
 from src.utils.chemistry import compute_sa_score, count_stars
+from src.utils.model_scales import get_model_config, get_results_dir
 from src.data.graph_tokenizer import GraphTokenizer
 from src.model.graph_backbone import GraphDiffusionBackbone
 from src.model.graph_diffusion import GraphMaskingDiffusion
@@ -35,8 +36,9 @@ def main(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
 
-    # Create output directories
-    results_dir = Path(config['paths']['results_dir'])
+    # Override results_dir if model_size specified
+    base_results_dir = config['paths']['results_dir']
+    results_dir = Path(get_results_dir(args.model_size, base_results_dir))
     step_dir = results_dir / 'step2_sampling'
     metrics_dir = step_dir / 'metrics'
     figures_dir = step_dir / 'figures'
@@ -52,9 +54,14 @@ def main(args):
     print("Step 2: Graph Sampling and Generative Evaluation")
     print("=" * 60)
 
+    # Get model config
+    backbone_config = get_model_config(args.model_size, config, model_type='graph')
+
     # Load graph configuration
     print("\n1. Loading graph configuration...")
     graph_config_path = results_dir / 'graph_config.json'
+    if not graph_config_path.exists():
+        graph_config_path = Path(base_results_dir) / 'graph_config.json'
     with open(graph_config_path, 'r') as f:
         graph_config = json.load(f)
 
@@ -70,11 +77,17 @@ def main(args):
 
     # Load graph tokenizer
     print("\n2. Loading graph tokenizer...")
-    graph_tokenizer = GraphTokenizer.load(results_dir / 'graph_tokenizer.json')
+    tokenizer_path = results_dir / 'graph_tokenizer.json'
+    if not tokenizer_path.exists():
+        tokenizer_path = Path(base_results_dir) / 'graph_tokenizer.json'
+    graph_tokenizer = GraphTokenizer.load(tokenizer_path)
 
     # Load training data for novelty computation
     print("\n3. Loading training data...")
-    train_df = pd.read_csv(results_dir / 'train_unlabeled.csv')
+    train_path = results_dir / 'train_unlabeled.csv'
+    if not train_path.exists():
+        train_path = Path(base_results_dir) / 'train_unlabeled.csv'
+    train_df = pd.read_csv(train_path)
     training_smiles = set(train_df['p_smiles'].tolist())
     print(f"   Training set size: {len(training_smiles)}")
 
@@ -85,7 +98,6 @@ def main(args):
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    backbone_config = config['backbone']
     diffusion_config = config['diffusion']
 
     backbone = GraphDiffusionBackbone(
@@ -286,6 +298,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Sample and evaluate graph generative model')
     parser.add_argument('--config', type=str, default='configs/config.yaml',
                         help='Path to config file')
+    parser.add_argument('--model_size', type=str, default=None,
+                        choices=['small', 'medium', 'large', 'xl'],
+                        help='Model size preset')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to model checkpoint')
     parser.add_argument('--num_samples', type=int, default=None,

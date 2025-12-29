@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from src.utils.config import load_config, save_config
 from src.utils.plotting import PlotUtils
+from src.utils.model_scales import get_model_config, get_results_dir
 from src.data.graph_tokenizer import GraphTokenizer
 from src.data.data_loader import PolymerDataLoader
 from src.data.dataset import GraphPropertyDataset, graph_collate_fn
@@ -37,8 +38,9 @@ def main(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
 
-    # Create output directories
-    results_dir = Path(config['paths']['results_dir'])
+    # Override results_dir if model_size specified
+    base_results_dir = config['paths']['results_dir']
+    results_dir = Path(get_results_dir(args.model_size, base_results_dir))
     step_dir = results_dir / f'step3_{args.property}'
     metrics_dir = step_dir / 'metrics'
     figures_dir = step_dir / 'figures'
@@ -54,14 +56,22 @@ def main(args):
     print(f"Step 3: Training Graph Property Head for {args.property}")
     print("=" * 50)
 
+    # Get model config
+    backbone_config = get_model_config(args.model_size, config, model_type='graph')
+
     # Load graph config
     print("\n1. Loading graph config and tokenizer...")
     graph_config_path = results_dir / 'graph_config.json'
+    if not graph_config_path.exists():
+        graph_config_path = Path(base_results_dir) / 'graph_config.json'
     with open(graph_config_path, 'r') as f:
         graph_config = json.load(f)
 
     # Load graph tokenizer
-    tokenizer = GraphTokenizer.load(results_dir / 'graph_tokenizer.json')
+    tokenizer_path = results_dir / 'graph_tokenizer.json'
+    if not tokenizer_path.exists():
+        tokenizer_path = Path(base_results_dir) / 'graph_tokenizer.json'
+    tokenizer = GraphTokenizer.load(tokenizer_path)
     print(f"Nmax: {graph_config['Nmax']}")
     print(f"Atom vocab size: {graph_config['atom_vocab_size']}")
     print(f"Edge vocab size: {graph_config['edge_vocab_size']}")
@@ -292,6 +302,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train graph property prediction head')
     parser.add_argument('--config', type=str, default='configs/config.yaml',
                         help='Path to config file')
+    parser.add_argument('--model_size', type=str, default=None,
+                        choices=['small', 'medium', 'large', 'xl'],
+                        help='Model size preset')
     parser.add_argument('--property', type=str, required=True,
                         help='Property name (e.g., Tg, Tm)')
     parser.add_argument('--backbone_checkpoint', type=str, default=None,

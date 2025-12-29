@@ -17,6 +17,7 @@ import numpy as np
 from src.utils.config import load_config, save_config
 from src.utils.plotting import PlotUtils
 from src.utils.chemistry import compute_sa_score
+from src.utils.model_scales import get_model_config, get_results_dir
 from src.data.graph_tokenizer import GraphTokenizer
 from src.model.graph_backbone import create_graph_backbone
 from src.model.graph_diffusion import create_graph_diffusion
@@ -35,8 +36,9 @@ def main(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
 
-    # Create output directories
-    results_dir = Path(config['paths']['results_dir'])
+    # Override results_dir if model_size specified
+    base_results_dir = config['paths']['results_dir']
+    results_dir = Path(get_results_dir(args.model_size, base_results_dir))
     step_name = f'step5_{args.polymer_class}'
     if args.property:
         step_name += f'_{args.property}'
@@ -55,18 +57,29 @@ def main(args):
     print(f"Step 5: Graph Class-Guided Design for {args.polymer_class}")
     print("=" * 50)
 
+    # Get model config
+    backbone_config = get_model_config(args.model_size, config, model_type='graph')
+
     # Load graph config
     print("\n1. Loading graph config and tokenizer...")
     graph_config_path = results_dir / 'graph_config.json'
+    if not graph_config_path.exists():
+        graph_config_path = Path(base_results_dir) / 'graph_config.json'
     with open(graph_config_path, 'r') as f:
         graph_config = json.load(f)
 
-    tokenizer = GraphTokenizer.load(results_dir / 'graph_tokenizer.json')
+    tokenizer_path = results_dir / 'graph_tokenizer.json'
+    if not tokenizer_path.exists():
+        tokenizer_path = Path(base_results_dir) / 'graph_tokenizer.json'
+    tokenizer = GraphTokenizer.load(tokenizer_path)
     print(f"Nmax: {graph_config['Nmax']}")
 
     # Load training data for novelty
     print("\n2. Loading training data...")
-    train_df = pd.read_csv(results_dir / 'train_unlabeled.csv')
+    train_path = results_dir / 'train_unlabeled.csv'
+    if not train_path.exists():
+        train_path = Path(base_results_dir) / 'train_unlabeled.csv'
+    train_df = pd.read_csv(train_path)
     training_smiles = set(train_df['p_smiles'].tolist())
 
     # Create classifier
@@ -251,6 +264,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Graph polymer class-guided design')
     parser.add_argument('--config', type=str, default='configs/config.yaml',
                         help='Path to config file')
+    parser.add_argument('--model_size', type=str, default=None,
+                        choices=['small', 'medium', 'large', 'xl'],
+                        help='Model size preset')
     parser.add_argument('--polymer_class', type=str, required=True,
                         help='Target polymer class (e.g., polyimide, polyester)')
     parser.add_argument('--property', type=str, default=None,
