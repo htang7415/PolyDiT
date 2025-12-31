@@ -120,10 +120,10 @@ class InverseDesigner:
             "pred_std_hits": round(float(np.std(hits_predictions)), 4) if len(hits_predictions) > 0 else 0.0,
         }
 
-        # Generative metrics for all generated SELFIES (evaluator handles conversion internally)
+        # Generative metrics for all generated SELFIES (star=2 fraction across all)
         gen_metrics = self.evaluator.evaluate(all_selfies, "all_generated", show_progress=False)
         results.update({
-            "validity": gen_metrics["validity"],
+            "frac_star_eq_2": gen_metrics["frac_star_eq_2"],
             "uniqueness": gen_metrics["uniqueness"],
             "novelty": gen_metrics["novelty"],
             "avg_diversity": gen_metrics["avg_diversity"],
@@ -294,7 +294,7 @@ class InverseDesigner:
             "pred_std_valid": 0.0,
             "pred_mean_hits": 0.0,
             "pred_std_hits": 0.0,
-            "validity": 0.0,
+            "frac_star_eq_2": 0.0,
             "uniqueness": 0.0,
             "novelty": 0.0,
             "avg_diversity": 0.0,

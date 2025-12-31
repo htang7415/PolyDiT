@@ -383,8 +383,15 @@ class GroupSELFIESTokenizer:
         return smiles.replace("*", self.PLACEHOLDER_SMILES)
 
     def _placeholder_to_star(self, smiles: str) -> str:
-        """Replace placeholder atom back to '*'."""
-        return smiles.replace(self.PLACEHOLDER_SMILES, "*")
+        """Replace placeholder atom back to '*'.
+
+        Handles multiple iodine placeholder variants that RDKit may produce:
+        - [I+3] - basic placeholder
+        - [IH+3] - with explicit hydrogen
+        - [IH0+3] - with explicit H count
+        """
+        # Use regex to handle all variants: [I+3], [IH+3], [IH0+3], etc.
+        return re.sub(r'\[IH?\d*\+3\]', '*', smiles)
 
     def _smiles_to_mol(self, smiles: str) -> Optional[Chem.Mol]:
         """Convert SMILES string to RDKit Mol object."""

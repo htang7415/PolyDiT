@@ -1,10 +1,13 @@
 """Constrained sampler for Group SELFIES polymer generation."""
 
+import re
 import torch
 import torch.nn.functional as F
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 import numpy as np
 from tqdm import tqdm
+
+from ..utils.chemistry import count_stars, check_validity
 
 
 class ConstrainedSampler:
@@ -67,6 +70,10 @@ class ConstrainedSampler:
             self.mask_id, self.pad_id, self.bos_id, self.eos_id, self.unk_id
         } - {None}
 
+        # Build mapping of ALL placeholder-bearing tokens to their contribution count
+        # This includes both direct placeholder token and group tokens containing [I+3]
+        self.placeholder_contributions = self._build_placeholder_token_map()
+
     def _find_placeholder_id(self):
         """Try to find placeholder token ID in vocabulary."""
         # Look for tokens containing 'I' and '+3' (placeholder pattern)
@@ -77,8 +84,44 @@ class ConstrainedSampler:
 
         self.placeholder_id = None
 
+    def _build_placeholder_token_map(self) -> Dict[int, int]:
+        """Build mapping of token ID -> number of placeholders it contributes.
+
+        This finds ALL tokens that produce placeholder atoms when decoded:
+        - Direct placeholder token (e.g., [IH0+3])
+        - Group tokens that contain [I+3] in their SMILES representation
+
+        Returns:
+            Dict mapping token_id -> placeholder count for that token.
+        """
+        placeholder_contributions = {}
+
+        # Direct placeholder token contributes 1
+        if self.placeholder_id is not None:
+            placeholder_contributions[self.placeholder_id] = 1
+
+        # Check for group tokens containing [I+3]
+        # Group tokens have format like [:/0G100] and decode to group SMILES
+        if hasattr(self.tokenizer, 'group_smiles') and self.tokenizer.group_smiles:
+            for token, idx in self.tokenizer.vocab.items():
+                # Match group reference tokens like [:/0G100]
+                match = re.match(r'\[:/(\d+)G(\d+)\]', token)
+                if match:
+                    group_idx = int(match.group(2))
+                    if group_idx < len(self.tokenizer.group_smiles):
+                        group_smiles = self.tokenizer.group_smiles[group_idx]
+                        # Count [I+3] occurrences in this group's SMILES
+                        count = group_smiles.count('[I+3]')
+                        if count > 0:
+                            placeholder_contributions[idx] = count
+
+        return placeholder_contributions
+
     def _count_placeholders(self, ids: torch.Tensor) -> torch.Tensor:
-        """Count placeholder tokens in each sequence.
+        """Count total placeholder atoms in each sequence.
+
+        Uses placeholder_contributions to sum contributions from all
+        placeholder-bearing tokens (direct placeholder + group tokens).
 
         Args:
             ids: Token IDs of shape [batch, seq_len].
@@ -86,9 +129,15 @@ class ConstrainedSampler:
         Returns:
             Counts of shape [batch].
         """
-        if self.placeholder_id is None:
+        if not self.placeholder_contributions:
             return torch.zeros(ids.shape[0], device=ids.device, dtype=torch.long)
-        return (ids == self.placeholder_id).sum(dim=1)
+
+        # Sum contributions from all placeholder-bearing tokens
+        counts = torch.zeros(ids.shape[0], device=ids.device, dtype=torch.long)
+        for token_id, contribution in self.placeholder_contributions.items():
+            counts += (ids == token_id).sum(dim=1) * contribution
+
+        return counts
 
     def _apply_placeholder_constraint(
         self,
@@ -96,27 +145,31 @@ class ConstrainedSampler:
         current_ids: torch.Tensor,
         max_placeholders: int = 2
     ) -> torch.Tensor:
-        """Apply constraint to limit number of placeholder tokens.
+        """Apply constraint to limit TOTAL number of placeholder atoms.
 
-        Vectorized implementation for better GPU utilization.
+        Enforces a sum constraint across ALL placeholder-bearing tokens:
+        - Direct placeholder token (e.g., [IH0+3])
+        - Group tokens that contain [I+3] in their decoded SMILES
 
         Args:
             logits: Logits of shape [batch, seq_len, vocab_size].
             current_ids: Current token IDs of shape [batch, seq_len].
-            max_placeholders: Maximum allowed placeholder tokens.
+            max_placeholders: Maximum allowed placeholder atoms.
 
         Returns:
             Modified logits.
         """
-        if self.placeholder_id is None:
+        if not self.placeholder_contributions:
             return logits
 
-        # Count current placeholders (excluding MASK positions)
+        # Count current total placeholders (sum of contributions, excluding MASK positions)
         non_mask = current_ids != self.mask_id
-        current_placeholders = ((current_ids == self.placeholder_id) & non_mask).sum(dim=1)  # [batch]
+        current_total = torch.zeros(current_ids.shape[0], device=current_ids.device, dtype=torch.long)
+        for token_id, contribution in self.placeholder_contributions.items():
+            current_total += ((current_ids == token_id) & non_mask).sum(dim=1) * contribution
 
         # Find sequences that have reached the placeholder limit [batch]
-        exceed_limit = current_placeholders >= max_placeholders
+        exceed_limit = current_total >= max_placeholders
 
         # Find mask positions [batch, seq_len]
         mask_positions = current_ids == self.mask_id
@@ -124,12 +177,14 @@ class ConstrainedSampler:
         # Combined mask: sequences that exceed limit AND are mask positions [batch, seq_len]
         should_forbid = exceed_limit.unsqueeze(1) & mask_positions
 
-        # Set placeholder logit to -inf where should_forbid is True (vectorized)
-        logits[:, :, self.placeholder_id] = torch.where(
-            should_forbid,
-            torch.tensor(float('-inf'), device=logits.device, dtype=logits.dtype),
-            logits[:, :, self.placeholder_id]
-        )
+        # Forbid ALL placeholder-bearing tokens at masked positions (vectorized)
+        neg_inf = torch.tensor(float('-inf'), device=logits.device, dtype=logits.dtype)
+        for token_id in self.placeholder_contributions:
+            logits[:, :, token_id] = torch.where(
+                should_forbid,
+                neg_inf,
+                logits[:, :, token_id]
+            )
 
         return logits
 
@@ -316,16 +371,19 @@ class ConstrainedSampler:
                     # Update constraints dynamically based on what was just sampled
                     sampled_token = sampled.item()
 
-                    # If we sampled a placeholder, update constraint for remaining positions
-                    if sampled_token == self.placeholder_id:
-                        # Count current placeholders (excluding remaining MASK positions)
+                    # If we sampled ANY placeholder-bearing token, update constraint
+                    if sampled_token in self.placeholder_contributions:
+                        # Count current total placeholders using contribution map
                         non_mask = ids[i] != self.mask_id
-                        current_placeholders = ((ids[i] == self.placeholder_id) & non_mask).sum().item()
+                        current_total = 0
+                        for token_id, contribution in self.placeholder_contributions.items():
+                            current_total += ((ids[i] == token_id) & non_mask).sum().item() * contribution
 
-                        # If we've reached the limit, forbid placeholders at remaining masked positions
-                        if current_placeholders >= 2:
+                        # If we've reached the limit, forbid ALL placeholder tokens at remaining positions
+                        if current_total >= 2:
                             remaining_mask = ids[i] == self.mask_id
-                            logits[i, remaining_mask, self.placeholder_id] = float('-inf')
+                            for token_id in self.placeholder_contributions:
+                                logits[i, remaining_mask, token_id] = float('-inf')
                             probs[i] = F.softmax(logits[i], dim=-1)
 
             # Store logits for final step
@@ -425,6 +483,84 @@ class ConstrainedSampler:
             all_smiles.extend(smiles)
 
         return all_ids, all_smiles
+
+    def sample_with_rejection(
+        self,
+        target_samples: int,
+        seq_length: int,
+        batch_size: int = 256,
+        max_attempts: int = 10,
+        target_stars: int = 2,
+        require_validity: bool = True,
+        show_progress: bool = True
+    ) -> Tuple[List[torch.Tensor], List[str]]:
+        """Sample with rejection to guarantee exactly target_stars.
+
+        Uses oversampling with rejection to ensure all returned samples
+        have exactly the target number of star tokens and are RDKit-valid.
+
+        Args:
+            target_samples: Exact number of valid samples to return.
+            seq_length: Sequence length for generation.
+            batch_size: Batch size for sampling.
+            max_attempts: Maximum number of oversampling rounds.
+            target_stars: Required number of star tokens (default: 2).
+            require_validity: Also require RDKit validity (default: True).
+            show_progress: Whether to show progress.
+
+        Returns:
+            Tuple of (valid_ids, valid_smiles) with exactly target_samples entries.
+        """
+        valid_ids = []
+        valid_smiles = []
+
+        # Start with initial estimate of acceptance rate
+        initial_batch = min(target_samples * 2, batch_size * 4)
+        acceptance_rate = 0.5  # Will be updated based on actual results
+
+        attempt = 0
+        pbar = tqdm(total=target_samples, desc="Rejection sampling", disable=not show_progress)
+
+        while len(valid_smiles) < target_samples and attempt < max_attempts:
+            # Calculate how many samples to generate based on current acceptance rate
+            remaining = target_samples - len(valid_smiles)
+            oversample_factor = max(1.5, 1.0 / max(acceptance_rate, 0.1))
+            num_to_generate = min(int(remaining * oversample_factor), batch_size * 10)
+
+            # Generate samples
+            _, smiles_list = self.sample_batch(
+                num_to_generate, seq_length, batch_size, show_progress=False
+            )
+
+            # Filter valid samples
+            new_valid = 0
+            for smiles in smiles_list:
+                if len(valid_smiles) >= target_samples:
+                    break
+
+                stars = count_stars(smiles)
+                is_valid = not require_validity or check_validity(smiles)
+
+                if stars == target_stars and is_valid:
+                    valid_smiles.append(smiles)
+                    new_valid += 1
+
+            # Update acceptance rate estimate
+            if len(smiles_list) > 0:
+                batch_rate = new_valid / len(smiles_list)
+                # Exponential moving average
+                acceptance_rate = 0.7 * acceptance_rate + 0.3 * batch_rate
+
+            pbar.update(new_valid)
+            attempt += 1
+
+        pbar.close()
+
+        if len(valid_smiles) < target_samples:
+            print(f"Warning: Only found {len(valid_smiles)}/{target_samples} valid samples "
+                  f"after {max_attempts} attempts (acceptance rate: {acceptance_rate:.2%})")
+
+        return [], valid_smiles[:target_samples]
 
     def sample_conditional(
         self,

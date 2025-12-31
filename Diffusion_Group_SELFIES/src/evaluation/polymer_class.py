@@ -236,7 +236,7 @@ class ClassGuidedDesigner:
         # Generative metrics on ALL generated samples (not just class matches)
         gen_metrics = self.evaluator.evaluate(all_smiles, "all_generated", show_progress=False)
         results.update({
-            "validity": gen_metrics["validity"],
+            "frac_star_eq_2": gen_metrics["frac_star_eq_2"],
             "uniqueness": gen_metrics["uniqueness"],
             "novelty": gen_metrics["novelty"],
             "avg_diversity": gen_metrics["avg_diversity"],
@@ -392,7 +392,7 @@ class ClassGuidedDesigner:
             "n_valid": 0,
             "n_class_matches": 0,
             "class_success_rate": 0.0,
-            "validity": 0.0,
+            "frac_star_eq_2": 0.0,
             "uniqueness": 0.0,
             "novelty": 0.0,
             "avg_diversity": 0.0,

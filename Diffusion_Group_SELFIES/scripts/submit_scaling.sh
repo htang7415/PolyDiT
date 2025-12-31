@@ -42,8 +42,8 @@ MODEL_SIZE=${1:-medium}
 PROPERTY="Tg"
 TARGET="300"
 POLYMER_CLASS="polyimide"
-NUM_SAMPLES=50000
-NUM_CANDIDATES=10000
+NUM_SAMPLES=20000
+NUM_CANDIDATES=20000
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
