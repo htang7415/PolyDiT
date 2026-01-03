@@ -21,7 +21,7 @@ data:
 
 # Tokenizer
 tokenizer:
-  type: "selfies"  # Tokenizer type: "selfies" or "psmiles"
+  type: "selfies"
   special_tokens:
     pad: "[PAD]"
     mask: "[MASK]"
@@ -66,7 +66,7 @@ model_sizes:
     # Training
     max_steps: 500000
     warmup_steps: 1000
-    batch_size: 256
+    batch_size: 128
     gradient_accumulation_steps: 4
     learning_rate: 3.0e-4
   medium:
@@ -80,7 +80,7 @@ model_sizes:
     # Training
     max_steps: 500000
     warmup_steps: 2000
-    batch_size: 256
+    batch_size: 128
     gradient_accumulation_steps: 4
     learning_rate: 3.0e-4
   large:
@@ -147,11 +147,11 @@ optimization:
   compile_model: true              # torch.compile()
   compile_mode: default            # torch.compile() mode; avoid cudagraph issues
   gradient_accumulation_steps: 4   # Effective batch = 256 * 4 = 1024
-  num_workers: 8                   # DataLoader workers
-  pin_memory: true                 # GPU memory pinning
+  num_workers: 2                   # DataLoader workers
+  pin_memory: false                # GPU memory pinning
   cudnn_benchmark: true            # cuDNN autotuning
-  prefetch_factor: 2               # DataLoader prefetching
-  cache_tokenization: true         # Pre-tokenize dataset
+  prefetch_factor: 1               # DataLoader prefetching
+  cache_tokenization: false        # Pre-tokenize dataset
 
 # Property head architecture
 property_head:

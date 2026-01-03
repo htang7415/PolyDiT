@@ -157,10 +157,32 @@ class ScalingLogger:
         if step_name not in self.results['steps']:
             self.results['steps'][step_name] = {}
 
+        cleaned_error = self._strip_progress_lines(error_message)
         self.results['steps'][step_name]['status'] = 'failed'
-        self.results['steps'][step_name]['error'] = error_message
+        self.results['steps'][step_name]['error'] = cleaned_error
         self.results['steps'][step_name]['end_time'] = datetime.now().isoformat()
         self._save()
+
+    @classmethod
+    def _strip_progress_lines(cls, text: Optional[str]) -> str:
+        """Remove tqdm-style progress lines from log text."""
+        if not text:
+            return ""
+        normalized = text.replace('\r', '\n')
+        filtered = [
+            line for line in normalized.splitlines()
+            if not cls._is_progress_line(line.lstrip())
+        ]
+        return "\n".join(filtered).strip()
+
+    @staticmethod
+    def _is_progress_line(line: str) -> bool:
+        """Detect tqdm-style progress output lines."""
+        if not line:
+            return False
+        if line.startswith("Tokenizing:") or line.startswith("Epoch "):
+            return "%|" in line
+        return False
 
     def finalize(self):
         """Finalize the experiment and record total time."""
