@@ -1,10 +1,11 @@
 """Trainer for graph diffusion backbone model."""
 
-import os
 import warnings
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.amp import autocast, GradScaler
@@ -66,7 +67,11 @@ class GraphBackboneTrainer:
         config: Dict,
         device: str = 'cuda',
         output_dir: str = 'results',
-        step_dir: str = None
+        step_dir: str = None,
+        distributed: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
+        local_rank: Optional[int] = None
     ):
         """Initialize trainer.
 
@@ -78,12 +83,21 @@ class GraphBackboneTrainer:
             device: Device for training.
             output_dir: Output directory for shared artifacts (checkpoints).
             step_dir: Step-specific output directory for metrics/figures.
+            distributed: Whether to use DistributedDataParallel.
+            rank: Global rank.
+            world_size: Total number of ranks.
+            local_rank: Local rank (GPU index).
         """
         self.model = model.to(device)
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.config = config
         self.device = device
+        self.distributed = distributed
+        self.rank = rank
+        self.world_size = world_size
+        self.local_rank = local_rank
+        self.is_main_process = (not self.distributed) or self.rank == 0
         self.output_dir = Path(output_dir)
         self.step_dir = Path(step_dir) if step_dir else self.output_dir
 
@@ -110,6 +124,9 @@ class GraphBackboneTrainer:
         self.scaler = GradScaler(enabled=self.use_amp)
 
         # Compile model for faster execution (guard against older GPUs)
+        if self.compile_model and self.distributed:
+            warnings.warn("torch.compile disabled for DDP to avoid compilation issues.")
+            self.compile_model = False
         if self.compile_model and _is_cuda_device(device):
             if not _supports_torch_compile(device):
                 warnings.warn("torch.compile disabled: GPU compute capability < 7.0")
@@ -117,6 +134,8 @@ class GraphBackboneTrainer:
             else:
                 print("Compiling model with torch.compile()...")
                 self.model = torch.compile(self.model, mode="reduce-overhead")
+        if self.distributed:
+            self.model = self._wrap_ddp(self.model)
 
         # Training config
         train_config = config['training_backbone']
@@ -165,6 +184,32 @@ class GraphBackboneTrainer:
         self.val_edge_losses = []
         self.learning_rates = []
 
+    def _wrap_ddp(self, model: nn.Module) -> nn.Module:
+        """Wrap model with DistributedDataParallel when enabled."""
+        if not self.distributed or not dist.is_available() or not dist.is_initialized():
+            return model
+        if _is_cuda_device(self.device):
+            device_index = torch.device(self.device).index
+            return DDP(model, device_ids=[device_index], output_device=device_index)
+        return DDP(model)
+
+    def _get_model_state(self) -> Dict[str, torch.Tensor]:
+        """Get a clean state_dict for saving (strip DDP/compile wrappers)."""
+        model = self.model
+        if isinstance(model, DDP):
+            model = model.module
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod
+        return model.state_dict()
+
+    def _reduce_mean(self, value: float) -> float:
+        """Average a scalar across ranks when using DDP."""
+        if not self.distributed or not dist.is_available() or not dist.is_initialized():
+            return value
+        tensor = torch.tensor(value, device=self.device)
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        return (tensor / self.world_size).item()
+
     def _maybe_mark_cudagraph_step_begin(self) -> None:
         """Mark the beginning of a cudagraph step if supported."""
         if not self.compile_model or not _is_cuda_device(self.device):
@@ -186,9 +231,10 @@ class GraphBackboneTrainer:
         Returns:
             Training history.
         """
-        print(f"Starting graph diffusion training for {self.num_epochs} epochs...")
-        print(f"Train batches: {len(self.train_dataloader)}")
-        print(f"Val batches: {len(self.val_dataloader)}")
+        if self.is_main_process:
+            print(f"Starting graph diffusion training for {self.num_epochs} epochs...")
+            print(f"Train batches: {len(self.train_dataloader)}")
+            print(f"Val batches: {len(self.val_dataloader)}")
 
         for epoch in range(self.num_epochs):
             # Training epoch
@@ -200,13 +246,15 @@ class GraphBackboneTrainer:
             # Save checkpoint
             self._save_checkpoint(val_loss, epoch)
 
-            print(f"Epoch {epoch+1}/{self.num_epochs} - "
-                  f"Train Loss: {train_loss:.4f} (Node: {node_loss:.4f}, Edge: {edge_loss:.4f}) - "
-                  f"Val Loss: {val_loss:.4f} - "
-                  f"LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+            if self.is_main_process:
+                print(f"Epoch {epoch+1}/{self.num_epochs} - "
+                      f"Train Loss: {train_loss:.4f} (Node: {node_loss:.4f}, Edge: {edge_loss:.4f}) - "
+                      f"Val Loss: {val_loss:.4f} - "
+                      f"LR: {self.optimizer.param_groups[0]['lr']:.2e}")
 
             if self.global_step >= self.max_steps:
-                print(f"Reached max steps ({self.max_steps}), stopping training.")
+                if self.is_main_process:
+                    print(f"Reached max steps ({self.max_steps}), stopping training.")
                 break
 
         # Save final checkpoint
@@ -241,7 +289,9 @@ class GraphBackboneTrainer:
         total_edge_loss = 0.0
         num_batches = 0
 
-        pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
+        if self.distributed and hasattr(self.train_dataloader.sampler, "set_epoch"):
+            self.train_dataloader.sampler.set_epoch(epoch)
+        pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}", disable=not self.is_main_process)
         for batch in pbar:
             if self.global_step >= self.max_steps:
                 break
@@ -252,25 +302,28 @@ class GraphBackboneTrainer:
             total_edge_loss += edge_loss
             num_batches += 1
 
-            self.train_losses.append(loss)
-            self.train_node_losses.append(node_loss)
-            self.train_edge_losses.append(edge_loss)
-            self.learning_rates.append(self.optimizer.param_groups[0]['lr'])
+            if self.is_main_process:
+                self.train_losses.append(loss)
+                self.train_node_losses.append(node_loss)
+                self.train_edge_losses.append(edge_loss)
+                self.learning_rates.append(self.optimizer.param_groups[0]['lr'])
 
-            pbar.set_postfix({
-                'loss': f'{loss:.4f}',
-                'node': f'{node_loss:.4f}',
-                'edge': f'{edge_loss:.4f}'
-            })
+            if self.is_main_process:
+                pbar.set_postfix({
+                    'loss': f'{loss:.4f}',
+                    'node': f'{node_loss:.4f}',
+                    'edge': f'{edge_loss:.4f}'
+                })
 
             # Periodic validation
             if self.global_step > 0 and self.global_step % self.eval_every == 0:
                 val_loss, val_node, val_edge = self._validate()
-                self.val_losses.append(val_loss)
-                self.val_node_losses.append(val_node)
-                self.val_edge_losses.append(val_edge)
-                self._save_checkpoint(val_loss, epoch)
-                self.model.train()
+                if self.is_main_process:
+                    self.val_losses.append(val_loss)
+                    self.val_node_losses.append(val_node)
+                    self.val_edge_losses.append(val_edge)
+                    self._save_checkpoint(val_loss, epoch)
+                    self.model.train()
 
             # Periodic save
             if self.global_step > 0 and self.global_step % self.save_every == 0:
@@ -282,7 +335,11 @@ class GraphBackboneTrainer:
         avg_node = total_node_loss / max(num_batches, 1)
         avg_edge = total_edge_loss / max(num_batches, 1)
 
-        return avg_loss, avg_node, avg_edge
+        return (
+            self._reduce_mean(avg_loss),
+            self._reduce_mean(avg_node),
+            self._reduce_mean(avg_edge)
+        )
 
     def _train_step(self, batch: Dict[str, torch.Tensor]):
         """Single training step for graph data.
@@ -360,7 +417,11 @@ class GraphBackboneTrainer:
         avg_node = total_node_loss / max(num_batches, 1)
         avg_edge = total_edge_loss / max(num_batches, 1)
 
-        return avg_loss, avg_node, avg_edge
+        return (
+            self._reduce_mean(avg_loss),
+            self._reduce_mean(avg_node),
+            self._reduce_mean(avg_edge)
+        )
 
     def _save_checkpoint(self, val_loss: float, epoch: int, final: bool = False):
         """Save model checkpoint.
@@ -370,10 +431,10 @@ class GraphBackboneTrainer:
             epoch: Current epoch.
             final: Whether this is the final checkpoint.
         """
-        # Handle compiled model
-        model_state = self.model.state_dict()
-        if hasattr(self.model, '_orig_mod'):
-            model_state = self.model._orig_mod.state_dict()
+        if not self.is_main_process:
+            return
+
+        model_state = self._get_model_state()
 
         checkpoint = {
             'epoch': epoch,
@@ -402,9 +463,10 @@ class GraphBackboneTrainer:
         Args:
             epoch: Current epoch.
         """
-        model_state = self.model.state_dict()
-        if hasattr(self.model, '_orig_mod'):
-            model_state = self.model._orig_mod.state_dict()
+        if not self.is_main_process:
+            return
+
+        model_state = self._get_model_state()
 
         checkpoint = {
             'epoch': epoch,
@@ -417,6 +479,8 @@ class GraphBackboneTrainer:
 
     def _save_history(self):
         """Save training history to CSV."""
+        if not self.is_main_process:
+            return
         # Round floats
         rounded_train_losses = [round(loss, 4) for loss in self.train_losses]
         rounded_node_losses = [round(loss, 4) for loss in self.train_node_losses]
@@ -452,11 +516,10 @@ class GraphBackboneTrainer:
         """
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
-        # Handle compiled model
-        if hasattr(self.model, '_orig_mod'):
-            self.model._orig_mod.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+        model = self.model.module if isinstance(self.model, DDP) else self.model
+        if hasattr(model, '_orig_mod'):
+            model = model._orig_mod
+        model.load_state_dict(checkpoint['model_state_dict'])
 
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])

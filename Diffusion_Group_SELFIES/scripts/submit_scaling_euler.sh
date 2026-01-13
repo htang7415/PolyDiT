@@ -12,11 +12,11 @@
 #SBATCH --time=10-00:00:00
 
 # Scaling Law Experiment Runner (Group SELFIES)
-# Usage: sbatch scripts/submit_scaling.sh <model_size>
-# Example: sbatch scripts/submit_scaling.sh small
-#          sbatch scripts/submit_scaling.sh medium
-#          sbatch scripts/submit_scaling.sh large
-#          sbatch scripts/submit_scaling.sh xl
+# Usage: sbatch scripts/submit_scaling_euler.sh <model_size>
+# Example: sbatch scripts/submit_scaling_euler.sh small
+#          sbatch scripts/submit_scaling_euler.sh medium
+#          sbatch scripts/submit_scaling_euler.sh large
+#          sbatch scripts/submit_scaling_euler.sh xl
 
 set -e
 

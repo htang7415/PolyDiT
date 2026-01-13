@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 import pandas as pd
-from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch.utils.data import DataLoader, DistributedSampler
 
 from src.utils.config import load_config, save_config
 from src.utils.plotting import PlotUtils
@@ -28,14 +29,38 @@ from src.training.graph_trainer_backbone import GraphBackboneTrainer
 from src.utils.reproducibility import seed_everything, save_run_metadata
 
 
+def init_distributed():
+    """Initialize torch.distributed if launched with torchrun."""
+    if not dist.is_available():
+        return False, 0, 1, 0, None
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return False, 0, 1, 0, None
+    if not dist.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend, init_method="env://")
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = f"cuda:{local_rank}"
+    else:
+        device = "cpu"
+    return True, rank, world_size, local_rank, device
+
+
 def main(args):
     """Main function."""
     # Load config
     config = load_config(args.config)
 
+    distributed, rank, world_size, local_rank, dist_device = init_distributed()
+    is_main_process = (not distributed) or rank == 0
+
     # Set device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
+    device = dist_device if distributed else ('cuda' if torch.cuda.is_available() else 'cpu')
+    if is_main_process:
+        print(f"Using device: {device}")
 
     # Override results_dir if model_size specified
     base_results_dir = config['paths']['results_dir']
@@ -48,8 +73,9 @@ def main(args):
 
     # Reproducibility
     seed_info = seed_everything(config['data']['random_seed'])
-    save_config(config, step_dir / 'config_used.yaml')
-    save_run_metadata(step_dir, args.config, seed_info)
+    if is_main_process:
+        save_config(config, step_dir / 'config_used.yaml')
+        save_run_metadata(step_dir, args.config, seed_info)
 
     print("=" * 60)
     print("Step 1: Training Graph Diffusion Backbone")
@@ -127,10 +153,13 @@ def main(args):
 
     # Create dataloaders
     batch_size = config['training_backbone']['batch_size']
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
+    val_sampler = DistributedSampler(val_dataset, shuffle=False) if distributed else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         collate_fn=graph_collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -140,6 +169,7 @@ def main(args):
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
+        sampler=val_sampler,
         collate_fn=graph_collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -203,68 +233,76 @@ def main(args):
         config=config,
         device=device,
         output_dir=str(step_dir),
-        step_dir=str(step_dir)
+        step_dir=str(step_dir),
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+        local_rank=local_rank
     )
 
     # Train
     history = trainer.train()
 
-    # Create loss plots
-    print("\n7. Creating loss plots...")
-    plotter = PlotUtils(
-        figure_size=tuple(config['plotting']['figure_size']),
-        font_size=config['plotting']['font_size'],
-        dpi=config['plotting']['dpi']
-    )
-
-    # Total loss curve
-    plotter.loss_curve(
-        train_losses=history['train_losses'],
-        val_losses=history['val_losses'],
-        xlabel='Step',
-        ylabel='Loss',
-        title='Graph Backbone Training Loss',
-        save_path=figures_dir / 'graph_backbone_loss_curve.png'
-    )
-
-    # Node vs Edge loss comparison
-    if history['train_node_losses'] and history['train_edge_losses']:
-        plotter.loss_curve(
-            train_losses=history['train_node_losses'],
-            val_losses=history['train_edge_losses'],
-            xlabel='Step',
-            ylabel='Loss',
-            title='Node vs Edge Loss',
-            save_path=figures_dir / 'node_edge_loss_comparison.png',
-            train_label='Node Loss',
-            val_label='Edge Loss'
+    if is_main_process:
+        # Create loss plots
+        print("\n7. Creating loss plots...")
+        plotter = PlotUtils(
+            figure_size=tuple(config['plotting']['figure_size']),
+            font_size=config['plotting']['font_size'],
+            dpi=config['plotting']['dpi']
         )
 
-    # Save final summary
-    summary = {
-        'total_steps': trainer.global_step,
-        'best_val_loss': round(history['best_val_loss'], 4),
-        'final_train_loss': round(history['train_losses'][-1], 4) if history['train_losses'] else None,
-        'final_val_loss': round(history['val_losses'][-1], 4) if history['val_losses'] else None,
-        'num_params': num_params,
-        'Nmax': Nmax,
-        'atom_vocab_size': atom_vocab_size,
-        'edge_vocab_size': edge_vocab_size
-    }
+        # Total loss curve
+        plotter.loss_curve(
+            train_losses=history['train_losses'],
+            val_losses=history['val_losses'],
+            xlabel='Step',
+            ylabel='Loss',
+            title='Graph Backbone Training Loss',
+            save_path=figures_dir / 'graph_backbone_loss_curve.png'
+        )
 
-    summary_df = pd.DataFrame([summary])
-    summary_df.to_csv(metrics_dir / 'training_summary.csv', index=False)
+        # Node vs Edge loss comparison
+        if history['train_node_losses'] and history['train_edge_losses']:
+            plotter.loss_curve(
+                train_losses=history['train_node_losses'],
+                val_losses=history['train_edge_losses'],
+                xlabel='Step',
+                ylabel='Loss',
+                title='Node vs Edge Loss',
+                save_path=figures_dir / 'node_edge_loss_comparison.png',
+                train_label='Node Loss',
+                val_label='Edge Loss'
+            )
 
-    print("\n" + "=" * 60)
-    print("Graph Backbone Training Complete!")
-    print("=" * 60)
-    print(f"\nResults:")
-    print(f"  Best validation loss: {history['best_val_loss']:.4f}")
-    print(f"  Total training steps: {trainer.global_step}")
-    print(f"  Checkpoints saved to: {step_dir / 'checkpoints'}")
-    print(f"  Metrics saved to: {metrics_dir}")
-    print(f"  Figures saved to: {figures_dir}")
-    print("=" * 60)
+        # Save final summary
+        summary = {
+            'total_steps': trainer.global_step,
+            'best_val_loss': round(history['best_val_loss'], 4),
+            'final_train_loss': round(history['train_losses'][-1], 4) if history['train_losses'] else None,
+            'final_val_loss': round(history['val_losses'][-1], 4) if history['val_losses'] else None,
+            'num_params': num_params,
+            'Nmax': Nmax,
+            'atom_vocab_size': atom_vocab_size,
+            'edge_vocab_size': edge_vocab_size
+        }
+
+        summary_df = pd.DataFrame([summary])
+        summary_df.to_csv(metrics_dir / 'training_summary.csv', index=False)
+
+        print("\n" + "=" * 60)
+        print("Graph Backbone Training Complete!")
+        print("=" * 60)
+        print(f"\nResults:")
+        print(f"  Best validation loss: {history['best_val_loss']:.4f}")
+        print(f"  Total training steps: {trainer.global_step}")
+        print(f"  Checkpoints saved to: {step_dir / 'checkpoints'}")
+        print(f"  Metrics saved to: {metrics_dir}")
+        print(f"  Figures saved to: {figures_dir}")
+        print("=" * 60)
+
+    if distributed and dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == '__main__':

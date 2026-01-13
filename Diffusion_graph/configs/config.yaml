@@ -52,7 +52,7 @@ model_sizes:
     ffn_hidden_size: 1536
     dropout: 0.1
     # Training
-    max_steps: 500000
+    max_steps: 300000
     warmup_steps: 1000
     batch_size: 128
     gradient_accumulation_steps: 4
@@ -65,7 +65,7 @@ model_sizes:
     ffn_hidden_size: 2560
     dropout: 0.1
     # Training
-    max_steps: 500000
+    max_steps: 300000
     warmup_steps: 2000
     batch_size: 128
     gradient_accumulation_steps: 4
@@ -78,7 +78,7 @@ model_sizes:
     ffn_hidden_size: 3584
     dropout: 0.1
     # Training
-    max_steps: 500000
+    max_steps: 300000
     warmup_steps: 3000
     batch_size: 128
     gradient_accumulation_steps: 8
@@ -91,7 +91,7 @@ model_sizes:
     ffn_hidden_size: 4608
     dropout: 0.1
     # Training
-    max_steps: 500000
+    max_steps: 300000
     warmup_steps: 4000
     batch_size: 64
     gradient_accumulation_steps: 16
@@ -111,7 +111,7 @@ training_backbone:
   learning_rate: 3e-4
   weight_decay: 0.01
   warmup_steps: 1000
-  max_steps: 200000
+  max_steps: 300000
   gradient_clip_norm: 1.0
   eval_every: 1000
   save_every: 100000

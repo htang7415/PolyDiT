@@ -1,29 +1,29 @@
 #!/bin/bash
+#SBATCH --account=nawimem
+#SBATCH --time=24:00:00
 #SBATCH --job-name=sel_s
 #SBATCH --output=logs/sel_s_%x_%j.out
 #SBATCH --error=logs/sel_s_%x_%j.err
+#SBATCH --mem=256G
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --mem=256G
 #SBATCH --cpus-per-task=16
 #SBATCH --ntasks-per-node=1
-#SBATCH --partition=pdelab
 #SBATCH --gres=gpu:1
-#SBATCH --time=10-00:00:00
 
 # Scaling Law Experiment Runner (SELFIES)
-# Usage: sbatch scripts/submit_scaling.sh <model_size>
-# Example: sbatch scripts/submit_scaling.sh small
-#          sbatch scripts/submit_scaling.sh medium
-#          sbatch scripts/submit_scaling.sh large
-#          sbatch scripts/submit_scaling.sh xl
+# Usage: sbatch scripts/submit_scaling_nrel.sh <model_size>
+# Example: sbatch scripts/submit_scaling_nrel.sh small
+#          sbatch scripts/submit_scaling_nrel.sh medium
+#          sbatch scripts/submit_scaling_nrel.sh large
+#          sbatch scripts/submit_scaling_nrel.sh xl
 
 set -e
 
 # Conda setup
-CONDA_DIR="/srv/home/htang228/anaconda3"
+CONDA_DIR="/home/htang/anaconda3"
 eval "$($CONDA_DIR/bin/conda shell.bash hook)"
-conda activate euler_active_learning
+conda activate kl_active_learning
 
 echo "Python: $(which python)"
 python -V

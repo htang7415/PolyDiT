@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=smi_s
-#SBATCH --output=logs/smi_s_%x_%j.out
-#SBATCH --error=logs/smi_s_%x_%j.err
+#SBATCH --job-name=gra_s
+#SBATCH --output=logs/gra_s_%x_%j.out
+#SBATCH --error=logs/gra_s_%x_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --mem=256G
@@ -11,12 +11,12 @@
 #SBATCH --gres=gpu:1
 #SBATCH --time=10-00:00:00
 
-# Scaling Law Experiment Runner (SMILES)
-# Usage: sbatch scripts/submit_scaling.sh <model_size>
-# Example: sbatch scripts/submit_scaling.sh small
-#          sbatch scripts/submit_scaling.sh medium
-#          sbatch scripts/submit_scaling.sh large
-#          sbatch scripts/submit_scaling.sh xl
+# Scaling Law Experiment Runner (Graph)
+# Usage: sbatch scripts/submit_scaling_euler.sh <model_size>
+# Example: sbatch scripts/submit_scaling_euler.sh small
+#          sbatch scripts/submit_scaling_euler.sh medium
+#          sbatch scripts/submit_scaling_euler.sh large
+#          sbatch scripts/submit_scaling_euler.sh xl
 
 set -e
 
@@ -48,7 +48,7 @@ NUM_CANDIDATES=20000
 mkdir -p logs
 
 echo "=========================================="
-echo "Scaling Law Experiment (SMILES)"
+echo "Scaling Law Experiment (Graph)"
 echo "=========================================="
 echo "Model Size: ${MODEL_SIZE}"
 echo "Property: ${PROPERTY}"
