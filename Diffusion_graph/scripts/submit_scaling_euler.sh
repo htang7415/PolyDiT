@@ -12,11 +12,10 @@
 #SBATCH --time=10-00:00:00
 
 # Scaling Law Experiment Runner (Graph)
-# Usage: sbatch scripts/submit_scaling_euler.sh <model_size>
+# Usage: sbatch scripts/submit_scaling_euler.sh <model_sizes> [properties] [polymer_classes] [num_samples] [num_candidates]
 # Example: sbatch scripts/submit_scaling_euler.sh small
-#          sbatch scripts/submit_scaling_euler.sh medium
-#          sbatch scripts/submit_scaling_euler.sh large
-#          sbatch scripts/submit_scaling_euler.sh xl
+#          sbatch scripts/submit_scaling_euler.sh all
+#          sbatch scripts/submit_scaling_euler.sh small,medium Tg,Tm,Eg,Td polyimide,polyamide
 
 set -e
 
@@ -35,14 +34,28 @@ WORKDIR="${SLURM_SUBMIT_DIR:-$PWD}"
 cd "$WORKDIR"
 
 # Parse arguments
-MODEL_SIZE=${1:-medium}
+MODEL_SIZES_INPUT=${1:-medium}
+PROPERTY_LIST=${2:-Tg,Tm,Eg,Td}
+POLYMER_CLASS_LIST=${3:-polyimide,polyamide}
+NUM_SAMPLES=${4:-10000}
+NUM_CANDIDATES=${5:-20000}
 
-# Fixed parameters
-PROPERTY="Tg"
-TARGET="300"
-POLYMER_CLASS="polyimide"
-NUM_SAMPLES=20000
-NUM_CANDIDATES=20000
+MODEL_SIZES_INPUT=${MODEL_SIZES_INPUT// /}
+PROPERTY_LIST=${PROPERTY_LIST// /}
+POLYMER_CLASS_LIST=${POLYMER_CLASS_LIST// /}
+if [ "$MODEL_SIZES_INPUT" = "all" ]; then
+  MODEL_SIZES_INPUT="small,medium,large,xl"
+fi
+if [ "$PROPERTY_LIST" = "all" ]; then
+  PROPERTY_LIST="Tg,Tm,Eg,Td"
+fi
+if [ "$POLYMER_CLASS_LIST" = "all" ]; then
+  POLYMER_CLASS_LIST="polyimide,polyamide"
+fi
+
+IFS=',' read -r -a MODEL_SIZES <<< "$MODEL_SIZES_INPUT"
+IFS=',' read -r -a PROPERTIES <<< "$PROPERTY_LIST"
+IFS=',' read -r -a CLASSES <<< "$POLYMER_CLASS_LIST"
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
@@ -50,10 +63,9 @@ mkdir -p logs
 echo "=========================================="
 echo "Scaling Law Experiment (Graph)"
 echo "=========================================="
-echo "Model Size: ${MODEL_SIZE}"
-echo "Property: ${PROPERTY}"
-echo "Target: ${TARGET}"
-echo "Polymer Class: ${POLYMER_CLASS}"
+echo "Model Sizes: ${MODEL_SIZES_INPUT}"
+echo "Properties: ${PROPERTY_LIST}"
+echo "Polymer Classes: ${POLYMER_CLASS_LIST}"
 echo "Num Samples: ${NUM_SAMPLES}"
 echo "Num Candidates: ${NUM_CANDIDATES}"
 echo "Work Directory: ${WORKDIR}"
@@ -62,13 +74,43 @@ echo "Start Time: $(date)"
 echo "=========================================="
 
 # Run the scaling pipeline
-python scripts/run_scaling_pipeline.py \
-    --model_size ${MODEL_SIZE} \
-    --property ${PROPERTY} \
-    --target ${TARGET} \
-    --polymer_class ${POLYMER_CLASS} \
-    --num_samples ${NUM_SAMPLES} \
-    --num_candidates ${NUM_CANDIDATES}
+for model_size in "${MODEL_SIZES[@]}"; do
+    python scripts/run_scaling_pipeline.py \
+        --model_size "${model_size}" \
+        --num_samples "${NUM_SAMPLES}" \
+        --num_candidates "${NUM_CANDIDATES}" \
+        --skip_step3 --skip_step4 --skip_step5 --skip_step6
+
+    for prop in "${PROPERTIES[@]}"; do
+        python scripts/run_scaling_pipeline.py \
+            --model_size "${model_size}" \
+            --property "${prop}" \
+            --num_samples "${NUM_SAMPLES}" \
+            --num_candidates "${NUM_CANDIDATES}" \
+            --skip_step1 --skip_step2 --skip_step5 --skip_step6
+    done
+
+    for cls in "${CLASSES[@]}"; do
+        python scripts/run_scaling_pipeline.py \
+            --model_size "${model_size}" \
+            --polymer_class "${cls}" \
+            --num_samples "${NUM_SAMPLES}" \
+            --num_candidates "${NUM_CANDIDATES}" \
+            --skip_step1 --skip_step2 --skip_step3 --skip_step4 --skip_step6
+    done
+
+    for prop in "${PROPERTIES[@]}"; do
+        for cls in "${CLASSES[@]}"; do
+            python scripts/run_scaling_pipeline.py \
+                --model_size "${model_size}" \
+                --property "${prop}" \
+                --polymer_class "${cls}" \
+                --num_samples "${NUM_SAMPLES}" \
+                --num_candidates "${NUM_CANDIDATES}" \
+                --skip_step1 --skip_step2 --skip_step3 --skip_step4 --skip_step5
+        done
+    done
+done
 
 echo "=========================================="
 echo "End Time: $(date)"

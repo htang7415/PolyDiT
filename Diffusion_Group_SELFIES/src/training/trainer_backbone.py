@@ -326,14 +326,18 @@ class BackboneTrainer:
             # Periodic validation
             if self.global_step > 0 and self.global_step % self.eval_every == 0:
                 val_loss = self._validate()
+                self.model.train()
                 if self.is_main_process:
                     self.val_losses.append(val_loss)
                     self._save_checkpoint(val_loss, epoch)
-                    self.model.train()
+                if self.distributed and dist.is_available() and dist.is_initialized():
+                    dist.barrier()
 
             # Periodic save
             if self.global_step > 0 and self.global_step % self.save_every == 0:
                 self._save_periodic_checkpoint(epoch)
+                if self.distributed and dist.is_available() and dist.is_initialized():
+                    dist.barrier()
 
             # GPU memory monitoring
             if self.global_step > 0 and self.global_step % self.memory_log_interval == 0:

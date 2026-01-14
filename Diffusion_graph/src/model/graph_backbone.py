@@ -232,9 +232,6 @@ class GraphDiffusionBackbone(nn.Module):
         # Timestep embedding
         self.time_embedding = nn.Embedding(num_diffusion_steps + 1, hidden_size)
 
-        # Edge embedding (separate from attention edge embedding)
-        self.edge_input_embedding = nn.Embedding(edge_vocab_size, hidden_size // 4)
-
         # Input dropout
         self.input_dropout = nn.Dropout(dropout)
 

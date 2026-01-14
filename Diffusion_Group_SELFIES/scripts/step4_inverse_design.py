@@ -162,23 +162,48 @@ def main(args):
         normalization_params=norm_params
     )
 
+    def default_targets_for_property(property_name: str):
+        presets = {
+            'Tg': [350.0],
+            'Tm': [450.0],
+            'Td': [550.0],
+            'Eg': [8.0],
+        }
+        return presets.get(property_name)
+
+    def default_epsilon_for_property(property_name: str) -> float:
+        presets = {
+            'Tg': 30.0,
+            'Tm': 30.0,
+            'Td': 30.0,
+            'Eg': 0.5,
+        }
+        return presets.get(property_name, 10.0)
+
+    if args.epsilon is None:
+        args.epsilon = default_epsilon_for_property(args.property)
+
     # Parse target values
     if args.targets:
         target_values = [float(t) for t in args.targets.split(',')]
     else:
-        # Default targets based on property data statistics (from step3)
-        step3_metrics = results_dir / f'step3_{args.property}' / 'metrics'
-        property_df = pd.read_csv(step3_metrics / f'{args.property}_data_stats.csv')
-        # Stats columns are named {property}_mean, {property}_std from get_statistics()
-        mean_col = f'{args.property}_mean'
-        std_col = f'{args.property}_std'
-        mean_val = property_df.loc[property_df['split'] == 'train', mean_col].values[0]
-        std_val = property_df.loc[property_df['split'] == 'train', std_col].values[0]
-        target_values = [
-            mean_val - std_val,
-            mean_val,
-            mean_val + std_val
-        ]
+        preset_targets = default_targets_for_property(args.property)
+        if preset_targets is not None:
+            target_values = preset_targets
+        else:
+            # Default targets based on property data statistics (from step3)
+            step3_metrics = results_dir / f'step3_{args.property}' / 'metrics'
+            property_df = pd.read_csv(step3_metrics / f'{args.property}_data_stats.csv')
+            # Stats columns are named {property}_mean, {property}_std from get_statistics()
+            mean_col = f'{args.property}_mean'
+            std_col = f'{args.property}_std'
+            mean_val = property_df.loc[property_df['split'] == 'train', mean_col].values[0]
+            std_val = property_df.loc[property_df['split'] == 'train', std_col].values[0]
+            target_values = [
+                mean_val - std_val,
+                mean_val,
+                mean_val + std_val
+            ]
 
     print(f"\n5. Running inverse design for targets: {target_values}")
     print(f"   Epsilon: {args.epsilon}")
@@ -237,8 +262,8 @@ if __name__ == '__main__':
                         help='Property name (e.g., Tg, Tm)')
     parser.add_argument('--targets', type=str, default=None,
                         help='Comma-separated target values')
-    parser.add_argument('--epsilon', type=float, default=10.0,
-                        help='Tolerance for property matching')
+    parser.add_argument('--epsilon', type=float, default=None,
+                        help='Tolerance for property matching (default uses property-specific preset)')
     parser.add_argument('--num_candidates', type=int, default=10000,
                         help='Number of candidates per target')
     args = parser.parse_args()

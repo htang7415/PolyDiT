@@ -304,8 +304,8 @@ if __name__ == '__main__':
                         help='Model size preset')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to model checkpoint')
-    parser.add_argument('--num_samples', type=int, default=None,
-                        help='Number of samples to generate (default: from config)')
+    parser.add_argument('--num_samples', type=int, default=10000,
+                        help='Number of samples to generate (default: 10000)')
     parser.add_argument('--batch_size', type=int, default=None,
                         help='Batch size for sampling (default: from config)')
     parser.add_argument('--temperature', type=float, default=None,

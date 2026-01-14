@@ -54,6 +54,18 @@ def main(args):
     save_config(config, step_dir / 'config_used.yaml')
     save_run_metadata(step_dir, args.config, seed_info)
 
+    def default_epsilon_for_property(property_name: str) -> float:
+        presets = {
+            'Tg': 30.0,
+            'Tm': 30.0,
+            'Td': 30.0,
+            'Eg': 0.5,
+        }
+        return presets.get(property_name, 10.0)
+
+    if args.property and args.epsilon is None:
+        args.epsilon = default_epsilon_for_property(args.property)
+
     print("=" * 50)
     print(f"Step 5: Class-Guided Design for {args.polymer_class}")
     if args.model_size:
@@ -295,8 +307,8 @@ if __name__ == '__main__':
                         help='Property for joint design (optional)')
     parser.add_argument('--target_value', type=float, default=None,
                         help='Target property value for joint design')
-    parser.add_argument('--epsilon', type=float, default=10.0,
-                        help='Tolerance for property matching')
+    parser.add_argument('--epsilon', type=float, default=None,
+                        help='Tolerance for property matching (default uses property-specific preset)')
     parser.add_argument('--num_candidates', type=int, default=10000,
                         help='Number of candidates to generate')
     args = parser.parse_args()

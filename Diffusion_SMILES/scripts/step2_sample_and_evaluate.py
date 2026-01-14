@@ -257,7 +257,7 @@ if __name__ == '__main__':
                         help='Model size preset (small: ~12M, medium: ~50M, large: ~150M, xl: ~400M)')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to model checkpoint')
-    parser.add_argument('--num_samples', type=int, default=50000,
+    parser.add_argument('--num_samples', type=int, default=10000,
                         help='Number of samples to generate')
     parser.add_argument('--batch_size', type=int, default=None,
                         help='Batch size for sampling (default: from config)')

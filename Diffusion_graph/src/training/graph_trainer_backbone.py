@@ -318,16 +318,20 @@ class GraphBackboneTrainer:
             # Periodic validation
             if self.global_step > 0 and self.global_step % self.eval_every == 0:
                 val_loss, val_node, val_edge = self._validate()
+                self.model.train()
                 if self.is_main_process:
                     self.val_losses.append(val_loss)
                     self.val_node_losses.append(val_node)
                     self.val_edge_losses.append(val_edge)
                     self._save_checkpoint(val_loss, epoch)
-                    self.model.train()
+                if self.distributed and dist.is_available() and dist.is_initialized():
+                    dist.barrier()
 
             # Periodic save
             if self.global_step > 0 and self.global_step % self.save_every == 0:
                 self._save_periodic_checkpoint(epoch)
+                if self.distributed and dist.is_available() and dist.is_initialized():
+                    dist.barrier()
 
             self.global_step += 1
 

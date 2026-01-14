@@ -11,8 +11,11 @@
 #SBATCH --time=10-00:00:00
 
 # Steps 2-6 (Euler, single GPU)
-# Usage: sbatch scripts/submit_steps2_6_euler.sh <model_size> [property] [targets] [epsilon]
-#        [num_samples] [num_candidates] [polymer_class] [class_target] [class_epsilon]
+# Usage: sbatch scripts/submit_steps2_6_euler.sh <model_size> [properties] [targets] [epsilon]
+#        [num_samples] [num_candidates] [polymer_classes] [class_target] [class_epsilon]
+# Notes:
+# - properties and polymer_classes are comma-separated (e.g., Tg,Tm,Eg,Td or polyimide,polyamide).
+# - leave targets/epsilon/class_target/class_epsilon empty to use property-specific defaults.
 
 set -e
 
@@ -28,17 +31,74 @@ cd "$WORKDIR"
 mkdir -p logs
 
 MODEL_SIZE=${1:-medium}
-PROPERTY=${2:-Tg}
-TARGETS=${3:-"300"}
-EPSILON=${4:-10.0}
-NUM_SAMPLES=${5:-50000}
+PROPERTY_LIST=${2:-Tg,Tm,Eg,Td}
+TARGETS=${3:-}
+EPSILON=${4:-}
+NUM_SAMPLES=${5:-10000}
 NUM_CANDIDATES=${6:-10000}
-POLYMER_CLASS=${7:-polyimide}
-CLASS_TARGET=${8:-300}
-CLASS_EPSILON=${9:-10.0}
+POLYMER_CLASS_LIST=${7:-polyimide,polyamide}
+CLASS_TARGET=${8:-}
+CLASS_EPSILON=${9:-}
+
+PROPERTY_LIST=${PROPERTY_LIST// /}
+POLYMER_CLASS_LIST=${POLYMER_CLASS_LIST// /}
+if [ "$PROPERTY_LIST" = "all" ]; then
+  PROPERTY_LIST="Tg,Tm,Eg,Td"
+fi
+if [ "$POLYMER_CLASS_LIST" = "all" ]; then
+  POLYMER_CLASS_LIST="polyimide,polyamide"
+fi
+
+default_target_for_property() {
+  case "$1" in
+    Tg) echo 350 ;;
+    Tm) echo 450 ;;
+    Td) echo 550 ;;
+    Eg) echo 8 ;;
+    *) echo 300 ;;
+  esac
+}
+
+default_epsilon_for_property() {
+  case "$1" in
+    Eg) echo 0.5 ;;
+    Tg|Tm|Td) echo 30 ;;
+    *) echo 10.0 ;;
+  esac
+}
+
+IFS=',' read -r -a PROPERTIES <<< "$PROPERTY_LIST"
+IFS=',' read -r -a CLASSES <<< "$POLYMER_CLASS_LIST"
 
 python scripts/step2_sample_and_evaluate.py --config configs/config.yaml --model_size "$MODEL_SIZE" --num_samples "$NUM_SAMPLES"
-python scripts/step3_train_property_head.py --config configs/config.yaml --model_size "$MODEL_SIZE" --property "$PROPERTY"
-python scripts/step4_inverse_design.py --config configs/config.yaml --model_size "$MODEL_SIZE" --property "$PROPERTY" --targets "$TARGETS" --epsilon "$EPSILON" --num_candidates "$NUM_CANDIDATES"
-python scripts/step5_class_design.py --config configs/config.yaml --model_size "$MODEL_SIZE" --polymer_class "$POLYMER_CLASS" --num_candidates "$NUM_CANDIDATES"
-python scripts/step5_class_design.py --config configs/config.yaml --model_size "$MODEL_SIZE" --polymer_class "$POLYMER_CLASS" --property "$PROPERTY" --target_value "$CLASS_TARGET" --epsilon "$CLASS_EPSILON" --num_candidates "$NUM_CANDIDATES"
+
+for prop in "${PROPERTIES[@]}"; do
+  prop_targets="$TARGETS"
+  if [ -z "$prop_targets" ]; then
+    prop_targets="$(default_target_for_property "$prop")"
+  fi
+  prop_epsilon="$EPSILON"
+  if [ -z "$prop_epsilon" ]; then
+    prop_epsilon="$(default_epsilon_for_property "$prop")"
+  fi
+  python scripts/step3_train_property_head.py --config configs/config.yaml --model_size "$MODEL_SIZE" --property "$prop"
+  python scripts/step4_inverse_design.py --config configs/config.yaml --model_size "$MODEL_SIZE" --property "$prop" --targets "$prop_targets" --epsilon "$prop_epsilon" --num_candidates "$NUM_CANDIDATES"
+done
+
+for cls in "${CLASSES[@]}"; do
+  python scripts/step5_class_design.py --config configs/config.yaml --model_size "$MODEL_SIZE" --polymer_class "$cls" --num_candidates "$NUM_CANDIDATES"
+done
+
+for cls in "${CLASSES[@]}"; do
+  for prop in "${PROPERTIES[@]}"; do
+    class_target="$CLASS_TARGET"
+    if [ -z "$class_target" ]; then
+      class_target="$(default_target_for_property "$prop")"
+    fi
+    class_epsilon="$CLASS_EPSILON"
+    if [ -z "$class_epsilon" ]; then
+      class_epsilon="$(default_epsilon_for_property "$prop")"
+    fi
+    python scripts/step5_class_design.py --config configs/config.yaml --model_size "$MODEL_SIZE" --polymer_class "$cls" --property "$prop" --target_value "$class_target" --epsilon "$class_epsilon" --num_candidates "$NUM_CANDIDATES"
+  done
+done

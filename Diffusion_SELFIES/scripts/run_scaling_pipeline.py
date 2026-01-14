@@ -11,6 +11,8 @@ import json
 import argparse
 import subprocess
 import shlex
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 # Add parent directory to path
@@ -150,6 +152,31 @@ def extract_step6_metrics(results_dir: Path, polymer_class: str, property_name: 
     return metrics
 
 
+def build_results_tag(args: argparse.Namespace) -> str:
+    """Build a results tag based on which steps run and the target property/class."""
+    if not args.skip_step6:
+        return f"joint_{args.polymer_class}_{args.property}"
+    if not args.skip_step5 and args.skip_step3 and args.skip_step4 and args.skip_step6:
+        return f"class_{args.polymer_class}"
+    if not args.skip_step3 or not args.skip_step4:
+        return f"prop_{args.property}"
+    return "base"
+
+
+def archive_scaling_results(results_dir: Path, tag: str) -> None:
+    """Archive scaling_results.json with a property/class tag."""
+    src = results_dir / 'scaling_results.json'
+    if not src.exists():
+        return
+    safe_tag = tag.replace('/', '_')
+    dest = results_dir / f"scaling_results_{safe_tag}.json"
+    if dest.exists():
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        dest = results_dir / f"scaling_results_{safe_tag}_{timestamp}.json"
+    shutil.copy2(src, dest)
+    print(f"Archived scaling results to: {dest}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Run full scaling pipeline with logging')
     parser.add_argument('--model_size', type=str, required=True,
@@ -159,11 +186,13 @@ def main():
                         help='Path to config file')
     parser.add_argument('--property', type=str, default='Tg',
                         help='Property name for steps 3-5')
-    parser.add_argument('--target', type=str, default='300',
-                        help='Target value for inverse design')
+    parser.add_argument('--target', type=str, default=None,
+                        help='Target value for inverse design (default uses property-specific preset)')
+    parser.add_argument('--epsilon', type=float, default=None,
+                        help='Tolerance for property matching (default uses property-specific preset)')
     parser.add_argument('--polymer_class', type=str, default='polyimide',
                         help='Polymer class for step 5')
-    parser.add_argument('--num_samples', type=int, default=50000,
+    parser.add_argument('--num_samples', type=int, default=10000,
                         help='Number of samples for step 2')
     parser.add_argument('--num_candidates', type=int, default=10000,
                         help='Number of candidates for steps 4-5')
@@ -180,6 +209,27 @@ def main():
     parser.add_argument('--skip_step6', action='store_true',
                         help='Skip step 6 (class-property joint design)')
     args = parser.parse_args()
+
+    def default_target_for_property(property_name: str) -> str:
+        presets = {
+            'Tg': '350',
+            'Tm': '450',
+            'Td': '550',
+            'Eg': '8',
+        }
+        return presets.get(property_name, '300')
+
+    def default_epsilon_for_property(property_name: str) -> float:
+        presets = {
+            'Tg': 30.0,
+            'Tm': 30.0,
+            'Td': 30.0,
+            'Eg': 0.5,
+        }
+        return presets.get(property_name, 10.0)
+
+    target_value = args.target if args.target is not None else default_target_for_property(args.property)
+    epsilon_value = args.epsilon if args.epsilon is not None else default_epsilon_for_property(args.property)
 
     # Load config
     config = load_config(args.config)
@@ -218,7 +268,8 @@ def main():
     print(f"Parameters: ~{num_params:,}")
     print(f"Results dir: {results_dir}")
     print(f"Property: {args.property}")
-    print(f"Target: {args.target}")
+    print(f"Target: {target_value}")
+    print(f"Epsilon: {epsilon_value}")
     print(f"Polymer class: {args.polymer_class}")
     print("=" * 60)
 
@@ -288,7 +339,8 @@ def main():
             return 1
         logger.start_step('step4_inverse_design')
         ret, stdout, stderr = run_step('step4_inverse_design.py', args.model_size,
-                      f'--property {args.property} --targets {args.target} --num_candidates {args.num_candidates}')
+                      f'--property {args.property} --targets {target_value} --epsilon {epsilon_value} '
+                      f'--num_candidates {args.num_candidates}')
         if ret != 0:
             logger.log_error('step4_inverse_design', f'Step failed with return code {ret}\nSTDERR: {stderr}')
             logger.finalize()
@@ -338,7 +390,7 @@ def main():
         logger.start_step('step6_joint_design')
         ret, stdout, stderr = run_step('step5_class_design.py', args.model_size,
                       f'--polymer_class {args.polymer_class} --property {args.property} '
-                      f'--target_value {args.target} --epsilon 10.0 --num_candidates {args.num_candidates}')
+                      f'--target_value {target_value} --epsilon {epsilon_value} --num_candidates {args.num_candidates}')
         if ret != 0:
             logger.log_error('step6_joint_design', f'Step failed with return code {ret}\nSTDERR: {stderr}')
             logger.finalize()
@@ -350,6 +402,7 @@ def main():
 
     # Finalize
     logger.finalize()
+    archive_scaling_results(results_dir, build_results_tag(args))
 
     return 0
 
