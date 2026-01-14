@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --account=nawimem
-#SBATCH --time=24:00:00
+#SBATCH --time=2-00:00:00
 #SBATCH --job-name=smi_1
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --mem=256G
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:4
 
-# Step 1 DDP (NREL, 2 nodes / 8 GPU total)
+# Step 1 DDP (NREL, 1 node / 4 GPU total)
 # Usage: sbatch scripts/submit_step1_ddp_nrel.sh <model_size>
 # Tip: pass --partition/--qos at submit time for your GPU type.
 
