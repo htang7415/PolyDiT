@@ -139,11 +139,11 @@ optimization:
   use_amp: true                    # Mixed precision (BF16)
   compile_model: false             # Disabled for graph models (compatibility)
   gradient_accumulation_steps: 1
-  num_workers: 0
-  pin_memory: false
+  num_workers: 4
+  pin_memory: true
   cudnn_benchmark: true
-  prefetch_factor: 1
-  cache_tokenization: false  # Pre-encode graphs (disabled to prevent OOM with 19M+ graphs)
+  prefetch_factor: 2
+  cache_tokenization: true   # Pre-encode graphs (may be memory intensive with 19M+ graphs)
 
 # Property head architecture
 property_head:

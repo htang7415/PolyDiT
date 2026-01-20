@@ -4,11 +4,11 @@
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --mem=256G
+#SBATCH --mem=128G
 #SBATCH --cpus-per-task=16
-#SBATCH --partition=pdelab
+#SBATCH --partition=research
 #SBATCH --gres=gpu:1
-#SBATCH --time=10-00:00:00
+#SBATCH --time=8-00:00:00
 
 # Steps 2-6 (Euler, single GPU)
 # Usage: sbatch scripts/submit_steps2_6_euler.sh <model_size> [properties] [targets] [epsilon]

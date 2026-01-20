@@ -5,12 +5,12 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=256G
-#SBATCH --partition=pdelab
-#SBATCH --gres=gpu:4
-#SBATCH --time=10-00:00:00
+#SBATCH --mem=128G
+#SBATCH --partition=research
+#SBATCH --gres=gpu:1
+#SBATCH --time=8-00:00:00
 
-# Step 1 DDP (Euler, 1 node / 4 GPU)
+# Step 1 DDP (Euler, 1 node / 1 GPU)
 # Usage: sbatch scripts/submit_step1_ddp_euler.sh <model_size>
 
 set -e
@@ -187,5 +187,5 @@ TIMING_JSON="${RESULTS_DIR}/timing_summary.json"
 # --standalone auto-selects free port, no MASTER_ADDR/MASTER_PORT needed
 run_step "step1_train_backbone" torchrun \
   --standalone \
-  --nproc_per_node=4 \
+  --nproc_per_node=1 \
   scripts/step1_train_backbone.py --config configs/config.yaml --model_size "$MODEL_SIZE"

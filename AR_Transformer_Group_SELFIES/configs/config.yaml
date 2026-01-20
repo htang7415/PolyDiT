@@ -163,11 +163,11 @@ optimization:
   use_amp: true                    # Mixed precision (BF16)
   compile_model: true              # torch.compile()
   gradient_accumulation_steps: 4   # Effective batch = 256 * 4 = 1024
-  num_workers: 0                   # DataLoader workers
-  pin_memory: false                # GPU memory pinning
+  num_workers: 4                   # DataLoader workers
+  pin_memory: true                 # GPU memory pinning
   cudnn_benchmark: true            # cuDNN autotuning
-  prefetch_factor: 1               # DataLoader prefetching
-  cache_tokenization: false        # Disable pre-tokenization (too slow for Group SELFIES)
+  prefetch_factor: 2               # DataLoader prefetching
+  cache_tokenization: true         # Pre-tokenize dataset (can be slow for Group SELFIES)
 
 # Property head architecture
 property_head:
