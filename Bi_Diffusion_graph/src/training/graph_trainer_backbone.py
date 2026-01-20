@@ -148,6 +148,11 @@ class GraphBackboneTrainer:
         self.save_every = _to_int(train_config['save_every'], 'save_every')
         self.num_epochs = _to_int(train_config.get('num_epochs', 50), 'num_epochs')
 
+        ckpt_cfg = config.get('checkpointing', {})
+        self.save_best_only = ckpt_cfg.get('save_best_only', True)
+        self.save_last = ckpt_cfg.get('save_last', False)
+        self.save_periodic = ckpt_cfg.get('save_periodic', False)
+
         # Initialize optimizer
         self.optimizer = AdamW(
             self.model.parameters(),
@@ -332,7 +337,7 @@ class GraphBackboneTrainer:
                     dist.barrier()
 
             # Periodic save
-            if self.global_step > 0 and self.global_step % self.save_every == 0:
+            if (not self.save_best_only and self.save_periodic and self.global_step > 0 and self.global_step % self.save_every == 0):
                 self._save_periodic_checkpoint(epoch)
                 if self.distributed and dist.is_available() and dist.is_initialized():
                     dist.barrier()
@@ -466,7 +471,7 @@ class GraphBackboneTrainer:
             print(f"New best model saved with val_loss: {val_loss:.4f}")
 
         # Save final checkpoint
-        if final:
+        if final and not self.save_best_only and self.save_last:
             torch.save(checkpoint, self.checkpoint_dir / 'graph_backbone_last.pt')
 
     def _save_periodic_checkpoint(self, epoch: int):
@@ -475,6 +480,8 @@ class GraphBackboneTrainer:
         Args:
             epoch: Current epoch.
         """
+        if self.save_best_only or not self.save_periodic:
+            return
         if not self.is_main_process:
             return
 

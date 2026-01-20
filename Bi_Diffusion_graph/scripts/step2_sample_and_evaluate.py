@@ -251,12 +251,11 @@ def main(args):
     # Star count histogram
     print("   Creating star count histogram...")
     star_counts = [count_stars(s) for s in valid_smiles if s]
-    star_counter = Counter(star_counts)
 
-    if star_counter:
-        plotter.bar_chart(
-            categories=[str(k) for k in sorted(star_counter.keys())],
-            values=[star_counter[k] for k in sorted(star_counter.keys())],
+    if star_counts:
+        plotter.star_count_bar(
+            star_counts=star_counts,
+            expected_count=2,
             xlabel='Star Count',
             ylabel='Count',
             title='Star Count Distribution (Graph)',

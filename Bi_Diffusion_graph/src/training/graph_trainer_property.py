@@ -104,6 +104,10 @@ class GraphPropertyTrainer:
         self.head_dropout = head_dropout
         self.best_hyperparams = best_hyperparams
 
+        ckpt_cfg = config.get('checkpointing', {})
+        self.save_best_only = ckpt_cfg.get('save_best_only', True)
+        self.save_last = ckpt_cfg.get('save_last', False)
+
         # Create output directories
         self.checkpoint_dir = self.output_dir / 'checkpoints'
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -390,8 +394,9 @@ class GraphPropertyTrainer:
             torch.save(checkpoint, self.checkpoint_dir / f'{self.property_name}_best.pt')
             improved = True
 
-        # Always save last checkpoint
-        torch.save(checkpoint, self.checkpoint_dir / f'{self.property_name}_last.pt')
+        # Save last checkpoint if enabled
+        if not self.save_best_only and self.save_last:
+            torch.save(checkpoint, self.checkpoint_dir / f'{self.property_name}_last.pt')
 
         return improved
 

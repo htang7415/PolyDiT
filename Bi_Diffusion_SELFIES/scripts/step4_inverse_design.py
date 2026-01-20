@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import torch
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 
 from src.utils.config import load_config, save_config
 from src.utils.plotting import PlotUtils
@@ -234,14 +235,32 @@ def main(args):
     print(f"   Using training length distribution (min={min(lengths)}, max={max(lengths)})")
 
     # Run design
-    results_df = designer.design_multiple_targets(
-        target_values=target_values,
-        epsilon=args.epsilon,
-        num_candidates_per_target=args.num_candidates,
-        seq_length=tokenizer.max_length,
-        batch_size=config['sampling']['batch_size'],
-        show_progress=True,
-        lengths=lengths
+    raw_results = []
+    for i, target in enumerate(tqdm(target_values, desc="Targets")):
+        start_idx = i * args.num_candidates
+        end_idx = start_idx + args.num_candidates
+        target_lengths = lengths[start_idx:end_idx]
+        results = designer.design(
+            target_value=target,
+            epsilon=args.epsilon,
+            num_candidates=args.num_candidates,
+            seq_length=tokenizer.max_length,
+            batch_size=config['sampling']['batch_size'],
+            show_progress=False,
+            lengths=target_lengths
+        )
+        raw_results.append(results)
+
+    drop_keys = {
+        "valid_smiles",
+        "valid_selfies",
+        "predictions",
+        "hits_smiles",
+        "hits_selfies",
+        "hits_predictions"
+    }
+    results_df = pd.DataFrame(
+        [{k: v for k, v in results.items() if k not in drop_keys} for results in raw_results]
     )
 
     # Save results
@@ -259,16 +278,18 @@ def main(args):
         dpi=config['plotting']['dpi']
     )
 
-    # Calibration plot
-    plotter.calibration_plot(
-        target_values=results_df['target_value'].tolist(),
-        mean_predictions=results_df['pred_mean_hits'].tolist(),
-        std_predictions=results_df['pred_std_hits'].tolist(),
-        xlabel=f'Target {args.property}',
-        ylabel=f'Mean Predicted {args.property}',
-        title=f'{args.property} Calibration',
-        save_path=figures_dir / f'{args.property}_calibration.png'
-    )
+    # Property distribution plots
+    for i, results in enumerate(raw_results, start=1):
+        predictions = results.get("predictions", [])
+        target_value = results["target_value"]
+        plotter.property_distribution_plot(
+            predictions=predictions,
+            target_value=target_value,
+            xlabel=f"Predicted {args.property}",
+            ylabel="Count",
+            title=f"{args.property} Distribution (target={target_value})",
+            save_path=figures_dir / f"{args.property}_distribution_target_{i}.png"
+        )
 
     print("\n" + "=" * 50)
     print("Inverse design complete!")

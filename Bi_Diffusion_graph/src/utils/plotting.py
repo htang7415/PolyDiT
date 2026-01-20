@@ -5,6 +5,9 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
+from collections import Counter
+from matplotlib.ticker import MaxNLocator
+
 
 class PlotUtils:
     """Utility class for creating standardized plots."""
@@ -105,6 +108,79 @@ class PlotUtils:
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            plt.close(fig)
+
+        return fig
+
+    def property_distribution_plot(
+        self,
+        predictions: List[float],
+        target_value: float,
+        xlabel: str,
+        ylabel: str = "Count",
+        title: Optional[str] = None,
+        save_path: Optional[str] = None,
+        bins: int = 50,
+        color: str = "steelblue"
+    ) -> plt.Figure:
+        """Plot property distribution with a target reference line.
+
+        Args:
+            predictions: Predicted property values.
+            target_value: Target property value to mark.
+            xlabel: X-axis label.
+            ylabel: Y-axis label.
+            title: Plot title.
+            save_path: Path to save the figure.
+            bins: Number of histogram bins.
+            color: Histogram color.
+
+        Returns:
+            Matplotlib figure.
+        """
+        fig, ax = plt.subplots(figsize=self.figure_size)
+
+        if predictions:
+            ax.hist(
+                predictions,
+                bins=bins,
+                color=color,
+                alpha=0.8,
+                edgecolor="white",
+                linewidth=0.5
+            )
+        else:
+            span = max(1.0, abs(target_value) * 0.1)
+            ax.set_xlim(target_value - span, target_value + span)
+            ax.text(
+                0.5,
+                0.5,
+                "No valid samples",
+                transform=ax.transAxes,
+                ha="center",
+                va="center"
+            )
+
+        ax.axvline(
+            target_value,
+            color="red",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Target = {target_value}"
+        )
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        if title:
+            ax.set_title(title)
+        ax.legend(framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        if save_path:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=self.dpi, bbox_inches="tight")
             plt.close(fig)
 
         return fig
@@ -274,6 +350,115 @@ class PlotUtils:
         if title:
             ax.set_title(title)
         ax.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+
+        if save_path:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            plt.close(fig)
+
+        return fig
+
+    def star_count_bar(
+        self,
+        star_counts: List[int],
+        expected_count: int = 2,
+        xlabel: str = "Star Count",
+        ylabel: str = "Count",
+        title: Optional[str] = None,
+        save_path: Optional[str] = None,
+        min_count: int = 0,
+        max_count: Optional[int] = None,
+        highlight_color: str = '#1f77b4',
+        other_color: str = '#d0d0d0',
+        annotate: bool = True
+    ) -> plt.Figure:
+        """Create star count distribution bar chart with expected-count highlight."""
+        fig, ax = plt.subplots(figsize=self.figure_size)
+
+        counter = Counter(star_counts)
+
+        if not counter:
+            counter[expected_count] = 0
+
+        max_star = max(counter.keys())
+        if max_count is not None:
+            max_star = max(max_star, max_count)
+        max_star = max(max_star, expected_count)
+
+        min_star = min(min_count, expected_count, min(counter.keys()))
+
+        categories = list(range(min_star, max_star + 1))
+        values = [counter.get(k, 0) for k in categories]
+
+        colors = [
+            highlight_color if k == expected_count else other_color
+            for k in categories
+        ]
+        x = np.arange(len(categories))
+        ax.bar(
+            x,
+            values,
+            color=colors,
+            alpha=0.9,
+            edgecolor='white',
+            linewidth=0.7
+        )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(k) for k in categories])
+
+        if xlabel:
+            ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        if title:
+            ax.set_title(title)
+
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_axisbelow(True)
+
+        max_val = max(values) if values else 0
+
+        if annotate and max_val > 0:
+            pad = max(max_val * 0.02, 1)
+            for xi, val in zip(x, values):
+                if val == 0:
+                    continue
+                ax.text(
+                    xi,
+                    val + pad,
+                    f"{int(val):,}",
+                    ha='center',
+                    va='bottom',
+                    fontsize=self.font_size - 2
+                )
+            ax.set_ylim(0, max_val + pad * 6)
+
+        total = sum(values)
+        if total > 0:
+            expected_hits = counter.get(expected_count, 0)
+            share = 100.0 * expected_hits / total
+            summary = (
+                f"Total: {total:,}\n"
+                f"Star={expected_count}: {expected_hits:,} ({share:.1f}%)"
+            )
+            ax.text(
+                0.98,
+                0.95,
+                summary,
+                transform=ax.transAxes,
+                ha='right',
+                va='top',
+                fontsize=self.font_size - 2,
+                bbox=dict(
+                    boxstyle='round',
+                    facecolor='white',
+                    alpha=0.85,
+                    edgecolor='none'
+                )
+            )
 
         plt.tight_layout()
 

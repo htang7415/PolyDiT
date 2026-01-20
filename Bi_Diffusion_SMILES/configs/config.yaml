@@ -135,6 +135,12 @@ training_property:
   finetune_last_layers: 6
   default_timestep: 1
 
+# Checkpointing
+checkpointing:
+  save_best_only: true         # default: only best checkpoint
+  save_last: false             # set true to save *_last.pt
+  save_periodic: false         # set true to save *_step_*.pt
+
 # Optimization settings for A100 GPU
 optimization:
   use_amp: true                    # Mixed precision (BF16)
