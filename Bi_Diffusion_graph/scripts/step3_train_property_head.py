@@ -6,6 +6,7 @@ import sys
 import json
 import copy
 import argparse
+import math
 from pathlib import Path
 
 # Add parent directory to path
@@ -125,6 +126,32 @@ def _extract_hidden_sizes(params):
     raise KeyError("Hyperparameters missing hidden layer sizes")
 
 
+def _resolve_finetune_last_layers(search_space, backbone_config):
+    """Resolve finetune_last_layers candidates from ratios or explicit list."""
+    ratios = search_space.get('finetune_last_layers_ratios')
+    if ratios is None:
+        return search_space['finetune_last_layers']
+
+    num_layers = int(backbone_config.get('num_layers', 0))
+    if num_layers <= 0:
+        raise ValueError("num_layers must be > 0 for finetune_last_layers_ratios")
+
+    candidates = []
+    for ratio in ratios:
+        ratio_value = float(ratio)
+        if ratio_value <= 0:
+            candidates.append(0)
+            continue
+        layers = int(math.ceil(num_layers * ratio_value))
+        if layers < 1:
+            layers = 1
+        if layers > num_layers:
+            layers = num_layers
+        candidates.append(layers)
+
+    return sorted(set(candidates))
+
+
 def create_objective(backbone_state_dict, train_dataset, val_dataset, config, device,
                      backbone_config_dict, normalization_params, graph_config):
     """Create Optuna objective function for hyperparameter tuning.
@@ -139,12 +166,14 @@ def create_objective(backbone_state_dict, train_dataset, val_dataset, config, de
     pin_memory = opt_config.get('pin_memory', True)
     prefetch_factor = opt_config.get('prefetch_factor', 2)
 
+    finetune_candidates = _resolve_finetune_last_layers(search_space, backbone_config_dict)
+
     def objective(trial):
         # Sample hyperparameters
         lr = trial.suggest_categorical('learning_rate', search_space['learning_rate'])
         dropout = trial.suggest_categorical('dropout', search_space['dropout'])
         finetune_last_layers = trial.suggest_categorical('finetune_last_layers',
-                                                          search_space['finetune_last_layers'])
+                                                          finetune_candidates)
         batch_size = trial.suggest_categorical('batch_size', search_space['batch_size'])
 
         # Build hidden_sizes: allow per-layer sizes

@@ -175,7 +175,7 @@ hyperparameter_tuning:
     # Training hyperparameters
     learning_rate: [4.0e-4, 6.0e-4, 8.0e-4, 1.0e-3]
     dropout: [0.1, 0.2, 0.3]
-    finetune_last_layers: [2, 4, 6]
+    finetune_last_layers_ratios: [0.0, 0.25, 0.5, 0.75, 1.0]
     batch_size: [8, 16, 32, 64, 128]  # 2^3 to 2^7
 
 # Sampling
