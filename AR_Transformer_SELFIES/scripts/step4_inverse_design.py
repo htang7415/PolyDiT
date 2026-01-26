@@ -4,10 +4,13 @@
 import os
 import sys
 import argparse
+import time
 from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repo_root))
 
 import torch
 import pandas as pd
@@ -25,6 +28,7 @@ from src.model.property_head import PropertyHead, PropertyPredictor
 from src.sampling.sampler import ConstrainedSampler
 from src.evaluation.inverse_design import InverseDesigner
 from src.utils.reproducibility import seed_everything, save_run_metadata
+from shared.rerank_utils import compute_rerank_metrics
 
 
 def main(args):
@@ -312,5 +316,15 @@ if __name__ == '__main__':
                         help='Tolerance for property matching (default uses property-specific preset)')
     parser.add_argument('--num_candidates', type=int, default=10000,
                         help='Number of candidates per target')
+    parser.add_argument("--rerank_strategy", type=str, default="none",
+                        choices=["none", "property_error", "external", "d2_distance", "consistency", "retrieval"],
+                        help="Reranking strategy for foundation-enhanced inverse design")
+    parser.add_argument("--rerank_scores_path", type=str, default=None,
+                        help="Path to rerank scores (.csv or .npy)")
+    parser.add_argument("--rerank_key", type=str, default=None,
+                        help="Key column in rerank scores CSV (smiles/selfies)")
+    parser.add_argument("--rerank_top_k", type=int, default=1000,
+                        help="Top-k candidates to evaluate after reranking")
+
     args = parser.parse_args()
     main(args)

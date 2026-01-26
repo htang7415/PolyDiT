@@ -57,7 +57,11 @@ class GenerativeEvaluator:
         self,
         generated_samples: List[str],
         sample_id: str = "sample",
-        show_progress: bool = True
+        show_progress: bool = True,
+        sampling_time_sec: Optional[float] = None,
+        method: Optional[str] = None,
+        representation: Optional[str] = None,
+        model_size: Optional[str] = None
     ) -> Dict:
         """Evaluate generated samples.
 
@@ -65,6 +69,10 @@ class GenerativeEvaluator:
             generated_samples: List of generated strings (SELFIES or p-SMILES depending on input_format).
             sample_id: Identifier for this sample set.
             show_progress: Whether to show progress.
+            sampling_time_sec: Optional sampling wall time in seconds (for throughput).
+            method: Optional method tag (e.g., Bi_Diffusion).
+            representation: Optional representation tag (e.g., SMILES).
+            model_size: Optional model size tag (small/medium/large/xl).
 
         Returns:
             Dictionary of metrics.
@@ -175,8 +183,18 @@ class GenerativeEvaluator:
         lengths = [len(s) for s in valid_smiles]
         length_stats = self._compute_stats(lengths, "length")
 
+        # Throughput
+        samples_per_sec = 0.0
+        valid_per_sec = 0.0
+        if sampling_time_sec is not None and sampling_time_sec > 0:
+            samples_per_sec = n_total / sampling_time_sec
+            valid_per_sec = n_valid / sampling_time_sec
+
         # Compile metrics (round floats to 4 decimal places)
         metrics = {
+            "method": method or "",
+            "representation": representation or "",
+            "model_size": model_size or "",
             "sample_id": sample_id,
             "n_total": n_total,
             "n_valid": n_valid,
@@ -188,6 +206,8 @@ class GenerativeEvaluator:
             "frac_star_eq_2": round(frac_star_eq_2, 4),
             **sa_stats,
             **length_stats,
+            "samples_per_sec": round(samples_per_sec, 4),
+            "valid_per_sec": round(valid_per_sec, 4),
             "star_count_distribution": dict(star_counter)
         }
 

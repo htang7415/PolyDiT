@@ -5,10 +5,14 @@ import os
 import sys
 import json
 import argparse
+import re
+import time
 from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repo_root))
 
 import torch
 import pandas as pd
@@ -27,6 +31,97 @@ from src.evaluation.generative_metrics import GenerativeEvaluator
 from src.utils.reproducibility import seed_everything, save_run_metadata
 
 
+
+# Constraint logging helpers
+BOND_CHARS = set(['-', '=', '#', '/', '\'])
+
+
+def _smiles_constraint_violations(smiles: str) -> dict:
+    if not smiles:
+        return {
+            "star_count": True,
+            "bond_placement": True,
+            "paren_balance": True,
+            "empty_parens": True,
+            "ring_closure": True,
+        }
+
+    star_violation = count_stars(smiles) != 2
+    empty_parens = "()" in smiles
+
+    # Parenthesis balance
+    depth = 0
+    paren_violation = False
+    for ch in smiles:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth < 0:
+                paren_violation = True
+                break
+    if depth != 0:
+        paren_violation = True
+
+    # Bond placement (heuristic)
+    bond_violation = False
+    prev = None
+    for ch in smiles:
+        if ch in BOND_CHARS:
+            if prev is None or prev in BOND_CHARS or prev in '()':
+                bond_violation = True
+                break
+        if ch.strip() == "":
+            continue
+        prev = ch
+
+    # Ring closure (digits and %nn tokens must appear exactly twice)
+    ring_tokens = re.findall(r'%\d{2}', smiles)
+    no_percent = re.sub(r'%\d{2}', '', smiles)
+    ring_tokens += re.findall(r'\d', no_percent)
+    ring_violation = False
+    if ring_tokens:
+        counts = Counter(ring_tokens)
+        ring_violation = any(c != 2 for c in counts.values())
+
+    return {
+        "star_count": star_violation,
+        "bond_placement": bond_violation,
+        "paren_balance": paren_violation,
+        "empty_parens": empty_parens,
+        "ring_closure": ring_violation,
+    }
+
+
+def compute_smiles_constraint_metrics(smiles_list, method, representation, model_size):
+    total = len(smiles_list)
+    violations = {
+        "star_count": 0,
+        "bond_placement": 0,
+        "paren_balance": 0,
+        "empty_parens": 0,
+        "ring_closure": 0,
+    }
+
+    for smiles in smiles_list:
+        flags = _smiles_constraint_violations(smiles)
+        for key, violated in flags.items():
+            if violated:
+                violations[key] += 1
+
+    rows = []
+    for constraint, count in violations.items():
+        rate = count / total if total > 0 else 0.0
+        rows.append({
+            "method": method,
+            "representation": representation,
+            "model_size": model_size,
+            "constraint": constraint,
+            "total": total,
+            "violations": count,
+            "violation_rate": round(rate, 4),
+        })
+    return rows
 def main(args):
     """Main function."""
     # Load config
@@ -172,6 +267,8 @@ def main(args):
     valid_generated = [s for s in generated_smiles if s is not None]
     print(f"   Successfully decoded: {len(valid_generated)}/{len(generated_smiles)}")
 
+    sampling_time_sec = time.time() - sampling_start
+
     # Save generated samples
     samples_df = pd.DataFrame({'smiles': generated_smiles})
     samples_df.to_csv(metrics_dir / 'generated_samples.csv', index=False)
@@ -179,16 +276,47 @@ def main(args):
 
     # Evaluate
     print("\n7. Evaluating generative metrics...")
+    method_name = "Bi_Diffusion"
+    representation_name = "Graph"
+    model_size_label = args.model_size or "base"
     evaluator = GenerativeEvaluator(training_smiles)
     metrics = evaluator.evaluate(
         generated_smiles,
         sample_id=f'graph_uncond_{num_samples}',
-        show_progress=True
+        show_progress=True,
+        sampling_time_sec=sampling_time_sec,
+        method=method_name,
+        representation=representation_name,
+        model_size=model_size_label
     )
 
     # Save metrics
     metrics_csv = evaluator.format_metrics_csv(metrics)
     metrics_csv.to_csv(metrics_dir / 'sampling_generative_metrics.csv', index=False)
+
+    constraint_rows = compute_smiles_constraint_metrics(generated_smiles, method_name, representation_name, model_size_label)
+    pd.DataFrame(constraint_rows).to_csv(metrics_dir / 'constraint_metrics.csv', index=False)
+
+    if args.evaluate_ood:
+        foundation_dir = Path(args.foundation_results_dir)
+        d1_path = foundation_dir / "embeddings_d1.npy"
+        d2_path = foundation_dir / "embeddings_d2.npy"
+        gen_path = Path(args.generated_embeddings_path) if args.generated_embeddings_path else None
+        if d1_path.exists() and d2_path.exists():
+            try:
+                from shared.ood_metrics import compute_ood_metrics_from_files
+                ood_metrics = compute_ood_metrics_from_files(d1_path, d2_path, gen_path, k=args.ood_k)
+                ood_row = {
+                    "method": method_name,
+                    "representation": representation_name,
+                    "model_size": model_size_label,
+                    **ood_metrics
+                }
+                pd.DataFrame([ood_row]).to_csv(metrics_dir / "metrics_ood.csv", index=False)
+            except Exception as exc:
+                print(f"OOD evaluation failed: {exc}")
+        else:
+            print("OOD embeddings not found; skipping OOD evaluation.")
 
     # Print metrics
     print("\n   Generative Metrics:")
@@ -310,5 +438,15 @@ if __name__ == '__main__':
                         help='Batch size for sampling (default: from config)')
     parser.add_argument('--temperature', type=float, default=None,
                         help='Sampling temperature (default: from config)')
+    parser.add_argument("--evaluate_ood", action="store_true",
+                        help="Compute OOD metrics if embeddings are available")
+    parser.add_argument("--foundation_results_dir", type=str,
+                        default="../Multi_View_Foundation/results",
+                        help="Path to Multi_View_Foundation results directory")
+    parser.add_argument("--generated_embeddings_path", type=str, default=None,
+                        help="Optional path to generated embeddings (.npy)")
+    parser.add_argument("--ood_k", type=int, default=1,
+                        help="k for nearest-neighbor distance in OOD metrics")
+
     args = parser.parse_args()
     main(args)

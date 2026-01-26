@@ -1,0 +1,137 @@
+# Multi-View Foundation configuration (scaffold)
+
+paths:
+  data_dir: "../Data"
+  polymer_file: "../Data/Polymer/SMiPoly_polymers.gz"
+  polymer_file_d2: "../Data/Polymer/PolyInfo_Homopolymer.csv"
+  property_dir: "../Data/Property"
+  results_dir: "results"
+  paired_index: "results/paired_index.csv"
+
+data:
+  random_seed: 42
+  max_samples_d1: null
+  max_samples_d2: null
+
+alignment_views: ["smiles", "selfies", "group_selfies", "graph"]
+
+views:
+  selfies:
+    enabled: true
+  group_selfies:
+    enabled: true
+    tokenizer_path: "../Bi_Diffusion_Group_SELFIES/results/tokenizer.pkl"
+  graph:
+    enabled: true
+
+model:
+  projection_dim: 256
+  projection_hidden_dims: [512]
+  view_dropout: 0.3
+  temperature: 0.07
+
+training:
+  batch_size: 512
+  learning_rate: 1.0e-4
+  max_steps: 200000
+  warmup_steps: 2000
+
+alignment_training:
+  batch_size: 256
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  max_epochs: 10
+  val_ratio: 0.1
+  log_every: 50
+  datasets: ["d1"]
+
+alignment_e2e:
+  batch_size: 64
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  max_epochs: 3
+  val_ratio: 0.05
+  log_every: 50
+  datasets: ["d1"]
+  max_samples: null
+
+evaluation:
+  recall_ks: [1, 5, 10]
+
+ood:
+  nn_k: 50
+  use_faiss: false
+
+property:
+  files: null
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  ridge_alpha: 1.0
+  views: null
+  use_alignment: false
+
+smiles_encoder:
+  method_dir: "../Bi_Diffusion_SMILES"
+  config_path: "../Bi_Diffusion_SMILES/configs/config.yaml"
+  results_dir: ""
+  model_size: "small"
+  step_dir: "step1_backbone"
+  checkpoint_name: "backbone_best.pt"
+  tokenizer_path: ""
+  checkpoint_path: ""
+  pooling: "mean"
+  timestep: 1
+  batch_size: 256
+  device: "auto"
+  max_samples_d1: null
+  max_samples_d2: null
+
+selfies_encoder:
+  method_dir: "../Bi_Diffusion_SELFIES"
+  config_path: "../Bi_Diffusion_SELFIES/configs/config.yaml"
+  results_dir: ""
+  model_size: "small"
+  step_dir: "step1_backbone"
+  checkpoint_name: "backbone_best.pt"
+  tokenizer_path: ""
+  checkpoint_path: ""
+  pooling: "mean"
+  timestep: 1
+  batch_size: 256
+  device: "auto"
+  max_samples_d1: null
+  max_samples_d2: null
+
+group_selfies_encoder:
+  method_dir: "../Bi_Diffusion_Group_SELFIES"
+  config_path: "../Bi_Diffusion_Group_SELFIES/configs/config.yaml"
+  results_dir: ""
+  model_size: "small"
+  step_dir: "step1_backbone"
+  checkpoint_name: "backbone_best.pt"
+  tokenizer_path: ""
+  checkpoint_path: ""
+  pooling: "mean"
+  timestep: 1
+  batch_size: 128
+  device: "auto"
+  max_samples_d1: null
+  max_samples_d2: null
+
+graph_encoder:
+  method_dir: "../Bi_Diffusion_graph"
+  config_path: "../Bi_Diffusion_graph/configs/config.yaml"
+  results_dir: ""
+  model_size: "small"
+  step_dir: "step1_backbone"
+  checkpoint_name: "graph_backbone_best.pt"
+  tokenizer_path: ""
+  graph_config_path: ""
+  checkpoint_path: ""
+  pooling: "mean"
+  timestep: 1
+  batch_size: 64
+  device: "auto"
+  max_samples_d1: null
+  max_samples_d2: null

@@ -4,10 +4,13 @@
 import os
 import sys
 import argparse
+import time
 from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repo_root))
 
 import torch
 import pandas as pd
@@ -22,10 +25,39 @@ from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
 from src.sampling.sampler import ConstrainedSampler
 from src.evaluation.generative_metrics import GenerativeEvaluator
-from src.utils.selfies_utils import selfies_to_psmiles
+from src.utils.selfies_utils import selfies_to_psmiles, count_placeholder_in_selfies
 from src.utils.reproducibility import seed_everything, save_run_metadata
 
 
+
+# Constraint logging helpers
+def compute_selfies_constraint_metrics(selfies_list, method, representation, model_size):
+    total = len(selfies_list)
+    placeholder_errors = 0
+    conversion_failures = 0
+
+    for selfies in selfies_list:
+        if count_placeholder_in_selfies(selfies) != 2:
+            placeholder_errors += 1
+        if selfies_to_psmiles(selfies) is None:
+            conversion_failures += 1
+
+    rows = []
+    for constraint, count in [
+        ("placeholder_count", placeholder_errors),
+        ("conversion_failure", conversion_failures),
+    ]:
+        rate = count / total if total > 0 else 0.0
+        rows.append({
+            "method": method,
+            "representation": representation,
+            "model_size": model_size,
+            "constraint": constraint,
+            "total": total,
+            "violations": count,
+            "violation_rate": round(rate, 4),
+        })
+    return rows
 def main(args):
     """Main function."""
     # Load config
@@ -117,7 +149,8 @@ def main(args):
         device=device
     )
 
-    # Sample (outputs SELFIES)
+    # Sample
+    sampling_start = time.time()
     batch_size = args.batch_size or config['sampling']['batch_size']
     print(f"\n5. Sampling {args.num_samples} polymers (batch_size={batch_size})...")
     if args.variable_length:
@@ -150,6 +183,8 @@ def main(args):
             lengths=lengths
         )
 
+    sampling_time_sec = time.time() - sampling_start
+
     # Save generated samples (both SELFIES and converted p-SMILES)
     print(f"Converting {len(generated_selfies)} generated SELFIES to p-SMILES...")
     generated_psmiles = []
@@ -166,16 +201,47 @@ def main(args):
 
     # Evaluate (evaluator handles SELFIES -> p-SMILES conversion internally)
     print("\n6. Evaluating generative metrics...")
+    method_name = "Bi_Diffusion"
+    representation_name = "SELFIES"
+    model_size_label = args.model_size or "base"
     evaluator = GenerativeEvaluator(training_smiles, input_format="selfies")
     metrics = evaluator.evaluate(
         generated_selfies,
         sample_id=f'uncond_{args.num_samples}_best_checkpoint',
-        show_progress=True
+        show_progress=True,
+        sampling_time_sec=sampling_time_sec,
+        method=method_name,
+        representation=representation_name,
+        model_size=model_size_label
     )
 
     # Save metrics
     metrics_csv = evaluator.format_metrics_csv(metrics)
     metrics_csv.to_csv(metrics_dir / 'sampling_generative_metrics.csv', index=False)
+
+    constraint_rows = compute_selfies_constraint_metrics(generated_selfies, method_name, representation_name, model_size_label)
+    pd.DataFrame(constraint_rows).to_csv(metrics_dir / 'constraint_metrics.csv', index=False)
+
+    if args.evaluate_ood:
+        foundation_dir = Path(args.foundation_results_dir)
+        d1_path = foundation_dir / "embeddings_d1.npy"
+        d2_path = foundation_dir / "embeddings_d2.npy"
+        gen_path = Path(args.generated_embeddings_path) if args.generated_embeddings_path else None
+        if d1_path.exists() and d2_path.exists():
+            try:
+                from shared.ood_metrics import compute_ood_metrics_from_files
+                ood_metrics = compute_ood_metrics_from_files(d1_path, d2_path, gen_path, k=args.ood_k)
+                ood_row = {
+                    "method": method_name,
+                    "representation": representation_name,
+                    "model_size": model_size_label,
+                    **ood_metrics
+                }
+                pd.DataFrame([ood_row]).to_csv(metrics_dir / "metrics_ood.csv", index=False)
+            except Exception as exc:
+                print(f"OOD evaluation failed: {exc}")
+        else:
+            print("OOD embeddings not found; skipping OOD evaluation.")
 
     # Print metrics
     print("\nGenerative Metrics:")
@@ -275,5 +341,15 @@ if __name__ == '__main__':
                         help='Maximum sequence length for variable length sampling')
     parser.add_argument('--samples_per_length', type=int, default=16,
                         help='Samples per length in variable length mode (controls diversity)')
+    parser.add_argument("--evaluate_ood", action="store_true",
+                        help="Compute OOD metrics if embeddings are available")
+    parser.add_argument("--foundation_results_dir", type=str,
+                        default="../Multi_View_Foundation/results",
+                        help="Path to Multi_View_Foundation results directory")
+    parser.add_argument("--generated_embeddings_path", type=str, default=None,
+                        help="Optional path to generated embeddings (.npy)")
+    parser.add_argument("--ood_k", type=int, default=1,
+                        help="k for nearest-neighbor distance in OOD metrics")
+
     args = parser.parse_args()
     main(args)

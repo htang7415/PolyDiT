@@ -5,10 +5,13 @@ import os
 import sys
 import json
 import argparse
+import time
 from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repo_root))
 
 import torch
 import pandas as pd
@@ -26,6 +29,7 @@ from src.model.graph_property_head import GraphPropertyHead, GraphPropertyPredic
 from src.sampling.graph_sampler import GraphSampler, create_graph_sampler
 from src.evaluation.inverse_design import GraphInverseDesigner
 from src.utils.reproducibility import seed_everything, save_run_metadata
+from shared.rerank_utils import compute_rerank_metrics
 
 
 def main(args):
@@ -206,6 +210,7 @@ def main(args):
     # Run design
     raw_results = []
     for target in tqdm(target_values, desc="Targets"):
+        start_time = time.time()
         results = designer.design(
             target_value=target,
             epsilon=args.epsilon,
@@ -214,6 +219,24 @@ def main(args):
             show_progress=False
         )
         raw_results.append(results)
+        elapsed_sec = time.time() - start_time
+        results["sampling_time_sec"] = round(elapsed_sec, 4)
+        results["valid_per_compute"] = round(results.get("n_hits", 0) / elapsed_sec, 4) if elapsed_sec > 0 else 0.0
+        valid_keys = results.get("valid_selfies", results.get("valid_smiles", []))
+        predictions = np.array(results.get("predictions", []), dtype=float)
+        rerank_metrics = compute_rerank_metrics(
+            predictions=predictions,
+            target_value=target,
+            epsilon=args.epsilon,
+            keys=valid_keys,
+            strategy=args.rerank_strategy,
+            score_path=args.rerank_scores_path,
+            key_column=args.rerank_key,
+            top_k=args.rerank_top_k,
+        )
+        results.update(rerank_metrics)
+        if rerank_metrics.get("rerank_applied"):
+            results["valid_per_compute_rerank"] = round(rerank_metrics.get("rerank_hits", 0) / elapsed_sec, 4) if elapsed_sec > 0 else 0.0
 
     drop_keys = {
         "valid_smiles",
@@ -276,5 +299,15 @@ if __name__ == '__main__':
                         help='Tolerance for property matching (default uses property-specific preset)')
     parser.add_argument('--num_candidates', type=int, default=10000,
                         help='Number of candidates per target')
+    parser.add_argument("--rerank_strategy", type=str, default="none",
+                        choices=["none", "property_error", "external", "d2_distance", "consistency", "retrieval"],
+                        help="Reranking strategy for foundation-enhanced inverse design")
+    parser.add_argument("--rerank_scores_path", type=str, default=None,
+                        help="Path to rerank scores (.csv or .npy)")
+    parser.add_argument("--rerank_key", type=str, default=None,
+                        help="Key column in rerank scores CSV (smiles/selfies)")
+    parser.add_argument("--rerank_top_k", type=int, default=1000,
+                        help="Top-k candidates to evaluate after reranking")
+
     args = parser.parse_args()
     main(args)
