@@ -8,6 +8,8 @@ from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(repo_root))
 
 import random
 import pandas as pd
@@ -18,6 +20,10 @@ from src.utils.plotting import PlotUtils
 from src.data.data_loader import PolymerDataLoader
 from src.data.tokenizer import PSmilesTokenizer
 from src.utils.reproducibility import seed_everything, save_run_metadata
+from shared.unlabeled_data import (
+    load_or_create_shared_unlabeled_splits,
+    link_local_unlabeled_splits,
+)
 
 
 def main(args):
@@ -46,11 +52,23 @@ def main(args):
     print("Step 0: Data Preparation")
     print("=" * 50)
 
-    # Prepare unlabeled data
-    print("\n1. Loading and preparing unlabeled data...")
-    unlabeled_data = data_loader.prepare_unlabeled_data()
-    train_df = unlabeled_data['train']
-    val_df = unlabeled_data['val']
+    # Prepare or load shared unlabeled data
+    print("\n1. Loading shared unlabeled train/val data...")
+    shared = load_or_create_shared_unlabeled_splits(
+        data_loader=data_loader,
+        repo_root=repo_root,
+        create_if_missing=False,
+    )
+    train_df = shared['train_df']
+    val_df = shared['val_df']
+    train_shared_path = shared['train_path']
+    val_shared_path = shared['val_path']
+    if shared['created']:
+        print(f"Created shared train split: {train_shared_path}")
+        print(f"Created shared val split: {val_shared_path}")
+    else:
+        print(f"Using shared train split: {train_shared_path}")
+        print(f"Using shared val split: {val_shared_path}")
 
     # Build tokenizer vocabulary from training data only
     print("\n2. Building tokenizer vocabulary...")
@@ -182,10 +200,21 @@ def main(args):
         style='step'
     )
 
-    # Save processed data
-    print("\n7. Saving processed data...")
-    train_df.to_csv(results_dir / 'train_unlabeled.csv', index=False)
-    val_df.to_csv(results_dir / 'val_unlabeled.csv', index=False)
+    # Link shared processed data into local results for backward compatibility
+    print("\n7. Linking shared processed data into local results...")
+    link_info = link_local_unlabeled_splits(
+        results_dir=results_dir,
+        train_src=train_shared_path,
+        val_src=val_shared_path,
+    )
+    print(
+        f"  {link_info['train_dst']} -> {link_info['train_src']} "
+        f"({link_info['train_mode']})"
+    )
+    print(
+        f"  {link_info['val_dst']} -> {link_info['val_src']} "
+        f"({link_info['val_mode']})"
+    )
 
     print("\n" + "=" * 50)
     print("Data preparation complete!")

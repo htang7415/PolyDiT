@@ -26,6 +26,7 @@ from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
 from src.training.trainer_backbone import BackboneTrainer
 from src.utils.reproducibility import seed_everything, save_run_metadata
+from src.utils.selfies_utils import ensure_selfies_column
 
 
 def init_distributed():
@@ -131,6 +132,21 @@ def main(args):
         ).reset_index(drop=True)
         if is_main_process:
             print(f"Using {n_train}/{full_train_count} train samples ({train_fraction:.2%})")
+
+    # Backward compatibility: Step0 now exports p_smiles/sa_score only.
+    had_train_selfies = 'selfies' in train_df.columns
+    had_val_selfies = 'selfies' in val_df.columns
+    train_before = len(train_df)
+    val_before = len(val_df)
+    train_df = ensure_selfies_column(train_df)
+    val_df = ensure_selfies_column(val_df)
+    if is_main_process and (not had_train_selfies or not had_val_selfies):
+        print("SELFIES column missing in unlabeled CSVs; regenerated from p_smiles.")
+    if is_main_process and (len(train_df) != train_before or len(val_df) != val_before):
+        print(
+            f"Dropped {train_before - len(train_df)} train and {val_before - len(val_df)} val "
+            "rows due to failed p_smiles->SELFIES conversion."
+        )
 
     # Get optimization settings
     opt_config = config.get('optimization', {})

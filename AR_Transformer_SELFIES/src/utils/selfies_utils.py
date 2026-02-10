@@ -11,6 +11,7 @@ import selfies as sf
 from rdkit import Chem
 from typing import Optional, Tuple, List
 import logging
+import pandas as pd
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -229,6 +230,113 @@ def batch_selfies_to_psmiles(selfies_list: List[str]) -> List[Optional[str]]:
         List of p-SMILES strings (None for failed conversions).
     """
     return [selfies_to_psmiles(selfies) for selfies in selfies_list]
+
+
+def ensure_selfies_column(
+    df: pd.DataFrame,
+    psmiles_col: str = "p_smiles",
+    selfies_col: str = "selfies",
+    drop_failed: bool = True
+) -> pd.DataFrame:
+    """Ensure a dataframe has a SELFIES column.
+
+    If `selfies_col` does not exist, it is created from `psmiles_col`.
+    Failed conversions are optionally dropped.
+
+    Args:
+        df: Input dataframe.
+        psmiles_col: Column name containing p-SMILES.
+        selfies_col: Target SELFIES column name.
+        drop_failed: Drop rows where conversion failed.
+
+    Returns:
+        Dataframe containing `selfies_col`.
+    """
+    if selfies_col in df.columns:
+        return df.reset_index(drop=True)
+    if psmiles_col not in df.columns:
+        raise ValueError(
+            f"Missing both '{selfies_col}' and '{psmiles_col}' columns; cannot build SELFIES."
+        )
+
+    out = df.copy()
+    out[selfies_col] = out[psmiles_col].apply(psmiles_to_selfies)
+    failed = int(out[selfies_col].isna().sum())
+    if failed > 0:
+        logger.warning(
+            "Failed to convert %d/%d rows to SELFIES while building '%s'.",
+            failed,
+            len(out),
+            selfies_col,
+        )
+        if drop_failed:
+            out = out[out[selfies_col].notna()].copy()
+
+    return out.reset_index(drop=True)
+
+
+def sample_selfies_from_dataframe(
+    df: pd.DataFrame,
+    num_samples: int,
+    random_seed: int = 42,
+    selfies_col: str = "selfies",
+    psmiles_col: str = "p_smiles",
+    max_attempts: int = 20
+) -> List[str]:
+    """Sample SELFIES strings from dataframe with backward-compatible fallback.
+
+    If `selfies_col` exists, sample directly. Otherwise sample p-SMILES and convert.
+
+    Args:
+        df: Source dataframe.
+        num_samples: Number of SELFIES strings to sample.
+        random_seed: Base random seed for deterministic sampling.
+        selfies_col: Existing SELFIES column name if present.
+        psmiles_col: p-SMILES column name for fallback conversion.
+        max_attempts: Max resampling attempts when fallback conversion drops rows.
+
+    Returns:
+        A list of sampled SELFIES strings of length `num_samples`.
+    """
+    if num_samples <= 0:
+        return []
+    if len(df) == 0:
+        raise ValueError("Cannot sample SELFIES from an empty dataframe.")
+
+    replace = num_samples > len(df)
+    if selfies_col in df.columns:
+        sampled = df[selfies_col].sample(
+            n=num_samples,
+            replace=replace,
+            random_state=random_seed,
+        )
+        return sampled.tolist()
+
+    if psmiles_col not in df.columns:
+        raise ValueError(
+            f"Missing both '{selfies_col}' and '{psmiles_col}' columns; cannot sample SELFIES."
+        )
+
+    collected: List[str] = []
+    attempt = 0
+    while len(collected) < num_samples and attempt < max_attempts:
+        need = num_samples - len(collected)
+        sampled_psmiles = df[psmiles_col].sample(
+            n=need,
+            replace=True if need > len(df) else replace,
+            random_state=random_seed + attempt,
+        )
+        converted = batch_psmiles_to_selfies(sampled_psmiles.tolist())
+        collected.extend([s for s in converted if isinstance(s, str) and s])
+        attempt += 1
+
+    if len(collected) < num_samples:
+        raise ValueError(
+            f"Could not sample {num_samples} SELFIES after {max_attempts} attempts; "
+            f"only obtained {len(collected)} valid conversions."
+        )
+
+    return collected[:num_samples]
 
 
 def parallel_selfies_to_psmiles(

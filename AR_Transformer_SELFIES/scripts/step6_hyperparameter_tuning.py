@@ -20,6 +20,7 @@ from src.data.dataset import PolymerDataset, PropertyDataset
 from src.model.backbone import DiffusionBackbone
 from src.training.hyperparameter_tuning import BackboneTuner, PropertyHeadTuner
 from src.utils.reproducibility import seed_everything, save_run_metadata
+from src.utils.selfies_utils import ensure_selfies_column
 
 
 def tune_backbone(args, config, results_dir, device):
@@ -42,6 +43,8 @@ def tune_backbone(args, config, results_dir, device):
         val_path = base_results_dir / 'val_unlabeled.csv'
     train_df = pd.read_csv(train_path)
     val_df = pd.read_csv(val_path)
+    train_df = ensure_selfies_column(train_df)
+    val_df = ensure_selfies_column(val_df)
 
     # Create datasets
     train_dataset = PolymerDataset(train_df, tokenizer)

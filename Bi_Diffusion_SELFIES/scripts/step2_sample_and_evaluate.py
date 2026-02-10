@@ -25,7 +25,11 @@ from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
 from src.sampling.sampler import ConstrainedSampler
 from src.evaluation.generative_metrics import GenerativeEvaluator
-from src.utils.selfies_utils import selfies_to_psmiles, count_placeholder_in_selfies
+from src.utils.selfies_utils import (
+    selfies_to_psmiles,
+    count_placeholder_in_selfies,
+    sample_selfies_from_dataframe,
+)
 from src.utils.reproducibility import seed_everything, save_run_metadata
 
 
@@ -164,15 +168,14 @@ def main(args):
         )
     else:
         # Sample lengths from training distribution (token length + BOS/EOS)
-        replace = args.num_samples > len(train_df)
-        sampled = train_df['selfies'].sample(
-            n=args.num_samples,
-            replace=replace,
-            random_state=config['data']['random_seed']
+        sampled = sample_selfies_from_dataframe(
+            train_df,
+            num_samples=args.num_samples,
+            random_seed=config['data']['random_seed'],
         )
         lengths = [
             min(len(tokenizer.tokenize(s)) + 2, tokenizer.max_length)
-            for s in sampled.tolist()
+            for s in sampled
         ]
         print(f"   Using training length distribution (min={min(lengths)}, max={max(lengths)})")
         _, generated_selfies = sampler.sample_batch(

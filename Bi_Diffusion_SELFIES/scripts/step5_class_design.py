@@ -24,6 +24,7 @@ from src.model.property_head import PropertyHead, PropertyPredictor
 from src.sampling.sampler import ConstrainedSampler
 from src.evaluation.polymer_class import PolymerClassifier, ClassGuidedDesigner
 from src.utils.reproducibility import seed_everything, save_run_metadata
+from src.utils.selfies_utils import sample_selfies_from_dataframe
 
 
 def main(args):
@@ -197,15 +198,14 @@ def main(args):
     )
 
     # Sample lengths from training distribution
-    replace = args.num_candidates > len(train_df)
-    sampled = train_df['selfies'].sample(
-        n=args.num_candidates,
-        replace=replace,
-        random_state=config['data']['random_seed']
+    sampled = sample_selfies_from_dataframe(
+        train_df,
+        num_samples=args.num_candidates,
+        random_seed=config['data']['random_seed'],
     )
     lengths = [
         min(len(tokenizer.tokenize(s)) + 2, tokenizer.max_length)
-        for s in sampled.tolist()
+        for s in sampled
     ]
     print(f"   Using training length distribution (min={min(lengths)}, max={max(lengths)})")
 
@@ -239,14 +239,14 @@ def main(args):
     if args.property and args.target_value is not None:
         print(f"\n7. Running joint design: {args.polymer_class} + {args.property}={args.target_value}...")
         # Sample new lengths for joint design
-        joint_sampled = train_df['selfies'].sample(
-            n=args.num_candidates,
-            replace=args.num_candidates > len(train_df),
-            random_state=config['data']['random_seed'] + 1
+        joint_sampled = sample_selfies_from_dataframe(
+            train_df,
+            num_samples=args.num_candidates,
+            random_seed=config['data']['random_seed'] + 1,
         )
         joint_lengths = [
             min(len(tokenizer.tokenize(s)) + 2, tokenizer.max_length)
-            for s in joint_sampled.tolist()
+            for s in joint_sampled
         ]
         joint_results = designer.design_joint(
             target_class=args.polymer_class,

@@ -28,6 +28,7 @@ from src.model.property_head import PropertyHead, PropertyPredictor
 from src.sampling.sampler import ConstrainedSampler
 from src.evaluation.inverse_design import InverseDesigner
 from src.utils.reproducibility import seed_everything, save_run_metadata
+from src.utils.selfies_utils import sample_selfies_from_dataframe
 from shared.rerank_utils import compute_rerank_metrics
 
 
@@ -226,15 +227,14 @@ def main(args):
 
     # Sample lengths from training distribution
     total_candidates = args.num_candidates * len(target_values)
-    replace = total_candidates > len(train_df)
-    sampled = train_df['selfies'].sample(
-        n=total_candidates,
-        replace=replace,
-        random_state=config['data']['random_seed']
+    sampled = sample_selfies_from_dataframe(
+        train_df,
+        num_samples=total_candidates,
+        random_seed=config['data']['random_seed'],
     )
     lengths = [
         min(len(tokenizer.tokenize(s)) + 2, tokenizer.max_length)
-        for s in sampled.tolist()
+        for s in sampled
     ]
     print(f"   Using training length distribution (min={min(lengths)}, max={max(lengths)})")
 
