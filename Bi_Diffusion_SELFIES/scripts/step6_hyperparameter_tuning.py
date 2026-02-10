@@ -131,7 +131,7 @@ def tune_property_head(args, config, results_dir, device):
         backbone=backbone,
         num_steps=config['diffusion']['num_steps'],
         beta_min=config['diffusion']['beta_min'],
-        beta_max=config['diffusion']['beta_max'],
+        force_clean_t0=config['diffusion'].get('force_clean_t0', False),
         mask_token_id=tokenizer.mask_token_id,
         pad_token_id=tokenizer.pad_token_id,
         bos_token_id=tokenizer.bos_token_id,

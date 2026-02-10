@@ -161,6 +161,7 @@ class BackboneTrainer:
         self.best_val_loss = float('inf')
         self.train_losses = []
         self.val_losses = []
+        self.val_steps = []
         self.learning_rates = []
 
     def _maybe_mark_cudagraph_step_begin(self) -> None:
@@ -234,11 +235,18 @@ class BackboneTrainer:
         num_batches = 0
 
         pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar):
             if self.global_step >= self.max_steps:
                 break
 
-            loss = self._train_step(batch)
+            is_last_batch = (batch_idx + 1) == len(self.train_dataloader)
+            hits_step_limit = (self.global_step + 1) >= self.max_steps
+            should_step = (
+                ((batch_idx + 1) % self.grad_accum_steps == 0) or
+                is_last_batch or
+                hits_step_limit
+            )
+            loss = self._train_step(batch, should_step=should_step)
             total_loss += loss
             num_batches += 1
 
@@ -251,6 +259,7 @@ class BackboneTrainer:
             if self.global_step > 0 and self.global_step % self.eval_every == 0:
                 val_loss = self._validate()
                 self.val_losses.append(val_loss)
+                self.val_steps.append(self.global_step)
                 self._save_checkpoint(val_loss, epoch)
                 self.model.train()
 
@@ -262,11 +271,12 @@ class BackboneTrainer:
 
         return total_loss / max(num_batches, 1)
 
-    def _train_step(self, batch: Dict[str, torch.Tensor]) -> float:
+    def _train_step(self, batch: Dict[str, torch.Tensor], should_step: bool) -> float:
         """Single training step.
 
         Args:
             batch: Batch of data.
+            should_step: Whether to apply optimizer/scheduler updates this micro-batch.
 
         Returns:
             Loss value.
@@ -283,8 +293,7 @@ class BackboneTrainer:
         # Backward pass with gradient scaling
         self.scaler.scale(loss).backward()
 
-        # Only update weights every grad_accum_steps
-        if (self.global_step + 1) % self.grad_accum_steps == 0:
+        if should_step:
             # Unscale gradients for clipping
             self.scaler.unscale_(self.optimizer)
 
@@ -379,30 +388,19 @@ class BackboneTrainer:
         rounded_learning_rates = [round(lr, 8) for lr in self.learning_rates]  # LR needs more precision
         rounded_val_losses = [round(loss, 4) for loss in self.val_losses]
 
-        # Create loss curve CSV
-        history = {
+        # Save as DataFrame
+        train_df = pd.DataFrame({
             'step': list(range(len(self.train_losses))),
             'train_loss': rounded_train_losses,
             'learning_rate': rounded_learning_rates
-        }
-
-        # Add validation losses at eval intervals
-        val_steps = list(range(self.eval_every, len(self.train_losses) + 1, self.eval_every))
-        history['val_step'] = val_steps[:len(self.val_losses)]
-        history['val_loss'] = rounded_val_losses
-
-        # Save as DataFrame
-        train_df = pd.DataFrame({
-            'step': history['step'],
-            'train_loss': history['train_loss'],
-            'learning_rate': history['learning_rate']
         })
         train_df.to_csv(self.metrics_dir / 'backbone_loss_curve.csv', index=False)
 
-        if self.val_losses:
+        if self.val_losses and self.val_steps:
+            paired_count = min(len(self.val_losses), len(self.val_steps))
             val_df = pd.DataFrame({
-                'step': history['val_step'],
-                'val_loss': history['val_loss']
+                'step': self.val_steps[:paired_count],
+                'val_loss': rounded_val_losses[:paired_count]
             })
             val_df.to_csv(self.metrics_dir / 'backbone_val_loss.csv', index=False)
 

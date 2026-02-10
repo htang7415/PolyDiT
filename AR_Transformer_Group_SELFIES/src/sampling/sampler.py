@@ -46,6 +46,8 @@ class ConstrainedSampler:
         self.tokenizer = tokenizer
         self.num_steps = num_steps
         self.temperature = temperature
+        if self.temperature <= 0:
+            raise ValueError(f"temperature must be > 0, got {self.temperature}")
         self.use_constraints = use_constraints
         self.device = device
         self.top_k = top_k

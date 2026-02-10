@@ -69,7 +69,7 @@ class MultiHeadAttention(nn.Module):
         if attention_mask is not None:
             # Expand mask: [batch, seq_len] -> [batch, 1, 1, seq_len]
             mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            attn_scores = attn_scores.masked_fill(mask == 0, float('-inf'))
+            attn_scores = attn_scores.masked_fill(mask == 0, -1e9)
 
         attn_probs = F.softmax(attn_scores, dim=-1)
         attn_probs = self.dropout(attn_probs)
@@ -175,6 +175,10 @@ class DiffusionBackbone(nn.Module):
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.ffn_hidden_size = ffn_hidden_size
+        self.max_position_embeddings = max_position_embeddings
+        self.dropout = dropout
         self.pad_token_id = pad_token_id
         self.num_diffusion_steps = num_diffusion_steps
         self.causal = causal
@@ -332,6 +336,10 @@ class DiffusionBackbone(nn.Module):
                 'vocab_size': self.vocab_size,
                 'hidden_size': self.hidden_size,
                 'num_layers': self.num_layers,
+                'num_heads': self.num_heads,
+                'ffn_hidden_size': self.ffn_hidden_size,
+                'max_position_embeddings': self.max_position_embeddings,
+                'dropout': self.dropout,
                 'pad_token_id': self.pad_token_id,
                 'num_diffusion_steps': self.num_diffusion_steps,
                 'causal': self.causal

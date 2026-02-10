@@ -238,8 +238,12 @@ class PropertyTrainer:
         num_batches = 0
 
         pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
-        for batch in pbar:
-            loss = self._train_step(batch)
+        for batch_idx, batch in enumerate(pbar):
+            should_step = (
+                ((batch_idx + 1) % self.grad_accum_steps == 0) or
+                ((batch_idx + 1) == len(self.train_dataloader))
+            )
+            loss = self._train_step(batch, should_step=should_step)
             total_loss += loss
             num_batches += 1
             self.global_step += 1
@@ -247,11 +251,12 @@ class PropertyTrainer:
 
         return total_loss / max(num_batches, 1)
 
-    def _train_step(self, batch: Dict[str, torch.Tensor]) -> float:
+    def _train_step(self, batch: Dict[str, torch.Tensor], should_step: bool) -> float:
         """Single training step.
 
         Args:
             batch: Batch of data.
+            should_step: Whether to apply optimizer update this micro-batch.
 
         Returns:
             Loss value.
@@ -269,8 +274,7 @@ class PropertyTrainer:
         # Backward pass with gradient scaling
         self.scaler.scale(loss).backward()
 
-        # Only update weights every grad_accum_steps
-        if (self.global_step + 1) % self.grad_accum_steps == 0:
+        if should_step:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad()

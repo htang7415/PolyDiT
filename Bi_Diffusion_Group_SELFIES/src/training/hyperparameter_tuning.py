@@ -157,7 +157,7 @@ class BackboneTuner:
             backbone=backbone,
             num_steps=self.config['diffusion']['num_steps'],
             beta_min=self.config['diffusion']['beta_min'],
-            beta_max=self.config['diffusion']['beta_max'],
+        force_clean_t0=self.config['diffusion'].get('force_clean_t0', False),
             mask_token_id=self.tokenizer.mask_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
             bos_token_id=self.tokenizer.bos_token_id,

@@ -151,9 +151,24 @@ def main(args):
     # Get optimization settings
     opt_config = config.get('optimization', {})
     cache_graphs = opt_config.get('cache_tokenization', False)
+    cache_max_samples = int(opt_config.get('cache_tokenization_max_samples', 500000))
     num_workers = opt_config.get('num_workers', 4)
     pin_memory = opt_config.get('pin_memory', True)
     prefetch_factor = opt_config.get('prefetch_factor', 2)
+
+    # Guard against memory blow-up: graph caching can exceed RAM on large datasets.
+    total_samples = len(train_df) + len(val_df)
+    if cache_graphs and distributed:
+        if is_main_process:
+            print("Disabling cache_graphs under DDP to avoid per-rank RAM duplication.")
+        cache_graphs = False
+    elif cache_graphs and total_samples > cache_max_samples:
+        if is_main_process:
+            print(
+                f"Disabling cache_graphs for {total_samples:,} samples "
+                f"(limit={cache_max_samples:,})."
+            )
+        cache_graphs = False
 
     # Create datasets
     print("\n4. Creating graph datasets...")
@@ -213,6 +228,7 @@ def main(args):
         num_steps=diffusion_config['num_steps'],
         beta_min=diffusion_config['beta_min'],
         beta_max=diffusion_config['beta_max'],
+        force_clean_t0=diffusion_config.get('force_clean_t0', False),
         node_mask_id=atom_vocab['MASK'],
         edge_mask_id=edge_vocab['MASK'],
         node_pad_id=atom_vocab['PAD'],

@@ -187,6 +187,7 @@ class GraphBackboneTrainer:
         self.val_losses = []
         self.val_node_losses = []
         self.val_edge_losses = []
+        self.val_steps = []
         self.learning_rates = []
 
     def _wrap_ddp(self, model: nn.Module) -> nn.Module:
@@ -301,11 +302,18 @@ class GraphBackboneTrainer:
         if self.distributed and hasattr(self.train_dataloader.sampler, "set_epoch"):
             self.train_dataloader.sampler.set_epoch(epoch)
         pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}", disable=not self.is_main_process)
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar):
             if self.global_step >= self.max_steps:
                 break
 
-            loss, node_loss, edge_loss = self._train_step(batch)
+            is_last_batch = (batch_idx + 1) == len(self.train_dataloader)
+            hits_step_limit = (self.global_step + 1) >= self.max_steps
+            should_step = (
+                ((batch_idx + 1) % self.grad_accum_steps == 0) or
+                is_last_batch or
+                hits_step_limit
+            )
+            loss, node_loss, edge_loss = self._train_step(batch, should_step=should_step)
             total_loss += loss
             total_node_loss += node_loss
             total_edge_loss += edge_loss
@@ -332,6 +340,7 @@ class GraphBackboneTrainer:
                     self.val_losses.append(val_loss)
                     self.val_node_losses.append(val_node)
                     self.val_edge_losses.append(val_edge)
+                    self.val_steps.append(self.global_step)
                     self._save_checkpoint(val_loss, epoch)
                 if self.distributed and dist.is_available() and dist.is_initialized():
                     dist.barrier()
@@ -358,11 +367,12 @@ class GraphBackboneTrainer:
             self._reduce_mean(avg_edge)
         )
 
-    def _train_step(self, batch: Dict[str, torch.Tensor]):
+    def _train_step(self, batch: Dict[str, torch.Tensor], should_step: bool):
         """Single training step for graph data.
 
         Args:
             batch: Batch with X, E, M tensors.
+            should_step: Whether to apply optimizer/scheduler updates this micro-batch.
 
         Returns:
             Tuple of (total_loss, node_loss, edge_loss).
@@ -380,8 +390,7 @@ class GraphBackboneTrainer:
         # Backward pass with gradient scaling
         self.scaler.scale(loss).backward()
 
-        # Only update weights every grad_accum_steps
-        if (self.global_step + 1) % self.grad_accum_steps == 0:
+        if should_step:
             # Unscale gradients for clipping
             self.scaler.unscale_(self.optimizer)
 
@@ -517,13 +526,18 @@ class GraphBackboneTrainer:
         })
         train_df.to_csv(self.metrics_dir / 'graph_backbone_loss_curve.csv', index=False)
 
-        if self.val_losses:
-            val_steps = list(range(self.eval_every, len(self.train_losses) + 1, self.eval_every))
+        if self.val_losses and self.val_steps:
+            paired_count = min(
+                len(self.val_steps),
+                len(self.val_losses),
+                len(self.val_node_losses),
+                len(self.val_edge_losses),
+            )
             val_df = pd.DataFrame({
-                'step': val_steps[:len(self.val_losses)],
-                'val_loss': rounded_val_losses[:len(val_steps)],
-                'val_node_loss': [round(l, 4) for l in self.val_node_losses[:len(val_steps)]],
-                'val_edge_loss': [round(l, 4) for l in self.val_edge_losses[:len(val_steps)]]
+                'step': self.val_steps[:paired_count],
+                'val_loss': rounded_val_losses[:paired_count],
+                'val_node_loss': [round(l, 4) for l in self.val_node_losses[:paired_count]],
+                'val_edge_loss': [round(l, 4) for l in self.val_edge_losses[:paired_count]]
             })
             val_df.to_csv(self.metrics_dir / 'graph_backbone_val_loss.csv', index=False)
 

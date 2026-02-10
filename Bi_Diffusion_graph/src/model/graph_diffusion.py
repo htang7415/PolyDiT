@@ -27,7 +27,8 @@ class GraphMaskingDiffusion(nn.Module):
         node_pad_id: int = None,
         edge_none_id: int = 0,
         lambda_node: float = 1.0,
-        lambda_edge: float = 0.5
+        lambda_edge: float = 0.5,
+        force_clean_t0: bool = False
     ):
         """Initialize graph diffusion model.
 
@@ -42,6 +43,7 @@ class GraphMaskingDiffusion(nn.Module):
             edge_none_id: ID of edge NONE token (default 0).
             lambda_node: Weight for node loss.
             lambda_edge: Weight for edge loss.
+            force_clean_t0: If True, force mask_schedule[0] to exactly 0.0.
         """
         super().__init__()
 
@@ -55,6 +57,7 @@ class GraphMaskingDiffusion(nn.Module):
         self.edge_none_id = edge_none_id
         self.lambda_node = lambda_node
         self.lambda_edge = lambda_edge
+        self.force_clean_t0 = force_clean_t0
 
         # Precompute mask schedule
         self.register_buffer(
@@ -70,6 +73,8 @@ class GraphMaskingDiffusion(nn.Module):
         """
         steps = torch.arange(self.num_steps + 1, dtype=torch.float32)
         schedule = self.beta_min + (self.beta_max - self.beta_min) * steps / self.num_steps
+        if self.force_clean_t0:
+            schedule[0] = 0.0
         return schedule
 
     def get_mask_prob(self, t: torch.Tensor) -> torch.Tensor:
@@ -200,7 +205,8 @@ class GraphMaskingDiffusion(nn.Module):
             Scalar loss value.
         """
         if not mask_indicator.any():
-            return torch.tensor(0.0, device=logits.device)
+            # Keep graph connected for backward() while returning a true zero loss.
+            return logits.sum() * 0.0
 
         # Select only masked positions
         masked_logits = logits[mask_indicator]  # [num_masked, vocab_size]
@@ -246,7 +252,8 @@ class GraphMaskingDiffusion(nn.Module):
         valid_mask = mask_upper & (valid_i == 1) & (valid_j == 1)
 
         if not valid_mask.any():
-            return torch.tensor(0.0, device=device)
+            # Keep graph connected for backward() while returning a true zero loss.
+            return logits.sum() * 0.0
 
         # Select valid positions
         masked_logits = logits_upper[valid_mask]  # [num_valid, V]
@@ -388,5 +395,6 @@ def create_graph_diffusion(
         node_pad_id=graph_config['atom_vocab']['PAD'],
         edge_none_id=graph_config['edge_vocab']['NONE'],
         lambda_node=diffusion_config.get('lambda_node', 1.0),
-        lambda_edge=diffusion_config.get('lambda_edge', 0.5)
+        lambda_edge=diffusion_config.get('lambda_edge', 0.5),
+        force_clean_t0=diffusion_config.get('force_clean_t0', False)
     )

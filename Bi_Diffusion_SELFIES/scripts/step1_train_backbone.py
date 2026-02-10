@@ -135,9 +135,24 @@ def main(args):
     # Get optimization settings
     opt_config = config.get('optimization', {})
     cache_tokenization = opt_config.get('cache_tokenization', False)
+    cache_max_samples = int(opt_config.get('cache_tokenization_max_samples', 500000))
     num_workers = opt_config.get('num_workers', 4)
     pin_memory = opt_config.get('pin_memory', True)
     prefetch_factor = opt_config.get('prefetch_factor', 2)
+
+    # Guard against memory blow-up: full-cache can be too large for multi-million datasets.
+    total_samples = len(train_df) + len(val_df)
+    if cache_tokenization and distributed:
+        if is_main_process:
+            print("Disabling cache_tokenization under DDP to avoid per-rank RAM duplication.")
+        cache_tokenization = False
+    elif cache_tokenization and total_samples > cache_max_samples:
+        if is_main_process:
+            print(
+                f"Disabling cache_tokenization for {total_samples:,} samples "
+                f"(limit={cache_max_samples:,})."
+            )
+        cache_tokenization = False
 
     # Create datasets
     train_dataset = PolymerDataset(train_df, tokenizer, cache_tokenization=cache_tokenization)
@@ -191,7 +206,7 @@ def main(args):
         backbone=backbone,
         num_steps=config['diffusion']['num_steps'],
         beta_min=config['diffusion']['beta_min'],
-        beta_max=config['diffusion']['beta_max'],
+        force_clean_t0=config['diffusion'].get('force_clean_t0', False),
         mask_token_id=tokenizer.mask_token_id,
         pad_token_id=tokenizer.pad_token_id,
         bos_token_id=tokenizer.bos_token_id,

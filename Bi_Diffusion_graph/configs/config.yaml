@@ -103,6 +103,7 @@ diffusion:
   num_steps: 50
   beta_min: 0.05
   beta_max: 0.95
+  force_clean_t0: false  # Keep legacy behavior unless explicitly enabled.
   lambda_node: 1.0  # Weight for node prediction loss
   lambda_edge: 0.5  # Weight for edge prediction loss
 
@@ -144,7 +145,8 @@ optimization:
   pin_memory: true
   cudnn_benchmark: true
   prefetch_factor: 2
-  cache_tokenization: true   # Pre-encode graphs (may be memory intensive with 19M+ graphs)
+  cache_tokenization: false  # Avoid full in-memory graph cache on large datasets.
+  cache_tokenization_max_samples: 500000  # Auto-disable cache above this many samples.
 
 # Property head architecture
 property_head:

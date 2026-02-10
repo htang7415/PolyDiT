@@ -1,6 +1,7 @@
 """Trainer for diffusion backbone model."""
 
 import warnings
+from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -181,6 +182,7 @@ class BackboneTrainer:
         self.best_val_loss = float('inf')
         self.train_losses = []
         self.val_losses = []
+        self.val_steps = []
         self.learning_rates = []
 
         # GPU memory monitoring
@@ -234,18 +236,20 @@ class BackboneTrainer:
         Returns:
             Dictionary with memory statistics in GB.
         """
-        if self.device != 'cuda' or not torch.cuda.is_available():
+        if not _is_cuda_device(self.device) or not torch.cuda.is_available():
             return {}
 
+        device_obj = torch.device(self.device)
+        device_index = device_obj.index if device_obj.index is not None else torch.cuda.current_device()
         stats = {
             'step': self.global_step,
-            'allocated_gb': torch.cuda.memory_allocated() / 1e9,
-            'reserved_gb': torch.cuda.memory_reserved() / 1e9,
-            'max_allocated_gb': torch.cuda.max_memory_allocated() / 1e9,
+            'allocated_gb': torch.cuda.memory_allocated(device_index) / 1e9,
+            'reserved_gb': torch.cuda.memory_reserved(device_index) / 1e9,
+            'max_allocated_gb': torch.cuda.max_memory_allocated(device_index) / 1e9,
         }
 
         # Get total GPU memory
-        total_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+        total_memory = torch.cuda.get_device_properties(device_index).total_memory / 1e9
         stats['total_gb'] = total_memory
         stats['free_gb'] = total_memory - stats['reserved_gb']
         stats['utilization_pct'] = (stats['allocated_gb'] / total_memory) * 100
@@ -314,14 +318,26 @@ class BackboneTrainer:
         total_loss = 0.0
         num_batches = 0
 
-        if self.distributed and hasattr(self.train_dataloader.sampler, "set_epoch"):
-            self.train_dataloader.sampler.set_epoch(epoch)
+        if self.distributed:
+            data_sampler = getattr(self.train_dataloader, "sampler", None)
+            if hasattr(data_sampler, "set_epoch"):
+                data_sampler.set_epoch(epoch)
+            batch_sampler = getattr(self.train_dataloader, "batch_sampler", None)
+            if hasattr(batch_sampler, "set_epoch"):
+                batch_sampler.set_epoch(epoch)
         pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}", disable=not self.is_main_process)
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar):
             if self.global_step >= self.max_steps:
                 break
 
-            loss = self._train_step(batch)
+            is_last_batch = (batch_idx + 1) == len(self.train_dataloader)
+            hits_step_limit = (self.global_step + 1) >= self.max_steps
+            should_step = (
+                ((batch_idx + 1) % self.grad_accum_steps == 0) or
+                is_last_batch or
+                hits_step_limit
+            )
+            loss = self._train_step(batch, should_step=should_step)
             total_loss += loss
             num_batches += 1
 
@@ -338,6 +354,7 @@ class BackboneTrainer:
                 self.model.train()
                 if self.is_main_process:
                     self.val_losses.append(val_loss)
+                    self.val_steps.append(self.global_step)
                     self._save_checkpoint(val_loss, epoch)
                 if self.distributed and dist.is_available() and dist.is_initialized():
                     dist.barrier()
@@ -368,11 +385,12 @@ class BackboneTrainer:
         avg_loss = total_loss / max(num_batches, 1)
         return self._reduce_mean(avg_loss)
 
-    def _train_step(self, batch: Dict[str, torch.Tensor]) -> float:
+    def _train_step(self, batch: Dict[str, torch.Tensor], should_step: bool) -> float:
         """Single training step.
 
         Args:
             batch: Batch of data.
+            should_step: Whether to apply optimizer/scheduler updates this micro-batch.
 
         Returns:
             Loss value.
@@ -380,17 +398,21 @@ class BackboneTrainer:
         input_ids = batch['input_ids'].to(self.device)
         attention_mask = batch['attention_mask'].to(self.device)
 
-        # Forward pass with AMP
-        self._maybe_mark_cudagraph_step_begin()
-        with autocast('cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            outputs = self.model(input_ids, attention_mask)
-            loss = outputs['loss'] / self.grad_accum_steps
+        # Skip DDP gradient sync on accumulation microsteps to reduce communication overhead.
+        sync_context = nullcontext()
+        if self.distributed and isinstance(self.model, DDP) and not should_step:
+            sync_context = self.model.no_sync()
+        with sync_context:
+            # Forward pass with AMP
+            self._maybe_mark_cudagraph_step_begin()
+            with autocast('cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+                outputs = self.model(input_ids, attention_mask)
+                loss = outputs['loss'] / self.grad_accum_steps
 
-        # Backward pass with gradient scaling
-        self.scaler.scale(loss).backward()
+            # Backward pass with gradient scaling
+            self.scaler.scale(loss).backward()
 
-        # Only update weights every grad_accum_steps
-        if (self.global_step + 1) % self.grad_accum_steps == 0:
+        if should_step:
             # Unscale gradients for clipping
             self.scaler.unscale_(self.optimizer)
 
@@ -493,30 +515,19 @@ class BackboneTrainer:
         rounded_learning_rates = [round(lr, 8) for lr in self.learning_rates]  # LR needs more precision
         rounded_val_losses = [round(loss, 4) for loss in self.val_losses]
 
-        # Create loss curve CSV
-        history = {
+        # Save as DataFrame
+        train_df = pd.DataFrame({
             'step': list(range(len(self.train_losses))),
             'train_loss': rounded_train_losses,
             'learning_rate': rounded_learning_rates
-        }
-
-        # Add validation losses at eval intervals
-        val_steps = list(range(self.eval_every, len(self.train_losses) + 1, self.eval_every))
-        history['val_step'] = val_steps[:len(self.val_losses)]
-        history['val_loss'] = rounded_val_losses
-
-        # Save as DataFrame
-        train_df = pd.DataFrame({
-            'step': history['step'],
-            'train_loss': history['train_loss'],
-            'learning_rate': history['learning_rate']
         })
         train_df.to_csv(self.metrics_dir / 'backbone_loss_curve.csv', index=False)
 
-        if self.val_losses:
+        if self.val_losses and self.val_steps:
+            paired_count = min(len(self.val_losses), len(self.val_steps))
             val_df = pd.DataFrame({
-                'step': history['val_step'],
-                'val_loss': history['val_loss']
+                'step': self.val_steps[:paired_count],
+                'val_loss': rounded_val_losses[:paired_count]
             })
             val_df.to_csv(self.metrics_dir / 'backbone_val_loss.csv', index=False)
 

@@ -242,7 +242,8 @@ def main(args):
                 'num_atoms': num_atoms,
                 'num_stars': int(star_count),
                 'num_bonds': int(bond_count),
-                'match': smiles == reconstructed or reconstructed is not None
+                # Strict match to avoid inflating roundtrip quality metrics.
+                'match': smiles == reconstructed
             })
         except Exception as e:
             examples.append({

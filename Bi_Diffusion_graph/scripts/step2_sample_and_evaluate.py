@@ -212,6 +212,7 @@ def main(args):
         num_steps=diffusion_config['num_steps'],
         beta_min=diffusion_config['beta_min'],
         beta_max=diffusion_config['beta_max'],
+        force_clean_t0=diffusion_config.get('force_clean_t0', False),
         node_mask_id=atom_vocab['MASK'],
         edge_mask_id=edge_vocab['MASK'],
         node_pad_id=atom_vocab['PAD'],
@@ -248,6 +249,7 @@ def main(args):
 
     generated_smiles = []
     num_batches = (num_samples + batch_size - 1) // batch_size
+    sampling_start = time.time()
 
     for i in range(num_batches):
         current_batch = min(batch_size, num_samples - len(generated_smiles))

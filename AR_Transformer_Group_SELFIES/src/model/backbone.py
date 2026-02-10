@@ -69,7 +69,7 @@ class MultiHeadAttention(nn.Module):
         if attention_mask is not None:
             # Expand mask: [batch, seq_len] -> [batch, 1, 1, seq_len]
             mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            attn_scores = attn_scores.masked_fill(mask == 0, float('-inf'))
+            attn_scores = attn_scores.masked_fill(mask == 0, -1e9)
 
         attn_probs = F.softmax(attn_scores, dim=-1)
         attn_probs = self.dropout(attn_probs)

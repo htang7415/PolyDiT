@@ -39,6 +39,8 @@ class ConstrainedSampler:
         self.temperature = temperature
         self.use_constraints = use_constraints
         self.device = device
+        if self.temperature <= 0:
+            raise ValueError(f"temperature must be > 0, got {self.temperature}")
 
         # Get special token IDs
         self.mask_id = tokenizer.mask_token_id
@@ -50,6 +52,34 @@ class ConstrainedSampler:
         # No SMILES-specific token categories needed for SELFIES!
         # SELFIES grammar is valid by construction, so we only need
         # to track the placeholder token '[I+3]' for polymer attachment points.
+        special_ids = {self.mask_id, self.pad_id, self.bos_id, self.eos_id}
+        self.non_special_token_ids = [
+            idx for idx in range(tokenizer.vocab_size) if idx not in special_ids
+        ]
+        if not self.non_special_token_ids:
+            self.non_special_token_ids = list(range(tokenizer.vocab_size))
+
+    def _safe_softmax(self, logits: torch.Tensor) -> torch.Tensor:
+        """Compute softmax and guard against NaNs from all -inf rows."""
+        probs = F.softmax(logits, dim=-1)
+        return probs.nan_to_num(0.0)
+
+    def _sample_token_with_fallback(self, probs_row: torch.Tensor) -> torch.Tensor:
+        """Sample one token, falling back to uniform non-special probs if needed."""
+        probs_row = probs_row.nan_to_num(0.0)
+        total = probs_row.sum()
+        if (not torch.isfinite(total)) or total <= 0:
+            fallback = torch.zeros_like(probs_row)
+            fallback[self.non_special_token_ids] = 1.0
+            fallback_sum = fallback.sum()
+            if fallback_sum <= 0:
+                fallback = torch.ones_like(probs_row) / probs_row.numel()
+            else:
+                fallback = fallback / fallback_sum
+            probs_row = fallback
+        else:
+            probs_row = probs_row / total
+        return torch.multinomial(probs_row, 1)
 
     def _count_placeholders(self, ids: torch.Tensor) -> torch.Tensor:
         """Count '[I+3]' placeholder tokens in each sequence.
@@ -309,7 +339,7 @@ class ConstrainedSampler:
                 )
 
             # Sample from masked positions
-            probs = F.softmax(logits, dim=-1)
+            probs = self._safe_softmax(logits)
 
             # Determine which masked tokens to unmask at this step
             # Unmask proportionally based on schedule
@@ -334,7 +364,7 @@ class ConstrainedSampler:
                     if ids[i, pos] != self.mask_id:
                         continue
 
-                    sampled = torch.multinomial(probs[i, pos], 1)
+                    sampled = self._sample_token_with_fallback(probs[i, pos])
                     ids[i, pos] = sampled
 
                     sampled_token = sampled.item()
@@ -357,11 +387,10 @@ class ConstrainedSampler:
                             if current_placeholders >= 2:
                                 remaining_mask = ids[i] == self.mask_id
                                 logits[i, remaining_mask, self.placeholder_id] = float('-inf')
-                                probs[i] = F.softmax(logits[i], dim=-1)
+                                probs[i] = self._safe_softmax(logits[i])
 
-            # Store logits for final step
-            if t == 1:
-                final_logits = logits
+            # Store latest logits for final fixing.
+            final_logits = logits
 
         # Ensure all sequences have EOS (add at end if needed)
         for i in range(batch_size):
@@ -380,7 +409,7 @@ class ConstrainedSampler:
                             attention_mask[i, last_pos + 2:] = 0
                 has_eos[i] = True
 
-        if self.use_constraints:
+        if self.use_constraints and final_logits is not None:
             # Fix placeholder count in final sequences (ensure exactly 2)
             ids = self._fix_placeholder_count(ids, final_logits, target_placeholders=2)
 
@@ -634,7 +663,7 @@ class ConstrainedSampler:
                     logits[:, :, self.eos_id]
                 )
 
-            probs = F.softmax(logits, dim=-1)
+            probs = self._safe_softmax(logits)
 
             unmask_prob = 1.0 / t
 
@@ -656,7 +685,7 @@ class ConstrainedSampler:
                     if ids[i, pos] != self.mask_id:
                         continue
 
-                    sampled = torch.multinomial(probs[i, pos], 1)
+                    sampled = self._sample_token_with_fallback(probs[i, pos])
                     ids[i, pos] = sampled
 
                     sampled_token = sampled.item()
@@ -678,10 +707,9 @@ class ConstrainedSampler:
                             if current_placeholders >= 2:
                                 remaining_mask = ids[i] == self.mask_id
                                 logits[i, remaining_mask, self.placeholder_id] = float('-inf')
-                                probs[i] = F.softmax(logits[i], dim=-1)
+                                probs[i] = self._safe_softmax(logits[i])
 
-            if t == 1:
-                final_logits = logits
+            final_logits = logits
 
         # Ensure all sequences have EOS (add at end if needed)
         if use_natural_eos:
@@ -699,7 +727,7 @@ class ConstrainedSampler:
                                 attention_mask[i, last_pos + 2:] = 0
                     has_eos[i] = True
 
-        if self.use_constraints:
+        if self.use_constraints and final_logits is not None:
             # Fix placeholder count in final sequences (ensure exactly 2)
             ids = self._fix_placeholder_count(ids, final_logits, target_placeholders=2)
 

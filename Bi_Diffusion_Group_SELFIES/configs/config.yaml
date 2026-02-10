@@ -129,6 +129,7 @@ diffusion:
   num_steps: 50
   beta_min: 0.05
   beta_max: 0.95
+  force_clean_t0: false  # Keep legacy behavior unless explicitly enabled.
 
 # Training backbone
 training_backbone:
@@ -138,7 +139,8 @@ training_backbone:
   warmup_steps: 1000
   max_steps: 200000
   gradient_clip_norm: 1.0
-  eval_every: 1000
+  eval_every: 10000
+  val_max_samples: 100000  # Optional Step1 validation cap for faster periodic eval.
   save_every: 100000
   num_epochs: 50
 
@@ -165,10 +167,15 @@ optimization:
   compile_model: true              # torch.compile()
   gradient_accumulation_steps: 4   # Effective batch = 256 * 4 = 1024
   num_workers: 4                   # DataLoader workers
+  persistent_workers: true         # Keep workers alive across epochs to reduce startup overhead.
+  dynamic_padding: true            # Pad to per-batch max length instead of global max length.
+  length_bucket_sampler: true      # Group similar-length samples to reduce padding waste.
+  bucket_size_multiplier: 50       # Larger buckets improve length grouping while keeping shuffle.
   pin_memory: true                 # GPU memory pinning
   cudnn_benchmark: true            # cuDNN autotuning
   prefetch_factor: 2               # DataLoader prefetching
-  cache_tokenization: true         # Pre-tokenize dataset (can be slow for Group SELFIES)
+  cache_tokenization: false        # Full-cache is too memory-heavy at Group SELFIES scale.
+  cache_tokenization_max_samples: 500000  # Auto-disable cache above this many samples.
 
 # Property head architecture
 property_head:

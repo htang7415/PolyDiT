@@ -39,6 +39,8 @@ class ConstrainedSampler:
         self.temperature = temperature
         self.use_constraints = use_constraints
         self.device = device
+        if self.temperature <= 0:
+            raise ValueError(f"temperature must be > 0, got {self.temperature}")
 
         # Get special token IDs
         self.mask_id = tokenizer.mask_token_id
@@ -67,6 +69,36 @@ class ConstrainedSampler:
              'Cl', 'Br', 'Si', 'Na', 'Li', 'Ca', 'Mg', 'Al', '*']
         } - {-1}
         self.atom_ids.update(self.bracket_token_ids)  # Bracket tokens are also atoms
+
+        # Fallback token pool used only when constraints forbid all tokens at a position.
+        special_ids = {self.mask_id, self.pad_id, self.bos_id, self.eos_id}
+        self.non_special_token_ids = [
+            idx for idx in range(tokenizer.vocab_size) if idx not in special_ids
+        ]
+        if not self.non_special_token_ids:
+            self.non_special_token_ids = list(range(tokenizer.vocab_size))
+
+    def _safe_softmax(self, logits: torch.Tensor) -> torch.Tensor:
+        """Compute softmax and guard against NaNs from all -inf rows."""
+        probs = F.softmax(logits, dim=-1)
+        return probs.nan_to_num(0.0)
+
+    def _sample_token_with_fallback(self, probs_row: torch.Tensor) -> torch.Tensor:
+        """Sample one token, falling back to uniform non-special probs if needed."""
+        probs_row = probs_row.nan_to_num(0.0)
+        total = probs_row.sum()
+        if (not torch.isfinite(total)) or total <= 0:
+            fallback = torch.zeros_like(probs_row)
+            fallback[self.non_special_token_ids] = 1.0
+            fallback_sum = fallback.sum()
+            if fallback_sum <= 0:
+                fallback = torch.ones_like(probs_row) / probs_row.numel()
+            else:
+                fallback = fallback / fallback_sum
+            probs_row = fallback
+        else:
+            probs_row = probs_row / total
+        return torch.multinomial(probs_row, 1)
 
     def _count_stars(self, ids: torch.Tensor) -> torch.Tensor:
         """Count '*' tokens in each sequence.
@@ -640,7 +672,7 @@ class ConstrainedSampler:
                 logits = self._apply_bond_placement_constraints(logits, ids)
             logits = self._apply_special_token_constraints(logits, ids)
 
-            probs = F.softmax(logits, dim=-1)
+            probs = self._safe_softmax(logits)
             is_masked = (ids == self.mask_id) & (~fixed_mask)
             unmask_prob = 1.0 / t
 
@@ -655,7 +687,7 @@ class ConstrainedSampler:
 
                 # Sample tokens for these positions SEQUENTIALLY with constraint updates
                 for pos in unmask_positions:
-                    sampled = torch.multinomial(probs[i, pos], 1)
+                    sampled = self._sample_token_with_fallback(probs[i, pos])
                     ids[i, pos] = sampled
 
                     sampled_token = sampled.item()
@@ -668,25 +700,24 @@ class ConstrainedSampler:
                             if current_stars >= 2:
                                 remaining_mask = (ids[i] == self.mask_id) & (~fixed_mask[i])
                                 logits[i, remaining_mask, self.star_id] = float('-inf')
-                                probs[i] = F.softmax(logits[i], dim=-1)
+                                probs[i] = self._safe_softmax(logits[i])
 
                         elif sampled_token in self.bond_ids:
                             next_pos = pos + 1
                             if next_pos < len(ids[i]) and ids[i, next_pos] == self.mask_id:
                                 for bond_id in self.bond_ids:
                                     logits[i, next_pos, bond_id] = float('-inf')
-                                probs[i] = F.softmax(logits[i], dim=-1)
+                                probs[i] = self._safe_softmax(logits[i])
 
                         elif sampled_token == self.open_paren_id:
                             next_pos = pos + 1
                             if next_pos < len(ids[i]) and ids[i, next_pos] == self.mask_id:
                                 logits[i, next_pos, self.close_paren_id] = float('-inf')
-                                probs[i] = F.softmax(logits[i], dim=-1)
+                                probs[i] = self._safe_softmax(logits[i])
 
-            if t == 1:
-                final_logits = logits
+            final_logits = logits
 
-        if self.use_constraints:
+        if self.use_constraints and final_logits is not None:
             ids = self._fix_star_count(ids, final_logits, target_stars=2)
             ids = self._fix_paren_balance(ids, final_logits)
             ids = self._fix_ring_closures(ids, final_logits)

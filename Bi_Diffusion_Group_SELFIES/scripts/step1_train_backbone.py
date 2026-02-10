@@ -5,6 +5,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
+from functools import partial
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,7 +22,8 @@ from src.utils.model_scales import (
     get_results_dir, print_model_info
 )
 from src.data.tokenizer import GroupSELFIESTokenizer
-from src.data.dataset import PolymerDataset, collate_fn
+from src.data.dataset import PolymerDataset, collate_fn, dynamic_collate_fn
+from src.data.samplers import LengthBucketBatchSampler
 from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
 from src.training.trainer_backbone import BackboneTrainer
@@ -119,7 +121,7 @@ def main(args):
     train_df = pd.read_csv(train_path)
     val_df = pd.read_csv(val_path)
 
-    # Optionally subsample training data (validation always full)
+    # Optionally subsample training data.
     train_fraction = config.get('data', {}).get('train_fraction', 1.0)
     if train_fraction <= 0 or train_fraction > 1:
         raise ValueError("data.train_fraction must be within (0, 1].")
@@ -132,38 +134,119 @@ def main(args):
         if is_main_process:
             print(f"Using {n_train}/{full_train_count} train samples ({train_fraction:.2%})")
 
+    # Optionally subsample validation data for faster periodic evaluation.
+    train_cfg = config.get('training_backbone', {})
+    val_fraction = float(train_cfg.get('val_fraction', 1.0))
+    if val_fraction <= 0 or val_fraction > 1:
+        raise ValueError("training_backbone.val_fraction must be within (0, 1].")
+    if val_fraction < 1.0:
+        full_val_count = len(val_df)
+        n_val = max(1, int(round(full_val_count * val_fraction)))
+        val_df = val_df.sample(
+            n=n_val, random_state=config['data']['random_seed']
+        ).reset_index(drop=True)
+        if is_main_process:
+            print(f"Using {n_val}/{full_val_count} val samples ({val_fraction:.2%})")
+    val_max_samples = int(train_cfg.get('val_max_samples', 0))
+    if val_max_samples > 0 and len(val_df) > val_max_samples:
+        full_val_count = len(val_df)
+        val_df = val_df.sample(
+            n=val_max_samples, random_state=config['data']['random_seed']
+        ).reset_index(drop=True)
+        if is_main_process:
+            print(f"Capping val samples to {val_max_samples}/{full_val_count} for faster eval")
+
     # Get optimization settings
     opt_config = config.get('optimization', {})
     cache_tokenization = opt_config.get('cache_tokenization', False)
+    cache_max_samples = int(opt_config.get('cache_tokenization_max_samples', 500000))
     num_workers = opt_config.get('num_workers', 4)
+    persistent_workers = bool(opt_config.get('persistent_workers', False)) and num_workers > 0
     pin_memory = opt_config.get('pin_memory', True)
     prefetch_factor = opt_config.get('prefetch_factor', 2)
+    dynamic_padding = bool(opt_config.get('dynamic_padding', False))
+    length_bucket_sampler = bool(opt_config.get('length_bucket_sampler', False))
+    bucket_size_multiplier = int(opt_config.get('bucket_size_multiplier', 50))
+    if bucket_size_multiplier <= 0:
+        raise ValueError("optimization.bucket_size_multiplier must be > 0.")
+
+    # Guard against memory blow-up: Group SELFIES full-cache is too large for multi-million datasets.
+    total_samples = len(train_df) + len(val_df)
+    if cache_tokenization and distributed:
+        if is_main_process:
+            print("Disabling cache_tokenization under DDP to avoid per-rank RAM duplication.")
+        cache_tokenization = False
+    elif cache_tokenization and total_samples > cache_max_samples:
+        if is_main_process:
+            print(
+                f"Disabling cache_tokenization for {total_samples:,} samples "
+                f"(limit={cache_max_samples:,})."
+            )
+        cache_tokenization = False
 
     # Create datasets
-    train_dataset = PolymerDataset(train_df, tokenizer, cache_tokenization=cache_tokenization)
-    val_dataset = PolymerDataset(val_df, tokenizer, cache_tokenization=cache_tokenization)
+    train_dataset = PolymerDataset(
+        train_df,
+        tokenizer,
+        cache_tokenization=cache_tokenization,
+        pad_to_max_length=not dynamic_padding
+    )
+    val_dataset = PolymerDataset(
+        val_df,
+        tokenizer,
+        cache_tokenization=cache_tokenization,
+        pad_to_max_length=not dynamic_padding
+    )
+
+    active_collate_fn = collate_fn
+    if dynamic_padding:
+        active_collate_fn = partial(dynamic_collate_fn, pad_token_id=tokenizer.pad_token_id)
 
     # Create dataloaders
     batch_size = config['training_backbone']['batch_size']
-    train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
     val_sampler = DistributedSampler(val_dataset, shuffle=False) if distributed else None
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=train_sampler is None,
-        sampler=train_sampler,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        prefetch_factor=prefetch_factor if num_workers > 0 else None
-    )
+    if length_bucket_sampler:
+        train_lengths = train_df['p_smiles'].astype(str).str.len().tolist()
+        train_batch_sampler = LengthBucketBatchSampler(
+            lengths=train_lengths,
+            batch_size=batch_size,
+            drop_last=False,
+            shuffle=True,
+            seed=config['data']['random_seed'],
+            bucket_size_multiplier=bucket_size_multiplier,
+            num_replicas=world_size if distributed else 1,
+            rank=rank if distributed else 0,
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_batch_sampler,
+            collate_fn=active_collate_fn,
+            num_workers=num_workers,
+            persistent_workers=persistent_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None
+        )
+    else:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=train_sampler is None,
+            sampler=train_sampler,
+            collate_fn=active_collate_fn,
+            num_workers=num_workers,
+            persistent_workers=persistent_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None
+        )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         sampler=val_sampler,
-        collate_fn=collate_fn,
+        collate_fn=active_collate_fn,
         num_workers=num_workers,
+        persistent_workers=persistent_workers,
         pin_memory=pin_memory,
         prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
@@ -171,6 +254,12 @@ def main(args):
     if is_main_process:
         print(f"Train batches: {len(train_loader)}")
         print(f"Val batches: {len(val_loader)}")
+        if dynamic_padding:
+            print("Using dynamic batch padding for Step1 dataloaders.")
+        if length_bucket_sampler:
+            print(
+                f"Using length-bucket batching (bucket_size_multiplier={bucket_size_multiplier})."
+            )
 
     # Create model
     if is_main_process:
@@ -192,6 +281,7 @@ def main(args):
         num_steps=config['diffusion']['num_steps'],
         beta_min=config['diffusion']['beta_min'],
         beta_max=config['diffusion']['beta_max'],
+        force_clean_t0=config['diffusion'].get('force_clean_t0', False),
         mask_token_id=tokenizer.mask_token_id,
         pad_token_id=tokenizer.pad_token_id,
         bos_token_id=tokenizer.bos_token_id,

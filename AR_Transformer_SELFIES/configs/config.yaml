@@ -158,7 +158,8 @@ optimization:
   pin_memory: true                 # GPU memory pinning
   cudnn_benchmark: true            # cuDNN autotuning
   prefetch_factor: 2               # DataLoader prefetching
-  cache_tokenization: true         # Pre-tokenize dataset
+  cache_tokenization: false        # Avoid full in-memory cache on large datasets.
+  cache_tokenization_max_samples: 500000  # Auto-disable cache above this many samples.
 
 # Property head architecture
 property_head:

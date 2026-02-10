@@ -23,7 +23,8 @@ class DiscreteMaskingDiffusion(nn.Module):
         mask_token_id: int = 1,
         pad_token_id: int = 0,
         bos_token_id: Optional[int] = None,
-        eos_token_id: Optional[int] = None
+        eos_token_id: Optional[int] = None,
+        force_clean_t0: bool = False
     ):
         """Initialize diffusion model.
 
@@ -36,6 +37,7 @@ class DiscreteMaskingDiffusion(nn.Module):
             pad_token_id: ID of the PAD token.
             bos_token_id: ID of the BOS token (never masked if provided).
             eos_token_id: ID of the EOS token (never masked if provided).
+            force_clean_t0: If True, force mask_schedule[0] to exactly 0.0.
         """
         super().__init__()
 
@@ -47,6 +49,7 @@ class DiscreteMaskingDiffusion(nn.Module):
         self.pad_token_id = pad_token_id
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
+        self.force_clean_t0 = force_clean_t0
 
         # Precompute mask schedule
         self.register_buffer(
@@ -61,9 +64,10 @@ class DiscreteMaskingDiffusion(nn.Module):
             Tensor of shape [num_steps + 1] with mask probabilities.
         """
         # beta_t increases linearly from beta_min to beta_max
-        # t=0 means no masking, t=T means full masking
         steps = torch.arange(self.num_steps + 1, dtype=torch.float32)
         schedule = self.beta_min + (self.beta_max - self.beta_min) * steps / self.num_steps
+        if self.force_clean_t0:
+            schedule[0] = 0.0
         return schedule
 
     def get_mask_prob(self, t: torch.Tensor) -> torch.Tensor:
@@ -196,7 +200,11 @@ class DiscreteMaskingDiffusion(nn.Module):
             valid_mask = valid_mask * attention_mask.float()
 
         # Compute mean loss over valid positions
-        loss = (loss_all * valid_mask).sum() / valid_mask.sum().clamp(min=1e-9)
+        valid_count = valid_mask.sum()
+        if valid_count.item() == 0:
+            # Keep graph connected for backward() while returning a true zero loss.
+            return logits.sum() * 0.0
+        loss = (loss_all * valid_mask).sum() / valid_count
 
         return loss
 
