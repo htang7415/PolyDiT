@@ -21,8 +21,26 @@ class PolymerDataLoader:
         """
         self.config = config
         self.random_seed = config['data']['random_seed']
-        self.data_dir = Path(config['paths']['data_dir'])
+        self.repo_root = Path(__file__).resolve().parents[3]
+        self.data_dir = self._resolve_data_path(config['paths']['data_dir'])
         self.results_dir = Path(config['paths']['results_dir'])
+
+    def _resolve_data_path(self, path_str: str) -> Path:
+        """Resolve data path against cwd first, then repository root."""
+        path = Path(path_str)
+        if path.is_absolute():
+            return path
+
+        cwd_path = Path.cwd() / path
+        if cwd_path.exists():
+            return cwd_path
+
+        repo_path = self.repo_root / path
+        if repo_path.exists():
+            return repo_path
+
+        # Keep a stable fallback for downstream error messages.
+        return repo_path
 
     def load_unlabeled_data(self) -> pd.DataFrame:
         """Load unlabeled polymer SMILES data.
@@ -30,7 +48,7 @@ class PolymerDataLoader:
         Returns:
             DataFrame with cleaned p-SMILES.
         """
-        polymer_file = Path(self.config['paths']['polymer_file'])
+        polymer_file = self._resolve_data_path(self.config['paths']['polymer_file'])
 
         # Load gzipped CSV
         with gzip.open(polymer_file, 'rt') as f:
@@ -52,11 +70,23 @@ class PolymerDataLoader:
         Returns:
             DataFrame with p-SMILES and property values.
         """
-        property_dir = Path(self.config['paths']['property_dir'])
+        property_dir = self._resolve_data_path(self.config['paths']['property_dir'])
         property_file = property_dir / f"{property_name}.csv"
 
         if not property_file.exists():
-            raise FileNotFoundError(f"Property file not found: {property_file}")
+            requested_name = f"{property_name}.csv".lower()
+            for candidate in sorted(property_dir.glob("*.csv")):
+                if candidate.name.lower() == requested_name:
+                    property_file = candidate
+                    break
+
+        if not property_file.exists():
+            available = ", ".join(sorted(p.stem for p in property_dir.glob("*.csv"))) or "none"
+            raise FileNotFoundError(
+                f"Property file not found: {property_file}\n"
+                f"Resolved property_dir: {property_dir}\n"
+                f"Available properties: {available}"
+            )
 
         df = pd.read_csv(property_file)
 
@@ -285,6 +315,6 @@ class PolymerDataLoader:
         Returns:
             List of property names.
         """
-        property_dir = Path(self.config['paths']['property_dir'])
+        property_dir = self._resolve_data_path(self.config['paths']['property_dir'])
         property_files = list(property_dir.glob("*.csv"))
         return [f.stem for f in property_files]
