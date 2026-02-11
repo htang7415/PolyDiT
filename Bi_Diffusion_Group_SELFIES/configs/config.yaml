@@ -190,8 +190,8 @@ property_head:
 # Hyperparameter tuning for property head (Step 3) using Optuna
 hyperparameter_tuning:
   enabled: true                    # Enable via config or --tune flag
-  n_trials: 50                      # Number of Optuna trials
-  tuning_epochs: 50                 # Max epochs per trial
+  n_trials: 100                     # Number of Optuna trials
+  tuning_epochs: 35                 # Max epochs per trial
   tuning_patience: 10               # Early stopping patience per trial
   metric: "r2"                      # Optimization metric: maximize R² on validation
 
