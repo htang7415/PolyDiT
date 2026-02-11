@@ -558,6 +558,38 @@ class GraphInverseDesigner:
         predictions = predictions * self.normalization_params['std'] + self.normalization_params['mean']
         return predictions
 
+    def _compute_achievement_rates(
+        self,
+        predictions: np.ndarray,
+        target_value: float
+    ) -> Dict[str, float]:
+        """Compute achievement rates at multiple percentage tolerances.
+
+        Rates are computed over valid predictions using relative tolerances
+        of 5%, 10%, 15%, and 20% of the target value.
+        """
+        if predictions is None or len(predictions) == 0:
+            return {
+                "achievement_5p": 0.0,
+                "achievement_10p": 0.0,
+                "achievement_15p": 0.0,
+                "achievement_20p": 0.0,
+            }
+
+        denom = max(abs(float(target_value)), 1e-9)
+        rates = {}
+        for pct, key in [
+            (0.05, "achievement_5p"),
+            (0.10, "achievement_10p"),
+            (0.15, "achievement_15p"),
+            (0.20, "achievement_20p"),
+        ]:
+            tol = denom * pct
+            hits = (np.abs(predictions - target_value) <= tol)
+            rate = float(hits.mean()) if len(hits) > 0 else 0.0
+            rates[key] = round(rate, 4)
+        return rates
+
     def _compute_sa_scores(self, smiles_list: List[str]) -> List[float]:
         """Compute SA scores.
 
