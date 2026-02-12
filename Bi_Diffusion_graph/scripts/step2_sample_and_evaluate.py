@@ -249,6 +249,10 @@ def main(args):
 
     generated_smiles = []
     num_batches = (num_samples + batch_size - 1) // batch_size
+
+    # Keep timer definition explicit so metrics code cannot hit NameError if
+    # sampling flow is refactored (e.g., alternate load/eval paths).
+    sampling_start = None
     sampling_start = time.time()
 
     for i in range(num_batches):
@@ -269,6 +273,8 @@ def main(args):
     valid_generated = [s for s in generated_smiles if s is not None]
     print(f"   Successfully decoded: {len(valid_generated)}/{len(generated_smiles)}")
 
+    if sampling_start is None:
+        sampling_start = time.time()
     sampling_time_sec = time.time() - sampling_start
 
     # Save generated samples
