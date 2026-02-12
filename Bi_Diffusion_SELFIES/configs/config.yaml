@@ -29,7 +29,7 @@ tokenizer:
     bos: "[BOS]"
     eos: "[EOS]"
     unk: "[UNK]"
-  max_length: 192  # Increased from 128 for SELFIES (typically 1.5-2x longer than p-SMILES)
+  max_length: 128  # Increased from 128 for SELFIES (typically 1.5-2x longer than p-SMILES)
 
 # SELFIES conversion settings
 selfies:
