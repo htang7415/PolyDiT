@@ -117,8 +117,14 @@ def main(args):
         print("\n2. Loading data...")
     repo_root = Path(__file__).resolve().parents[2]
     train_path, val_path = require_preprocessed_unlabeled_splits(repo_root)
-    train_df = pd.read_csv(train_path)
-    val_df = pd.read_csv(val_path)
+    # Keep only columns Step1 can consume to limit per-rank host RAM.
+    needed_cols = {"p_smiles", "selfies"}
+    train_df = pd.read_csv(train_path, usecols=lambda col: col in needed_cols)
+    val_df = pd.read_csv(val_path, usecols=lambda col: col in needed_cols)
+    if not ({"p_smiles", "selfies"} & set(train_df.columns)):
+        raise ValueError("Train split must contain at least one of: p_smiles, selfies")
+    if not ({"p_smiles", "selfies"} & set(val_df.columns)):
+        raise ValueError("Val split must contain at least one of: p_smiles, selfies")
 
     # Optionally subsample training data (validation always full)
     train_fraction = config.get('data', {}).get('train_fraction', 1.0)
@@ -170,6 +176,9 @@ def main(args):
             f"Dropped {train_before - len(train_df)} train and {val_before - len(val_df)} val "
             "rows due to failed p_smiles->SELFIES conversion."
         )
+    # Keep only model-required sequence text to avoid carrying unused metadata.
+    train_df = train_df[['selfies']].copy()
+    val_df = val_df[['selfies']].copy()
 
     # Get optimization settings
     opt_config = config.get('optimization', {})
