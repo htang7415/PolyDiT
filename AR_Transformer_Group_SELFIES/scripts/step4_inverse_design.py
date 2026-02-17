@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from src.utils.config import load_config, save_config
 from src.utils.plotting import PlotUtils
-from src.utils.chemistry import compute_sa_score
+from src.utils.chemistry import canonicalize_smiles, compute_sa_score
 from src.utils.model_scales import get_model_config, get_results_dir
 from src.data.tokenizer import GroupSELFIESTokenizer
 from src.model.backbone import DiffusionBackbone
@@ -30,6 +30,21 @@ from src.evaluation.inverse_design import InverseDesigner
 from src.utils.reproducibility import seed_everything, save_run_metadata
 from shared.unlabeled_data import require_preprocessed_unlabeled_splits
 from shared.rerank_utils import compute_rerank_metrics
+
+
+def canonicalize_generated_smiles(smiles_list):
+    """Canonicalize generated p-SMILES strings."""
+    canonical = []
+    changed = 0
+    for smiles in smiles_list:
+        canon = canonicalize_smiles(smiles)
+        if canon is None:
+            canonical.append(smiles)
+            continue
+        canonical.append(canon)
+        if canon != smiles:
+            changed += 1
+    return canonical, changed
 
 
 def main(args):
@@ -230,7 +245,16 @@ def main(args):
         elapsed_sec = time.time() - start_time
         results["sampling_time_sec"] = round(elapsed_sec, 4)
         results["valid_per_compute"] = round(results.get("n_hits", 0) / elapsed_sec, 4) if elapsed_sec > 0 else 0.0
-        valid_keys = results.get("valid_selfies", results.get("valid_smiles", []))
+        valid_keys = results.get("valid_selfies", None)
+        if valid_keys is None:
+            raw_valid_smiles = results.get("valid_smiles", [])
+            valid_keys, rerank_keys_canonicalized = canonicalize_generated_smiles(raw_valid_smiles)
+            results["valid_smiles"] = valid_keys
+            if rerank_keys_canonicalized > 0:
+                print(
+                    f"Canonicalized {rerank_keys_canonicalized}/{len(raw_valid_smiles)} valid_smiles keys "
+                    f"for reranking at target {target}"
+                )
         predictions = np.array(results.get("predictions", []), dtype=float)
         rerank_metrics = compute_rerank_metrics(
             predictions=predictions,

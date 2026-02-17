@@ -17,7 +17,7 @@ import numpy as np
 
 from src.utils.config import load_config, save_config
 from src.utils.plotting import PlotUtils
-from src.utils.chemistry import compute_sa_score
+from src.utils.chemistry import canonicalize_smiles, compute_sa_score
 from src.utils.model_scales import get_model_config, get_results_dir
 from src.data.tokenizer import GroupSELFIESTokenizer
 from src.model.backbone import DiffusionBackbone
@@ -27,6 +27,21 @@ from src.sampling.sampler import ConstrainedSampler
 from src.evaluation.polymer_class import PolymerClassifier, ClassGuidedDesigner
 from src.utils.reproducibility import seed_everything, save_run_metadata
 from shared.unlabeled_data import require_preprocessed_unlabeled_splits
+
+
+def canonicalize_generated_smiles(smiles_list):
+    """Canonicalize generated p-SMILES strings."""
+    canonical = []
+    changed = 0
+    for smiles in smiles_list:
+        canon = canonicalize_smiles(smiles)
+        if canon is None:
+            canonical.append(smiles)
+            continue
+        canonical.append(canon)
+        if canon != smiles:
+            changed += 1
+    return canonical, changed
 
 
 def main(args):
@@ -198,6 +213,13 @@ def main(args):
         show_progress=True
     )
 
+    # Canonicalize exported class-match samples for consistency with canonical training format.
+    raw_class_matches = class_results.get('class_matches_smiles', [])
+    class_matches_changed = 0
+    if raw_class_matches:
+        class_results['class_matches_smiles'], class_matches_changed = canonicalize_generated_smiles(raw_class_matches)
+        print(f"Canonicalized {class_matches_changed}/{len(raw_class_matches)} class-match SMILES")
+
     # Save class results
     class_metrics = {k: v for k, v in class_results.items() if not isinstance(v, list)}
     class_df = pd.DataFrame([class_metrics])
@@ -207,6 +229,10 @@ def main(args):
     if class_results['class_matches_smiles']:
         samples_df = pd.DataFrame({'smiles': class_results['class_matches_smiles']})
         samples_df.to_csv(metrics_dir / f'{args.polymer_class}_samples.csv', index=False)
+        if class_matches_changed > 0:
+            pd.DataFrame({'smiles': raw_class_matches}).to_csv(
+                metrics_dir / f'{args.polymer_class}_samples_raw.csv', index=False
+            )
 
     print(f"\nClass-only Results for {args.polymer_class}:")
     print(f"  Valid candidates: {class_results['n_valid']}")
@@ -226,6 +252,13 @@ def main(args):
             show_progress=True
         )
 
+        # Canonicalize exported joint-hit samples for consistency with canonical training format.
+        raw_joint_hits = joint_results.get('joint_hits_smiles', [])
+        joint_hits_changed = 0
+        if raw_joint_hits:
+            joint_results['joint_hits_smiles'], joint_hits_changed = canonicalize_generated_smiles(raw_joint_hits)
+            print(f"Canonicalized {joint_hits_changed}/{len(raw_joint_hits)} joint-hit SMILES")
+
         # Save joint results
         joint_metrics = {k: v for k, v in joint_results.items() if not isinstance(v, list)}
         joint_df = pd.DataFrame([joint_metrics])
@@ -235,6 +268,10 @@ def main(args):
         if joint_results['joint_hits_smiles']:
             hits_df = pd.DataFrame({'smiles': joint_results['joint_hits_smiles']})
             hits_df.to_csv(metrics_dir / f'{args.polymer_class}_{args.property}_joint_hits.csv', index=False)
+            if joint_hits_changed > 0:
+                pd.DataFrame({'smiles': raw_joint_hits}).to_csv(
+                    metrics_dir / f'{args.polymer_class}_{args.property}_joint_hits_raw.csv', index=False
+                )
 
         print(f"\nJoint Design Results:")
         print(f"  Valid candidates: {joint_results['n_valid']}")
