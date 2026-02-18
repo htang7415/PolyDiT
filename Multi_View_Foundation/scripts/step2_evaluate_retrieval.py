@@ -24,6 +24,19 @@ def _resolve_path(path_str: str) -> Path:
     return path if path.is_absolute() else (BASE_DIR / path)
 
 
+def _to_int_or_none(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("Boolean is not a valid integer sample cap.")
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    return int(float(text))
+
+
 def _load_view_embeddings(results_dir: Path, view: str, dataset: str):
     emb_path = results_dir / f"embeddings_{view}_{dataset}.npy"
     if not emb_path.exists() and view == "smiles":
@@ -80,6 +93,7 @@ def main(args):
 
     views = config.get("alignment_views", ["smiles"])
     ks = config.get("evaluation", {}).get("recall_ks", [1, 5, 10])
+    max_eval_samples = _to_int_or_none(config.get("evaluation", {}).get("max_samples_per_dataset"))
 
     view_data = {}
     view_dims = {}
@@ -94,6 +108,9 @@ def main(args):
                 continue
             subset = idx_df[idx_df["dataset"] == dataset]
             ids = subset.sort_values("row_index")["polymer_id"].astype(str).tolist()
+            if max_eval_samples is not None and len(ids) > max_eval_samples:
+                ids = ids[:max_eval_samples]
+                emb = emb[:max_eval_samples]
             view_data[view][dataset] = {"embeddings": emb, "ids": ids}
             view_dims[view] = emb.shape[1]
 
@@ -117,6 +134,9 @@ def main(args):
     rows = []
     for dataset in ["d1", "d2"]:
         available_views = [v for v in views if dataset in view_data.get(v, {})]
+        if available_views:
+            sample_sizes = {v: len(view_data[v][dataset]["ids"]) for v in available_views}
+            print(f"Retrieval dataset={dataset} views={available_views} sample_sizes={sample_sizes}")
         for src_view in available_views:
             for tgt_view in available_views:
                 src = view_data[src_view][dataset]

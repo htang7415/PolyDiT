@@ -12,7 +12,9 @@ from typing import Optional, Tuple
 import numpy as np
 
 
-def _try_faiss_knn(queries: np.ndarray, refs: np.ndarray, k: int) -> Optional[np.ndarray]:
+def _try_faiss_knn(queries: np.ndarray, refs: np.ndarray, k: int, use_faiss: bool = True) -> Optional[np.ndarray]:
+    if not use_faiss:
+        return None
     try:
         import faiss  # type: ignore
     except Exception:
@@ -30,24 +32,27 @@ def _try_faiss_knn(queries: np.ndarray, refs: np.ndarray, k: int) -> Optional[np
 
 
 def _numpy_knn(queries: np.ndarray, refs: np.ndarray, k: int, batch_size: int = 512) -> np.ndarray:
+    queries_f = queries.astype(np.float32, copy=False)
+    refs_f = refs.astype(np.float32, copy=False)
+    ref_norm2 = np.sum(refs_f * refs_f, axis=1, keepdims=True).T
     n = queries.shape[0]
     distances = []
     for start in range(0, n, batch_size):
         end = min(start + batch_size, n)
-        q = queries[start:end]
-        # Compute squared L2 distances
-        diff = q[:, None, :] - refs[None, :, :]
-        dist2 = np.sum(diff * diff, axis=2)
+        q = queries_f[start:end]
+        q_norm2 = np.sum(q * q, axis=1, keepdims=True)
+        dist2 = q_norm2 + ref_norm2 - 2.0 * (q @ refs_f.T)
+        np.maximum(dist2, 0.0, out=dist2)
         # Take k smallest
         part = np.partition(dist2, kth=min(k - 1, dist2.shape[1] - 1), axis=1)[:, :k]
         distances.append(np.sqrt(part))
     return np.vstack(distances)
 
 
-def knn_distances(queries: np.ndarray, refs: np.ndarray, k: int = 1) -> np.ndarray:
+def knn_distances(queries: np.ndarray, refs: np.ndarray, k: int = 1, use_faiss: bool = True) -> np.ndarray:
     if queries.size == 0 or refs.size == 0:
         return np.zeros((queries.shape[0], k), dtype=np.float32)
-    distances = _try_faiss_knn(queries, refs, k)
+    distances = _try_faiss_knn(queries, refs, k, use_faiss=use_faiss)
     if distances is not None:
         return distances
     return _numpy_knn(queries, refs, k)
@@ -59,19 +64,20 @@ def compute_ood_summary(
     generated_embeddings: Optional[np.ndarray] = None,
     k: int = 1,
     near_threshold: Optional[float] = None,
+    use_faiss: bool = True,
 ) -> Tuple[float, Optional[float], Optional[float]]:
     """Compute OOD distances.
 
     Returns:
         (d1_to_d2_mean_dist, generated_to_d2_mean_dist, frac_generated_near_d2)
     """
-    d1_to_d2 = knn_distances(d1_embeddings, d2_embeddings, k)
+    d1_to_d2 = knn_distances(d1_embeddings, d2_embeddings, k, use_faiss=use_faiss)
     d1_to_d2_mean = float(np.mean(d1_to_d2)) if d1_to_d2.size > 0 else 0.0
 
     gen_mean = None
     frac_near = None
     if generated_embeddings is not None and generated_embeddings.size > 0:
-        gen_to_d2 = knn_distances(generated_embeddings, d2_embeddings, k)
+        gen_to_d2 = knn_distances(generated_embeddings, d2_embeddings, k, use_faiss=use_faiss)
         gen_mean = float(np.mean(gen_to_d2)) if gen_to_d2.size > 0 else 0.0
         threshold = near_threshold if near_threshold is not None else d1_to_d2_mean
         frac_near = float(np.mean(gen_to_d2 <= threshold)) if gen_to_d2.size > 0 else 0.0
@@ -84,6 +90,7 @@ def compute_ood_metrics_from_files(
     d2_path: Path,
     generated_path: Optional[Path] = None,
     k: int = 1,
+    use_faiss: bool = True,
 ) -> dict:
     d1 = np.load(d1_path)
     d2 = np.load(d2_path)
@@ -95,6 +102,7 @@ def compute_ood_metrics_from_files(
         generated_embeddings=gen,
         k=k,
         near_threshold=None,
+        use_faiss=use_faiss,
     )
 
     return {

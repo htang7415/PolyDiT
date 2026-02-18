@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -596,6 +597,13 @@ def main(args):
         device = encoder_cfg.get("device", device)
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    require_cuda = os.environ.get("MVF_REQUIRE_CUDA", "0").strip().lower() in {"1", "true", "yes"}
+    if require_cuda and device != "cuda":
+        raise RuntimeError("MVF_REQUIRE_CUDA is set but CUDA is unavailable.")
+    if device == "cpu":
+        print("Warning: using CPU for embedding extraction; this can be very slow.")
+    else:
+        print("Using CUDA for embedding extraction.")
 
     view_specs = {
         "smiles": {

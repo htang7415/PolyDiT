@@ -2,6 +2,7 @@
 """F3: Property heads on foundation embeddings (multi-view)."""
 
 import argparse
+import os
 from pathlib import Path
 import sys
 import importlib.util
@@ -341,6 +342,19 @@ def _collect_property_files(property_dir: Path, file_list) -> List[Path]:
     return sorted(property_dir.glob("*.csv"))
 
 
+def _to_int_or_none(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("Boolean is not a valid integer sample cap.")
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    return int(float(text))
+
+
 def _resolve_property_columns(df: pd.DataFrame, property_name: str) -> tuple[str, str]:
     smiles_col = "p_smiles" if "p_smiles" in df.columns else "SMILES" if "SMILES" in df.columns else None
     if smiles_col is None:
@@ -407,6 +421,13 @@ def main(args):
         device = encoder_cfgs.get(view, {}).get("device", device)
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    require_cuda = os.environ.get("MVF_REQUIRE_CUDA", "0").strip().lower() in {"1", "true", "yes"}
+    if require_cuda and device != "cuda":
+        raise RuntimeError("MVF_REQUIRE_CUDA is set but CUDA is unavailable.")
+    if device == "cpu":
+        print("Warning: using CPU for property embedding; this can be very slow.")
+    else:
+        print("Using CUDA for property embedding.")
 
     view_specs = {
         "smiles": {
@@ -501,9 +522,14 @@ def main(args):
 
     seed = int(config.get("data", {}).get("random_seed", 42))
     ridge_alpha = float(prop_cfg.get("ridge_alpha", 1.0))
+    max_prop_samples = _to_int_or_none(prop_cfg.get("max_samples"))
 
     model_dir = results_dir / "step3_property"
     model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Cache per-view embeddings by raw p-SMILES across property files.
+    view_embedding_cache: Dict[str, Dict[str, np.ndarray]] = {view: {} for view in view_assets}
+    view_invalid_cache: Dict[str, set] = {view: set() for view in view_assets}
 
     rows = []
     for prop_path in property_files:
@@ -515,6 +541,8 @@ def main(args):
         df = df.rename(columns={smiles_col: "p_smiles", value_col: "target"})
         df["target"] = pd.to_numeric(df["target"], errors="coerce")
         df = df.dropna(subset=["target"])
+        if max_prop_samples is not None:
+            df = df.head(max_prop_samples)
 
         if df.empty:
             print(f"Skipping {prop_name}: no valid rows.")
@@ -546,25 +574,68 @@ def main(args):
 
         view_data: Dict[str, Dict] = {}
         for view, assets in view_assets.items():
-            if view == "selfies":
-                view_inputs = []
-                view_indices = []
-                for idx, smi in enumerate(smiles_list):
-                    s = smiles_to_selfies(smi)
-                    if s:
-                        view_inputs.append(s)
-                        view_indices.append(idx)
-                embeddings = _embed_sequence(view_inputs, assets, device)
-            elif view == "graph":
-                embeddings, valid_indices = _embed_graph(smiles_list, assets, device)
-                view_indices = valid_indices
-            else:
-                view_inputs = smiles_list
-                view_indices = list(range(num_samples))
-                embeddings = _embed_sequence(view_inputs, assets, device)
+            cache = view_embedding_cache[view]
+            invalid = view_invalid_cache[view]
 
-            if use_alignment and alignment_model is not None:
-                embeddings = _project_embeddings(alignment_model, view, embeddings, device)
+            unique_missing = []
+            seen = set()
+            for smi in smiles_list:
+                if smi in seen:
+                    continue
+                seen.add(smi)
+                if smi in cache or smi in invalid:
+                    continue
+                unique_missing.append(smi)
+
+            if unique_missing:
+                if view == "selfies":
+                    seq_inputs = []
+                    seq_smiles = []
+                    for smi in unique_missing:
+                        s = smiles_to_selfies(smi)
+                        if s:
+                            seq_inputs.append(s)
+                            seq_smiles.append(smi)
+                        else:
+                            invalid.add(smi)
+                    if seq_inputs:
+                        new_emb = _embed_sequence(seq_inputs, assets, device)
+                        if use_alignment and alignment_model is not None:
+                            new_emb = _project_embeddings(alignment_model, view, new_emb, device)
+                        for i, smi in enumerate(seq_smiles):
+                            cache[smi] = new_emb[i]
+                elif view == "graph":
+                    new_emb, valid_indices = _embed_graph(unique_missing, assets, device)
+                    if use_alignment and alignment_model is not None and new_emb.size:
+                        new_emb = _project_embeddings(alignment_model, view, new_emb, device)
+                    valid_set = set(valid_indices)
+                    emb_row = 0
+                    for i, smi in enumerate(unique_missing):
+                        if i in valid_set:
+                            cache[smi] = new_emb[emb_row]
+                            emb_row += 1
+                        else:
+                            invalid.add(smi)
+                else:
+                    new_emb = _embed_sequence(unique_missing, assets, device)
+                    if use_alignment and alignment_model is not None:
+                        new_emb = _project_embeddings(alignment_model, view, new_emb, device)
+                    for i, smi in enumerate(unique_missing):
+                        cache[smi] = new_emb[i]
+
+            emb_rows = []
+            view_indices = []
+            for idx, smi in enumerate(smiles_list):
+                emb = cache.get(smi)
+                if emb is None:
+                    continue
+                emb_rows.append(emb)
+                view_indices.append(idx)
+
+            if emb_rows:
+                embeddings = np.stack(emb_rows, axis=0).astype(np.float32, copy=False)
+            else:
+                embeddings = np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32)
 
             index_map = {orig_idx: row_idx for row_idx, orig_idx in enumerate(view_indices)}
             view_data[view] = {

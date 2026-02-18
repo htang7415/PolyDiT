@@ -10,8 +10,8 @@ paths:
 
 data:
   random_seed: 42
-  max_samples_d1: null
-  max_samples_d2: null
+  max_samples_d1: 50000
+  max_samples_d2: 12888
 
 alignment_views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
 
@@ -59,13 +59,15 @@ alignment_e2e:
 
 evaluation:
   recall_ks: [1, 5, 10]
+  max_samples_per_dataset: 5000
 
 ood:
   nn_k: 50
-  use_faiss: false
+  use_faiss: true
 
 property:
-  files: null
+  files: ["Tg.csv", "Eg.csv", "Tm.csv", "Td.csv"]
+  max_samples: null
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1

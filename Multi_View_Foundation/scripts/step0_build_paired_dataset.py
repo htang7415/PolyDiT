@@ -5,7 +5,6 @@ Currently builds a paired index with p-SMILES for D1 (SMiPoly) and D2 (PolyInfo)
 """
 
 import argparse
-import gzip
 from pathlib import Path
 import sys
 import importlib.util
@@ -44,18 +43,37 @@ def _load_group_tokenizer(tokenizer_path: Path):
     return tokenizer_cls.load(str(tokenizer_path))
 
 
-def _load_smiles(path: Path) -> pd.Series:
-    if path.suffix == ".gz":
-        with gzip.open(path, "rt") as f:
-            df = pd.read_csv(f)
-    else:
-        df = pd.read_csv(path)
+def _to_int_or_none(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("Boolean is not a valid integer sample cap.")
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    return int(float(text))
 
-    if "SMILES" in df.columns:
-        return df["SMILES"].astype(str)
-    if "p_smiles" in df.columns:
-        return df["p_smiles"].astype(str)
-    raise ValueError(f"SMILES column not found in {path}")
+
+def _load_smiles(path: Path, max_rows=None) -> pd.Series:
+    max_rows = _to_int_or_none(max_rows)
+    header_df = pd.read_csv(path, nrows=0, compression="infer")
+    columns = set(header_df.columns)
+
+    smiles_col = None
+    if "SMILES" in columns:
+        smiles_col = "SMILES"
+    elif "p_smiles" in columns:
+        smiles_col = "p_smiles"
+    if smiles_col is None:
+        raise ValueError(f"SMILES column not found in {path}")
+
+    read_kwargs = {"usecols": [smiles_col], "compression": "infer"}
+    if max_rows is not None:
+        read_kwargs["nrows"] = int(max_rows)
+    df = pd.read_csv(path, **read_kwargs)
+    return df[smiles_col].astype(str)
 
 
 def main(args):
@@ -67,15 +85,11 @@ def main(args):
     d1_path = _resolve_path(config["paths"]["polymer_file"])
     d2_path = _resolve_path(config["paths"].get("polymer_file_d2", "../Data/Polymer/PolyInfo_Homopolymer.csv"))
 
-    d1_smiles = _load_smiles(d1_path)
-    d2_smiles = _load_smiles(d2_path)
+    max_d1 = _to_int_or_none(config.get("data", {}).get("max_samples_d1"))
+    max_d2 = _to_int_or_none(config.get("data", {}).get("max_samples_d2"))
 
-    max_d1 = config.get("data", {}).get("max_samples_d1")
-    max_d2 = config.get("data", {}).get("max_samples_d2")
-    if max_d1:
-        d1_smiles = d1_smiles.head(int(max_d1))
-    if max_d2:
-        d2_smiles = d2_smiles.head(int(max_d2))
+    d1_smiles = _load_smiles(d1_path, max_rows=max_d1)
+    d2_smiles = _load_smiles(d2_path, max_rows=max_d2)
 
     views_cfg = config.get("views", {})
     selfies_enabled = views_cfg.get("selfies", {}).get("enabled", False)

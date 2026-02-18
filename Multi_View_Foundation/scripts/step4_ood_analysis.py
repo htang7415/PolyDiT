@@ -118,7 +118,12 @@ def main(args):
     gen_path = Path(args.generated_embeddings) if args.generated_embeddings else None
 
     k = args.k or int(config.get("ood", {}).get("nn_k", 1))
-    ood_metrics = compute_ood_metrics_from_files(d1_path, d2_path, gen_path, k=k)
+    if args.use_faiss is None:
+        use_faiss = bool(config.get("ood", {}).get("use_faiss", True))
+    else:
+        use_faiss = bool(args.use_faiss)
+    print(f"OOD settings: k={k}, use_faiss={use_faiss}")
+    ood_metrics = compute_ood_metrics_from_files(d1_path, d2_path, gen_path, k=k, use_faiss=use_faiss)
 
     row = {
         "method": "Multi_View_Foundation",
@@ -138,6 +143,9 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--generated_embeddings", type=str, default=None)
     parser.add_argument("--k", type=int, default=None)
+    parser.add_argument("--use_faiss", dest="use_faiss", action="store_true")
+    parser.add_argument("--no_faiss", dest="use_faiss", action="store_false")
+    parser.set_defaults(use_faiss=None)
     parser.add_argument("--use_alignment", action="store_true")
     parser.add_argument("--alignment_checkpoint", type=str, default=None)
     main(parser.parse_args())
