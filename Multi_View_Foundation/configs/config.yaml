@@ -82,7 +82,7 @@ property:
   views: null
   use_alignment: true
   hyperparameter_tuning:
-    n_trials: 100
+    n_trials: 150
     enabled: true
     tuning_epochs: 35
     tuning_patience: 10
@@ -96,11 +96,11 @@ property:
       batch_size: [8, 16, 32, 64, 128]
 
 foundation_inverse:
-  enabled: false
+  enabled: true
   candidate_source: "csv"  # csv|resample
   candidates_csv: ""
   smiles_column: ""
-  property: "Tg"  # Tg, Tm, Td, Eg
+  property: "Td"  # Tg, Tm, Td, Eg
   target: 300.0
   target_mode: "ge"  # window|ge|le
   epsilon: 20.0
@@ -124,6 +124,23 @@ foundation_inverse:
   rerank_top_k: 100
   ood_k: 5
   encoder_view: "smiles"  # selects F5 sampling + embedding view: smiles|smiles_bpe|selfies|group_selfies|graph
+  use_alignment: true
+  alignment_checkpoint: ""
+
+ood_aware_inverse:
+  enabled: false
+  candidate_scores_csv: ""      # default: results/step5_foundation_inverse/files/candidate_scores.csv
+  encoder_view: ""              # fallback: foundation_inverse.encoder_view
+  property: ""                  # fallback: foundation_inverse.property
+  target: null                  # fallback: foundation_inverse.target
+  target_mode: ""               # fallback: foundation_inverse.target_mode
+  epsilon: null                 # fallback: foundation_inverse.epsilon
+  top_k: 100
+  property_weight: 0.7
+  ood_weight: 0.3
+  normalization: "minmax"       # minmax|rank|none
+  ood_k: 5
+  compute_d2_distance_if_missing: true
   use_alignment: true
   alignment_checkpoint: ""
 

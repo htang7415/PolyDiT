@@ -1,5 +1,8 @@
 #!/usr/bin/env python
-"""F5: Foundation-enhanced inverse design with reranking."""
+"""F5: Foundation-enhanced inverse design with reranking.
+
+Supports candidate sources from CSV files or on-the-fly resampling.
+"""
 
 import argparse
 import json
@@ -49,6 +52,7 @@ except Exception:  # pragma: no cover
 
 
 SUPPORTED_VIEWS = ("smiles", "smiles_bpe", "selfies", "group_selfies", "graph")
+SUPPORTED_CANDIDATE_SOURCES = ("csv", "resample")
 
 VIEW_SPECS = {
     "smiles": {
@@ -808,8 +812,9 @@ def _resolve_candidate_source(args, config: dict) -> str:
     if source is None:
         source = cfg.get("candidate_source", "csv")
     source = str(source).strip().lower()
-    if source not in {"csv", "resample"}:
-        raise ValueError("foundation_inverse.candidate_source must be one of: csv|resample")
+    if source not in SUPPORTED_CANDIDATE_SOURCES:
+        allowed = "|".join(SUPPORTED_CANDIDATE_SOURCES)
+        raise ValueError(f"foundation_inverse.candidate_source must be one of: {allowed}")
     return source
 
 
@@ -1440,7 +1445,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--encoder_view", type=str, default=None, choices=list(SUPPORTED_VIEWS))
-    parser.add_argument("--candidate_source", type=str, default=None, choices=["csv", "resample"])
+    parser.add_argument("--candidate_source", type=str, default=None, choices=list(SUPPORTED_CANDIDATE_SOURCES))
     parser.add_argument("--candidates_csv", type=str, default=None)
     parser.add_argument("--smiles_column", type=str, default=None)
     parser.add_argument("--property", type=str, required=True)
