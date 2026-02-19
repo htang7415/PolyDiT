@@ -106,7 +106,7 @@ foundation_inverse:
   rerank_strategy: "d2_distance"
   rerank_top_k: 100
   ood_k: 5
-  encoder_view: ""
+  encoder_view: "smiles"  # smiles|smiles_bpe|selfies|group_selfies|graph
   use_alignment: true
   alignment_checkpoint: ""
 
