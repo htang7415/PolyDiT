@@ -27,8 +27,8 @@ views:
     enabled: true
 
 model:
-  projection_dim: 256
-  projection_hidden_dims: [512]
+  projection_dim: 384  # default for small; run_pipeline.sh aligns with 9-method backbone sizes: 384/640/960/1280
+  projection_hidden_dims: [768]  # default for small; presets: [768],[1280],[1920],[2560]
   view_dropout: 0.3
   temperature: 0.07
 
@@ -97,16 +97,33 @@ property:
 
 foundation_inverse:
   enabled: false
+  candidate_source: "csv"  # csv|resample
   candidates_csv: ""
   smiles_column: ""
-  property: "Tg"
+  property: "Tg"  # Tg, Tm, Td, Eg
   target: 300.0
-  epsilon: 30.0
+  target_mode: "ge"  # window|ge|le
+  epsilon: 20.0
+  sampling_target: 100              # used when candidate_source=resample
+  sampling_num_per_batch: 512       # candidates generated each outer batch
+  sampling_batch_size: 128          # model decode batch size inside sampler
+  sampling_max_batches: 200         # hard stop to avoid infinite loops
+  sampling_temperature: null        # null => use method sampling.temperature
+  sampling_num_atoms: null          # graph-only optional override
+  # Optional comma-separated class filter. Supported classes:
+  # polyimide, polyester, polyamide, polyurethane, polyether,
+  # polysiloxane, polycarbonate, polysulfone, polyacrylate, polystyrene
+  target_class: "polyamide"         # empty string disables class filter
+  require_validity: true
+  require_two_stars: true
+  require_novel: true
+  require_unique: true
+  max_sa: 4.0
   property_model_path: ""
   rerank_strategy: "d2_distance"
   rerank_top_k: 100
   ood_k: 5
-  encoder_view: "smiles"  # smiles|smiles_bpe|selfies|group_selfies|graph
+  encoder_view: "smiles"  # selects F5 sampling + embedding view: smiles|smiles_bpe|selfies|group_selfies|graph
   use_alignment: true
   alignment_checkpoint: ""
 

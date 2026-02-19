@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies, smiles_to_group_selfies
+from src.utils.output_layout import ensure_step_dirs, save_csv
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -80,7 +81,9 @@ def main(args):
     config = load_config(args.config)
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
+    step_dirs = ensure_step_dirs(results_dir, "step0_paired_dataset")
     save_config(config, results_dir / "config_used.yaml")
+    save_config(config, step_dirs["files_dir"] / "config_used.yaml")
 
     d1_path = _resolve_path(config["paths"]["polymer_file"])
     d2_path = _resolve_path(config["paths"].get("polymer_file_d2", "../Data/Polymer/PolyInfo_Homopolymer.csv"))
@@ -179,12 +182,22 @@ def main(args):
     paired_df = pd.DataFrame(records)
     paired_index_path = _resolve_path(config["paths"].get("paired_index", str(results_dir / "paired_index.csv")))
     paired_index_path.parent.mkdir(parents=True, exist_ok=True)
-    paired_df.to_csv(paired_index_path, index=False)
+    save_csv(
+        paired_df,
+        step_dirs["files_dir"] / "paired_index.csv",
+        legacy_paths=[paired_index_path],
+        index=False,
+    )
 
     stats_rows.insert(0, {"dataset": "d1", "view": "p_smiles", "total": int(len(d1_smiles)), "success": int(len(d1_smiles)), "failure": 0})
     stats_rows.insert(1, {"dataset": "d2", "view": "p_smiles", "total": int(len(d2_smiles)), "success": int(len(d2_smiles)), "failure": 0})
     stats_df = pd.DataFrame(stats_rows)
-    stats_df.to_csv(results_dir / "conversion_stats.csv", index=False)
+    save_csv(
+        stats_df,
+        step_dirs["metrics_dir"] / "conversion_stats.csv",
+        legacy_paths=[results_dir / "conversion_stats.csv"],
+        index=False,
+    )
 
     print(f"Saved paired_index.csv with {len(paired_df)} records at {paired_index_path}")
 

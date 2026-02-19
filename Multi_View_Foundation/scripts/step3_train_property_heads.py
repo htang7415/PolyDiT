@@ -30,6 +30,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies
 from src.model.multi_view_model import MultiViewModel
+from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -753,7 +754,9 @@ def main(args):
     config = load_config(args.config)
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
+    step_dirs = ensure_step_dirs(results_dir, "step3_property")
     save_config(config, results_dir / "config_used.yaml")
+    save_config(config, step_dirs["files_dir"] / "config_used.yaml")
 
     property_dir = _resolve_path(config["paths"]["property_dir"])
     prop_cfg = config.get("property", {})
@@ -889,8 +892,8 @@ def main(args):
     if mlp_hpo_cfg is None:
         mlp_hpo_cfg = config.get("hyperparameter_tuning", {})
 
-    model_dir = results_dir / "step3_property"
-    model_dir.mkdir(parents=True, exist_ok=True)
+    model_dir = step_dirs["files_dir"]
+    legacy_model_dir = step_dirs["step_dir"]
 
     # Cache per-view embeddings by raw p-SMILES across property files.
     view_embedding_cache: Dict[str, Dict[str, np.ndarray]] = {view: {} for view in view_assets}
@@ -1058,13 +1061,21 @@ def main(args):
             if view == "smiles":
                 model_path = model_dir / f"{prop_name}_mlp.pt"
             _save_mlp_bundle(model_path, model_bundle)
+            legacy_model_path = legacy_model_dir / model_path.name
+            if legacy_model_path != model_path:
+                _save_mlp_bundle(legacy_model_path, model_bundle)
 
             trial_path = model_dir / f"{prop_name}_{view}_mlp_hpo_trials.csv"
-            trial_df.to_csv(trial_path, index=False)
+            save_csv(
+                trial_df,
+                trial_path,
+                legacy_paths=[legacy_model_dir / trial_path.name],
+                index=False,
+            )
 
             meta_path = model_dir / f"{prop_name}_{view}_meta.json"
-            with open(meta_path, "w") as f:
-                json.dump({
+            save_json(
+                {
                     "property": prop_name,
                     "view": view,
                     "num_samples": num_samples,
@@ -1077,7 +1088,10 @@ def main(args):
                     "use_alignment": use_alignment,
                     "model_path": str(model_path),
                     "hpo_trials_path": str(trial_path),
-                }, f, indent=2)
+                },
+                meta_path,
+                legacy_paths=[legacy_model_dir / meta_path.name],
+            )
 
         if len(view_data) >= 2:
             common = None
@@ -1130,13 +1144,21 @@ def main(args):
 
                     model_path = model_dir / f"{prop_name}_multiview_mean_mlp.pt"
                     _save_mlp_bundle(model_path, model_bundle)
+                    legacy_model_path = legacy_model_dir / model_path.name
+                    if legacy_model_path != model_path:
+                        _save_mlp_bundle(legacy_model_path, model_bundle)
 
                     trial_path = model_dir / f"{prop_name}_multiview_mean_mlp_hpo_trials.csv"
-                    trial_df.to_csv(trial_path, index=False)
+                    save_csv(
+                        trial_df,
+                        trial_path,
+                        legacy_paths=[legacy_model_dir / trial_path.name],
+                        index=False,
+                    )
 
                     meta_path = model_dir / f"{prop_name}_multiview_mean_meta.json"
-                    with open(meta_path, "w") as f:
-                        json.dump({
+                    save_json(
+                        {
                             "property": prop_name,
                             "view": "multiview_mean",
                             "num_samples": num_samples,
@@ -1150,10 +1172,18 @@ def main(args):
                             "use_alignment": use_alignment,
                             "model_path": str(model_path),
                             "hpo_trials_path": str(trial_path),
-                        }, f, indent=2)
+                        },
+                        meta_path,
+                        legacy_paths=[legacy_model_dir / meta_path.name],
+                    )
 
     metrics_df = pd.DataFrame(rows)
-    metrics_df.to_csv(results_dir / "metrics_property.csv", index=False)
+    save_csv(
+        metrics_df,
+        step_dirs["metrics_dir"] / "metrics_property.csv",
+        legacy_paths=[results_dir / "metrics_property.csv"],
+        index=False,
+    )
     print(f"Saved metrics_property.csv to {results_dir}")
 
 

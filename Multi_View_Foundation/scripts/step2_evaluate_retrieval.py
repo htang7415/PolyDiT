@@ -15,6 +15,7 @@ sys.path.insert(0, str(BASE_DIR))
 from src.utils.config import load_config, save_config
 from src.evaluation.retrieval_metrics import compute_recall_at_k
 from typing import Optional
+from src.utils.output_layout import ensure_step_dirs, save_csv
 
 from src.model.multi_view_model import MultiViewModel
 
@@ -89,7 +90,9 @@ def main(args):
     config = load_config(args.config)
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
+    step_dirs = ensure_step_dirs(results_dir, "step2_retrieval")
     save_config(config, results_dir / "config_used.yaml")
+    save_config(config, step_dirs["files_dir"] / "config_used.yaml")
 
     views = config.get("alignment_views", ["smiles"])
     ks = config.get("evaluation", {}).get("recall_ks", [1, 5, 10])
@@ -155,7 +158,12 @@ def main(args):
                 })
 
     metrics_df = pd.DataFrame(rows)
-    metrics_df.to_csv(results_dir / "metrics_alignment.csv", index=False)
+    save_csv(
+        metrics_df,
+        step_dirs["metrics_dir"] / "metrics_alignment.csv",
+        legacy_paths=[results_dir / "metrics_alignment.csv"],
+        index=False,
+    )
     print(f"Saved metrics_alignment.csv to {results_dir}")
 
 

@@ -26,6 +26,7 @@ from src.data.alignment_dataset import MultiViewAlignmentDataset, collate_alignm
 from src.model.multi_view_model import MultiViewModel
 from src.model.multi_view_e2e import MultiViewE2EModel
 from src.training.contrastive_trainer import ContrastiveTrainer, TrainerConfig, EndToEndContrastiveTrainer
+from src.utils.output_layout import ensure_step_dirs, save_csv, save_json, save_numpy
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -559,7 +560,9 @@ def main(args):
     config = load_config(args.config)
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
+    step_dirs = ensure_step_dirs(results_dir, "step1_alignment_embeddings")
     save_config(config, results_dir / "config_used.yaml")
+    save_config(config, step_dirs["files_dir"] / "config_used.yaml")
 
     paired_index_path = _resolve_path(config["paths"].get("paired_index", str(results_dir / "paired_index.csv")))
     if not paired_index_path.exists():
@@ -713,21 +716,34 @@ def main(args):
             d1_ids = [d1_ids[i] for i in d1_valid]
             d2_ids = [d2_ids[i] for i in d2_valid]
 
-        emb_d1_path = results_dir / f"embeddings_{view}_d1.npy"
-        emb_d2_path = results_dir / f"embeddings_{view}_d2.npy"
-        np.save(emb_d1_path, d1_embeddings)
-        np.save(emb_d2_path, d2_embeddings)
+        emb_d1_path = step_dirs["files_dir"] / f"embeddings_{view}_d1.npy"
+        emb_d2_path = step_dirs["files_dir"] / f"embeddings_{view}_d2.npy"
+        save_numpy(d1_embeddings, emb_d1_path, legacy_paths=[results_dir / f"embeddings_{view}_d1.npy"])
+        save_numpy(d2_embeddings, emb_d2_path, legacy_paths=[results_dir / f"embeddings_{view}_d2.npy"])
 
         if view == primary_smiles_view:
-            np.save(results_dir / "embeddings_d1.npy", d1_embeddings)
-            np.save(results_dir / "embeddings_d2.npy", d2_embeddings)
+            save_numpy(
+                d1_embeddings,
+                step_dirs["files_dir"] / "embeddings_d1.npy",
+                legacy_paths=[results_dir / "embeddings_d1.npy"],
+            )
+            save_numpy(
+                d2_embeddings,
+                step_dirs["files_dir"] / "embeddings_d2.npy",
+                legacy_paths=[results_dir / "embeddings_d2.npy"],
+            )
 
         index_rows = []
         for idx, pid in enumerate(d1_ids):
             index_rows.append({"polymer_id": pid, "dataset": "d1", "row_index": idx})
         for idx, pid in enumerate(d2_ids):
             index_rows.append({"polymer_id": pid, "dataset": "d2", "row_index": idx})
-        pd.DataFrame(index_rows).to_csv(results_dir / f"embedding_index_{view}.csv", index=False)
+        save_csv(
+            pd.DataFrame(index_rows),
+            step_dirs["files_dir"] / f"embedding_index_{view}.csv",
+            legacy_paths=[results_dir / f"embedding_index_{view}.csv"],
+            index=False,
+        )
 
         meta = {
             "view": view,
@@ -743,13 +759,15 @@ def main(args):
             "d1_time_sec": round(d1_time, 2),
             "d2_time_sec": round(d2_time, 2),
         }
-        meta_path = results_dir / f"embedding_meta_{view}.json"
-        with open(meta_path, "w") as f:
-            json.dump(meta, f, indent=2)
+        meta_path = step_dirs["files_dir"] / f"embedding_meta_{view}.json"
+        save_json(meta, meta_path, legacy_paths=[results_dir / f"embedding_meta_{view}.json"])
 
         if view == primary_smiles_view:
-            with open(results_dir / "embedding_meta.json", "w") as f:
-                json.dump(meta, f, indent=2)
+            save_json(
+                meta,
+                step_dirs["files_dir"] / "embedding_meta.json",
+                legacy_paths=[results_dir / "embedding_meta.json"],
+            )
 
         print(f"Saved embeddings for {view} to {emb_d1_path} and {emb_d2_path}")
         active_views.append(view)

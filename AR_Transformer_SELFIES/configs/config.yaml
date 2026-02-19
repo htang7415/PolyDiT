@@ -201,7 +201,7 @@ sampling:
 
 # Inverse design
 inverse_design:
-  num_candidates: 10000
+  num_candidates: 500
   epsilon: 30.0  # tolerance for property matching
 
 # Polymer classes (SMARTS patterns)

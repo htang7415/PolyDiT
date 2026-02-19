@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.utils.config import load_config, save_config
 from shared.ood_metrics import compute_ood_metrics_from_files
 from src.model.multi_view_model import MultiViewModel
+from src.utils.output_layout import ensure_step_dirs, save_csv, save_numpy
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -27,11 +28,14 @@ def _resolve_path(path_str: str) -> Path:
 
 
 def _load_model_size(results_dir: Path, config: dict) -> str:
-    meta_path = results_dir / "embedding_meta.json"
-    if meta_path.exists():
-        with open(meta_path, "r") as f:
-            meta = json.load(f)
-        return meta.get("model_size", "base")
+    for meta_path in [
+        results_dir / "embedding_meta.json",
+        results_dir / "step1_alignment_embeddings" / "files" / "embedding_meta.json",
+    ]:
+        if meta_path.exists():
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            return meta.get("model_size", "base")
     return (
         config.get("smiles_encoder", {}).get("model_size")
         or config.get("smiles_bpe_encoder", {}).get("model_size")
@@ -40,13 +44,16 @@ def _load_model_size(results_dir: Path, config: dict) -> str:
 
 
 def _load_primary_view(results_dir: Path, config: dict) -> str:
-    meta_path = results_dir / "embedding_meta.json"
-    if meta_path.exists():
-        with open(meta_path, "r") as f:
-            meta = json.load(f)
-        view = meta.get("view")
-        if isinstance(view, str) and view:
-            return view
+    for meta_path in [
+        results_dir / "embedding_meta.json",
+        results_dir / "step1_alignment_embeddings" / "files" / "embedding_meta.json",
+    ]:
+        if meta_path.exists():
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            view = meta.get("view")
+            if isinstance(view, str) and view:
+                return view
     if (results_dir / "embeddings_smiles_bpe_d1.npy").exists():
         return "smiles_bpe"
     if config.get("smiles_bpe_encoder", {}).get("method_dir") and not config.get("smiles_encoder", {}).get("method_dir"):
@@ -93,7 +100,9 @@ def main(args):
     config = load_config(args.config)
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
+    step_dirs = ensure_step_dirs(results_dir, "step4_ood")
     save_config(config, results_dir / "config_used.yaml")
+    save_config(config, step_dirs["files_dir"] / "config_used.yaml")
     primary_view = _load_primary_view(results_dir, config)
 
     d1_path = results_dir / "embeddings_d1.npy"
@@ -111,10 +120,10 @@ def main(args):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         d1_proj = _project_embeddings(model, primary_view, d1, device=device)
         d2_proj = _project_embeddings(model, primary_view, d2, device=device)
-        d1_path = results_dir / "embeddings_d1_aligned.npy"
-        d2_path = results_dir / "embeddings_d2_aligned.npy"
-        np.save(d1_path, d1_proj)
-        np.save(d2_path, d2_proj)
+        d1_path = step_dirs["files_dir"] / "embeddings_d1_aligned.npy"
+        d2_path = step_dirs["files_dir"] / "embeddings_d2_aligned.npy"
+        save_numpy(d1_proj, d1_path, legacy_paths=[results_dir / "embeddings_d1_aligned.npy"])
+        save_numpy(d2_proj, d2_path, legacy_paths=[results_dir / "embeddings_d2_aligned.npy"])
 
     gen_path = Path(args.generated_embeddings) if args.generated_embeddings else None
 
@@ -138,9 +147,9 @@ def main(args):
         **ood_metrics,
     }
 
-    out_path = results_dir / "metrics_ood.csv"
+    out_path = step_dirs["metrics_dir"] / "metrics_ood.csv"
     import pandas as pd
-    pd.DataFrame([row]).to_csv(out_path, index=False)
+    save_csv(pd.DataFrame([row]), out_path, legacy_paths=[results_dir / "metrics_ood.csv"], index=False)
     print(f"Saved metrics_ood.csv to {out_path}")
 
 

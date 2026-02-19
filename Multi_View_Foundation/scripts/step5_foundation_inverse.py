@@ -7,7 +7,8 @@ from pathlib import Path
 import sys
 import time
 import importlib.util
-from typing import Dict, List, Optional, Tuple
+from collections import Counter
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies
 from shared.ood_metrics import knn_distances
 from src.model.multi_view_model import MultiViewModel
+from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
 
 try:
     import joblib
@@ -30,8 +32,20 @@ except Exception:  # pragma: no cover
 
 try:
     from rdkit import Chem
+    from rdkit.Chem import RDConfig
 except Exception:  # pragma: no cover
     Chem = None
+    RDConfig = None
+
+try:
+    import os
+    if RDConfig is not None:
+        sa_dir = os.path.join(RDConfig.RDContribDir, "SA_Score")
+        if sa_dir not in sys.path:
+            sys.path.append(sa_dir)
+    import sascorer  # type: ignore
+except Exception:  # pragma: no cover
+    sascorer = None
 
 
 SUPPORTED_VIEWS = ("smiles", "smiles_bpe", "selfies", "group_selfies", "graph")
@@ -71,6 +85,35 @@ VIEW_SPECS = {
     },
 }
 
+DEFAULT_POLYMER_PATTERNS = {
+    "polyimide": "[#6](=O)-[#7]-[#6](=O)",
+    "polyester": "[#6](=O)-[#8]-[#6]",
+    "polyamide": "[#6](=O)-[#7]-[#6]",
+    "polyurethane": "[#8]-[#6](=O)-[#7]",
+    "polyether": "[#6]-[#8]-[#6]",
+    "polysiloxane": "[Si]-[#8]-[Si]",
+    "polycarbonate": "[#8]-[#6](=O)-[#8]",
+    "polysulfone": "[#6]-[S](=O)(=O)-[#6]",
+    "polyacrylate": "[#6]-[#6](=O)-[#8]",
+    "polystyrene": "[#6]-[#6](c1ccccc1)-[#6]",
+}
+
+DEFAULT_F5_RESAMPLE_SETTINGS = {
+    "candidate_source": "csv",
+    "sampling_target": 100,
+    "sampling_num_per_batch": 512,
+    "sampling_batch_size": 128,
+    "sampling_max_batches": 200,
+    "sampling_temperature": None,
+    "sampling_num_atoms": None,
+    "target_class": "",
+    "require_validity": True,
+    "require_two_stars": True,
+    "require_novel": True,
+    "require_unique": True,
+    "max_sa": 4.0,
+}
+
 
 def _resolve_path(path_str: str) -> Path:
     path = Path(path_str)
@@ -91,6 +134,20 @@ def _view_to_representation(view: str) -> str:
         "graph": "Graph",
     }
     return mapping.get(view, view)
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _f5_cfg(config: dict) -> dict:
+    merged = dict(DEFAULT_F5_RESAMPLE_SETTINGS)
+    merged.update(config.get("foundation_inverse", {}) or {})
+    return merged
 
 
 def _is_view_enabled(config: dict, view: str) -> bool:
@@ -278,6 +335,11 @@ def _load_sequence_backbone(
         "pooling": encoder_cfg.get("pooling", "mean"),
         "timestep": int(encoder_cfg.get("timestep", 1)),
         "batch_size": int(encoder_cfg.get("batch_size", 256)),
+        "method_dir": method_dir,
+        "method_cfg": method_cfg,
+        "results_dir": results_dir,
+        "base_results_dir": base_results_dir,
+        "checkpoint_path": checkpoint_path,
     }
 
 
@@ -393,6 +455,12 @@ def _load_graph_backbone(encoder_cfg: dict, device: str):
         "pooling": encoder_cfg.get("pooling", "mean"),
         "timestep": int(encoder_cfg.get("timestep", 1)),
         "batch_size": int(encoder_cfg.get("batch_size", 64)),
+        "method_dir": method_dir,
+        "method_cfg": method_cfg,
+        "results_dir": results_dir,
+        "base_results_dir": base_results_dir,
+        "checkpoint_path": checkpoint_path,
+        "graph_config": graph_config,
     }
 
 
@@ -626,18 +694,133 @@ def _achievement_rates(preds: np.ndarray, target: float) -> dict:
     }
 
 
-def main(args):
-    config = load_config(args.config)
-    results_dir = _resolve_path(config["paths"]["results_dir"])
-    results_dir.mkdir(parents=True, exist_ok=True)
-    save_config(config, results_dir / "config_used.yaml")
+def _compute_hits(preds: np.ndarray, target: float, epsilon: float, target_mode: str) -> np.ndarray:
+    mode = str(target_mode).strip().lower()
+    if mode == "window":
+        return np.abs(preds - target) <= epsilon
+    if mode == "ge":
+        return preds >= target
+    if mode == "le":
+        return preds <= target
+    raise ValueError(f"Unsupported target_mode={target_mode}. Use window|ge|le.")
 
-    candidates_path = _resolve_path(args.candidates_csv)
+
+_SA_SCORE_FN = None
+
+
+def _get_sa_score_fn():
+    global _SA_SCORE_FN
+    if _SA_SCORE_FN is not None:
+        return _SA_SCORE_FN
+    chem_path = REPO_ROOT / "Bi_Diffusion_SMILES" / "src" / "utils" / "chemistry.py"
+    if not chem_path.exists():
+        _SA_SCORE_FN = False
+        return None
+    try:
+        chem_mod = _load_module("mvf_sa_chemistry", chem_path)
+        _SA_SCORE_FN = getattr(chem_mod, "compute_sa_score", False)
+    except Exception:
+        _SA_SCORE_FN = False
+    return _SA_SCORE_FN if callable(_SA_SCORE_FN) else None
+
+
+def _compute_sa_score(smiles: str) -> Optional[float]:
+    fn = _get_sa_score_fn()
+    if fn is None:
+        return None
+    try:
+        score = fn(smiles)
+    except Exception:
+        return None
+    if score is None:
+        return None
+    try:
+        return float(score)
+    except Exception:
+        return None
+
+
+def _canonicalize_smiles(smiles: str) -> str:
+    text = str(smiles).strip()
+    if not text or Chem is None:
+        return text
+    try:
+        mol = Chem.MolFromSmiles(text)
+        if mol is None:
+            return text
+        return Chem.MolToSmiles(mol, canonical=True)
+    except Exception:
+        return text
+
+
+def _parse_target_classes(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        items = [str(v).strip() for v in value]
+    else:
+        items = [x.strip() for x in str(value).split(",")]
+    return [x for x in items if x]
+
+
+def _compile_polymer_patterns(patterns: Dict[str, str]) -> Dict[str, Any]:
+    if Chem is None:
+        return {}
+    compiled = {}
+    for name, smarts in (patterns or {}).items():
+        try:
+            patt = Chem.MolFromSmarts(smarts)
+            if patt is not None:
+                compiled[str(name)] = patt
+        except Exception:
+            continue
+    return compiled
+
+
+def _match_polymer_class(smiles: str, target_classes: List[str], compiled_patterns: Dict[str, Any]) -> Tuple[bool, str]:
+    if not target_classes:
+        return True, ""
+    if Chem is None:
+        return False, ""
+    try:
+        mol = Chem.MolFromSmiles(smiles.replace("*", "[*]"))
+        if mol is None:
+            mol = Chem.MolFromSmiles(smiles)
+    except Exception:
+        mol = None
+    if mol is None:
+        return False, ""
+    for class_name in target_classes:
+        patt = compiled_patterns.get(class_name)
+        if patt is None:
+            continue
+        try:
+            if mol.HasSubstructMatch(patt):
+                return True, class_name
+        except Exception:
+            continue
+    return False, ""
+
+
+def _resolve_candidate_source(args, config: dict) -> str:
+    cfg = _f5_cfg(config)
+    source = args.candidate_source
+    if source is None:
+        source = cfg.get("candidate_source", "csv")
+    source = str(source).strip().lower()
+    if source not in {"csv", "resample"}:
+        raise ValueError("foundation_inverse.candidate_source must be one of: csv|resample")
+    return source
+
+
+def _load_candidates_csv(path_str: str, smiles_column: Optional[str]) -> Tuple[List[str], str]:
+    if not path_str:
+        raise ValueError("candidates_csv is required when candidate_source=csv")
+    candidates_path = _resolve_path(path_str)
     if not candidates_path.exists():
         raise FileNotFoundError(f"Candidates CSV not found: {candidates_path}")
-
     candidates_df = pd.read_csv(candidates_path)
-    smiles_col = args.smiles_column
+    smiles_col = smiles_column
     if smiles_col is None:
         for candidate in ["smiles", "p_smiles", "psmiles"]:
             if candidate in candidates_df.columns:
@@ -645,14 +828,385 @@ def main(args):
                 break
     if smiles_col is None or smiles_col not in candidates_df.columns:
         raise ValueError("Candidates CSV must include a SMILES column.")
+    return candidates_df[smiles_col].astype(str).tolist(), smiles_col
 
-    smiles_list = candidates_df[smiles_col].astype(str).tolist()
-    structural_validity_mask = [
-        _check_validity(smi) and _count_stars(smi) == 2
-        for smi in smiles_list
-    ]
-    structurally_valid_smiles = [s for s, keep in zip(smiles_list, structural_validity_mask) if keep]
 
+def _create_generator(view: str, assets: dict, device: str, sampling_temperature: Optional[float], sampling_num_atoms: Optional[int]):
+    method_dir = assets["method_dir"]
+    method_cfg = assets.get("method_cfg", {}) or {}
+    diffusion_cfg = method_cfg.get("diffusion", {}) or {}
+    sampling_cfg = method_cfg.get("sampling", {}) or {}
+    num_steps = int(diffusion_cfg.get("num_steps", 50))
+    use_constraints = _to_bool(sampling_cfg.get("use_constraints", True), True)
+    temperature = sampling_temperature if sampling_temperature is not None else float(sampling_cfg.get("temperature", 1.0))
+
+    if view == "graph":
+        graph_diffusion_mod = _load_module(
+            f"graph_diffusion_{method_dir.name}",
+            method_dir / "src" / "model" / "graph_diffusion.py",
+        )
+        graph_sampler_mod = _load_module(
+            f"graph_sampler_{method_dir.name}",
+            method_dir / "src" / "sampling" / "graph_sampler.py",
+        )
+        graph_cfg = assets.get("graph_config", {}) or {}
+        diffusion_model = graph_diffusion_mod.GraphMaskingDiffusion(
+            backbone=assets["backbone"],
+            num_steps=num_steps,
+            beta_min=float(diffusion_cfg.get("beta_min", 1e-4)),
+            beta_max=float(diffusion_cfg.get("beta_max", 2e-2)),
+            force_clean_t0=_to_bool(diffusion_cfg.get("force_clean_t0", False), False),
+            node_mask_id=assets["tokenizer"].mask_id,
+            edge_mask_id=assets["tokenizer"].edge_vocab.get("MASK", 5),
+            node_pad_id=assets["tokenizer"].pad_id,
+            edge_none_id=assets["tokenizer"].edge_vocab.get("NONE", 0),
+            lambda_node=float(diffusion_cfg.get("lambda_node", 1.0)),
+            lambda_edge=float(diffusion_cfg.get("lambda_edge", 0.5)),
+        )
+        diffusion_model.to(device)
+        diffusion_model.eval()
+        sampler = graph_sampler_mod.GraphSampler(
+            backbone=diffusion_model.backbone,
+            graph_tokenizer=assets["tokenizer"],
+            num_steps=num_steps,
+            device=device,
+            atom_count_distribution=graph_cfg.get("atom_count_distribution"),
+            use_constraints=use_constraints,
+        )
+        return {
+            "view": view,
+            "sampler": sampler,
+            "temperature": float(temperature),
+            "num_atoms": sampling_num_atoms,
+        }
+
+    diffusion_mod = _load_module(
+        f"diffusion_{method_dir.name}",
+        method_dir / "src" / "model" / "diffusion.py",
+    )
+    sampler_mod = _load_module(
+        f"sampler_{method_dir.name}",
+        method_dir / "src" / "sampling" / "sampler.py",
+    )
+    diffusion_model = diffusion_mod.DiscreteMaskingDiffusion(
+        backbone=assets["backbone"],
+        num_steps=num_steps,
+        beta_min=float(diffusion_cfg.get("beta_min", 1e-4)),
+        force_clean_t0=_to_bool(diffusion_cfg.get("force_clean_t0", False), False),
+        mask_token_id=assets["tokenizer"].mask_token_id,
+        pad_token_id=assets["tokenizer"].pad_token_id,
+        bos_token_id=assets["tokenizer"].bos_token_id,
+        eos_token_id=assets["tokenizer"].eos_token_id,
+    )
+    diffusion_model.to(device)
+    diffusion_model.eval()
+    sampler = sampler_mod.ConstrainedSampler(
+        diffusion_model=diffusion_model,
+        tokenizer=assets["tokenizer"],
+        num_steps=num_steps,
+        temperature=float(temperature),
+        use_constraints=use_constraints,
+        device=device,
+    )
+
+    selfies_to_psmiles = None
+    if view == "selfies":
+        selfies_utils_mod = _load_module(
+            f"selfies_utils_{method_dir.name}",
+            method_dir / "src" / "utils" / "selfies_utils.py",
+        )
+        selfies_to_psmiles = getattr(selfies_utils_mod, "selfies_to_psmiles")
+
+    return {
+        "view": view,
+        "sampler": sampler,
+        "seq_length": int(getattr(assets["tokenizer"], "max_length", 256)),
+        "selfies_to_psmiles": selfies_to_psmiles,
+    }
+
+
+def _sample_batch_from_generator(generator: dict, n: int, batch_size: int) -> List[str]:
+    if n <= 0:
+        return []
+    view = generator["view"]
+    sampler = generator["sampler"]
+    if view == "graph":
+        raw = sampler.sample_batch(
+            num_samples=int(n),
+            batch_size=int(batch_size),
+            show_progress=False,
+            temperature=float(generator.get("temperature", 1.0)),
+            num_atoms=generator.get("num_atoms"),
+        )
+        return [str(x).strip() for x in raw if isinstance(x, str) and str(x).strip()]
+
+    _, outputs = sampler.sample_batch(
+        num_samples=int(n),
+        seq_length=int(generator["seq_length"]),
+        batch_size=int(batch_size),
+        show_progress=False,
+    )
+    if view == "selfies":
+        converter = generator.get("selfies_to_psmiles")
+        converted = []
+        for text in outputs:
+            try:
+                psmiles = converter(text) if converter is not None else None
+            except Exception:
+                psmiles = None
+            if psmiles:
+                converted.append(str(psmiles).strip())
+        return [s for s in converted if s]
+
+    return [str(x).strip() for x in outputs if isinstance(x, str) and str(x).strip()]
+
+
+def _resample_candidates_until_target(
+    *,
+    config: dict,
+    args,
+    view: str,
+    assets: dict,
+    device: str,
+    property_model,
+    alignment_model,
+    training_set: set,
+    target_value: float,
+    epsilon: float,
+    target_mode: str,
+) -> dict:
+    f5_cfg = _f5_cfg(config)
+    sampling_target = int(args.sampling_target if args.sampling_target is not None else f5_cfg.get("sampling_target", 100))
+    sampling_num_per_batch = int(args.sampling_num_per_batch if args.sampling_num_per_batch is not None else f5_cfg.get("sampling_num_per_batch", 512))
+    sampling_batch_size = int(args.sampling_batch_size if args.sampling_batch_size is not None else f5_cfg.get("sampling_batch_size", 128))
+    sampling_max_batches = int(args.sampling_max_batches if args.sampling_max_batches is not None else f5_cfg.get("sampling_max_batches", 200))
+
+    sampling_temperature = args.sampling_temperature if args.sampling_temperature is not None else f5_cfg.get("sampling_temperature", None)
+    sampling_num_atoms = args.sampling_num_atoms if args.sampling_num_atoms is not None else f5_cfg.get("sampling_num_atoms", None)
+    if sampling_num_atoms in ("", "none", None):
+        sampling_num_atoms = None
+    elif sampling_num_atoms is not None:
+        sampling_num_atoms = int(sampling_num_atoms)
+    if sampling_temperature in ("", "none", None):
+        sampling_temperature = None
+    elif sampling_temperature is not None:
+        sampling_temperature = float(sampling_temperature)
+
+    target_class = args.target_class if args.target_class is not None else f5_cfg.get("target_class", "")
+    require_validity = _to_bool(f5_cfg.get("require_validity", True), True)
+    require_two_stars = _to_bool(f5_cfg.get("require_two_stars", True), True)
+    require_novel = _to_bool(f5_cfg.get("require_novel", True), True)
+    require_unique = _to_bool(f5_cfg.get("require_unique", True), True)
+    max_sa = args.max_sa if args.max_sa is not None else f5_cfg.get("max_sa", None)
+    if max_sa in ("", "none", None):
+        max_sa = None
+    else:
+        max_sa = float(max_sa)
+
+    if sampling_target <= 0:
+        raise ValueError("sampling_target must be > 0 for candidate_source=resample")
+    if sampling_num_per_batch <= 0 or sampling_batch_size <= 0:
+        raise ValueError("sampling_num_per_batch and sampling_batch_size must both be > 0")
+    if sampling_max_batches <= 0:
+        raise ValueError("sampling_max_batches must be > 0")
+
+    patterns = config.get("polymer_classes") or f5_cfg.get("polymer_class_patterns") or DEFAULT_POLYMER_PATTERNS
+    target_classes = _parse_target_classes(target_class)
+    compiled_patterns = _compile_polymer_patterns(patterns)
+    for class_name in target_classes:
+        if class_name not in compiled_patterns:
+            raise ValueError(f"Unknown target class '{class_name}'. Available classes: {sorted(compiled_patterns.keys())}")
+
+    generator = _create_generator(
+        view=view,
+        assets=assets,
+        device=device,
+        sampling_temperature=sampling_temperature,
+        sampling_num_atoms=sampling_num_atoms,
+    )
+    projection_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    stats = Counter()
+    scored_records: List[dict] = []
+    scored_embeddings: List[np.ndarray] = []
+    structural_valid_smiles: List[str] = []
+    generated_smiles_all: List[str] = []
+    seen_keys: set = set()
+    accepted = 0
+
+    for batch_idx in range(1, sampling_max_batches + 1):
+        if accepted >= sampling_target:
+            break
+
+        batch_smiles = _sample_batch_from_generator(generator, sampling_num_per_batch, sampling_batch_size)
+        stats["n_generated"] += len(batch_smiles)
+        generated_smiles_all.extend(batch_smiles)
+        if not batch_smiles:
+            stats["empty_batches"] += 1
+            continue
+
+        prefilter_smiles: List[str] = []
+        prefilter_meta: List[dict] = []
+
+        for smi in batch_smiles:
+            text = str(smi).strip()
+            if not text:
+                stats["reject_empty"] += 1
+                continue
+
+            is_valid = _check_validity(text)
+            is_two_star = _count_stars(text) == 2
+            if is_valid:
+                stats["n_valid_any"] += 1
+            if is_valid and is_two_star:
+                stats["n_structural_valid"] += 1
+                structural_valid_smiles.append(text)
+
+            if require_validity and not is_valid:
+                stats["reject_invalid"] += 1
+                continue
+            if require_two_stars and not is_two_star:
+                stats["reject_two_star"] += 1
+                continue
+
+            canonical_key = _canonicalize_smiles(text)
+            if require_unique and canonical_key in seen_keys:
+                stats["reject_duplicate"] += 1
+                continue
+
+            is_novel = text not in training_set
+            if require_novel and not is_novel:
+                stats["reject_non_novel"] += 1
+                continue
+
+            class_ok, matched_class = _match_polymer_class(text, target_classes, compiled_patterns)
+            if target_classes and not class_ok:
+                stats["reject_class"] += 1
+                continue
+
+            sa_value = None
+            if max_sa is not None:
+                sa_value = _compute_sa_score(text)
+                if sa_value is None or sa_value >= max_sa:
+                    stats["reject_sa"] += 1
+                    continue
+
+            prefilter_smiles.append(text)
+            prefilter_meta.append(
+                {
+                    "smiles": text,
+                    "canonical_smiles": canonical_key,
+                    "is_valid": bool(is_valid),
+                    "is_two_star": bool(is_two_star),
+                    "is_novel": bool(is_novel),
+                    "class_match": bool(class_ok) if target_classes else True,
+                    "matched_class": matched_class,
+                    "sa_score": sa_value,
+                    "batch_idx": batch_idx,
+                }
+            )
+            if require_unique:
+                seen_keys.add(canonical_key)
+
+        if not prefilter_smiles:
+            print(
+                f"[F5 resample] batch={batch_idx} generated={len(batch_smiles)} prefilter=0 accepted={accepted}/{sampling_target}"
+            )
+            continue
+
+        embeddings, kept_indices = _embed_candidates(
+            view=view,
+            smiles_list=prefilter_smiles,
+            assets=assets,
+            device=device,
+        )
+        stats["n_prefilter"] += len(prefilter_smiles)
+        if len(kept_indices) < len(prefilter_smiles):
+            stats["reject_embed"] += len(prefilter_smiles) - len(kept_indices)
+
+        if embeddings.size and alignment_model is not None:
+            embeddings = _project_embeddings(alignment_model, view, embeddings, device=projection_device)
+
+        if embeddings.size == 0:
+            print(
+                f"[F5 resample] batch={batch_idx} generated={len(batch_smiles)} prefilter={len(prefilter_smiles)} scored=0 accepted={accepted}/{sampling_target}"
+            )
+            continue
+
+        kept_meta = [prefilter_meta[idx] for idx in kept_indices]
+        preds = property_model.predict(embeddings)
+        preds = np.asarray(preds, dtype=np.float32).reshape(-1)
+        hits = _compute_hits(preds, target_value, epsilon, target_mode)
+        stats["n_scored"] += len(kept_meta)
+
+        for row_idx, meta in enumerate(kept_meta):
+            pred_value = float(preds[row_idx])
+            hit = bool(hits[row_idx])
+            record = {
+                **meta,
+                "prediction": pred_value,
+                "abs_error": abs(pred_value - target_value),
+                "property_hit": hit,
+                "accepted": False,
+            }
+            if hit and accepted < sampling_target:
+                record["accepted"] = True
+                accepted += 1
+                stats["n_hits"] += 1
+            scored_records.append(record)
+            scored_embeddings.append(embeddings[row_idx].astype(np.float32, copy=False))
+            if accepted >= sampling_target:
+                break
+
+        print(
+            f"[F5 resample] batch={batch_idx} generated={len(batch_smiles)} prefilter={len(prefilter_smiles)} "
+            f"scored={len(kept_meta)} accepted={accepted}/{sampling_target}"
+        )
+        if accepted >= sampling_target:
+            break
+
+    scored_df = pd.DataFrame(scored_records)
+    if scored_df.empty:
+        scored_df = pd.DataFrame(columns=["smiles", "prediction", "abs_error", "property_hit", "accepted"])
+    accepted_df = scored_df[scored_df["accepted"] == True].head(sampling_target).copy()  # noqa: E712
+
+    scored_embeddings_np = None
+    if scored_embeddings:
+        scored_embeddings_np = np.stack(scored_embeddings, axis=0)
+
+    result = {
+        "candidate_source": "resample",
+        "generated_smiles": generated_smiles_all,
+        "structurally_valid_smiles": structural_valid_smiles,
+        "scored_df": scored_df,
+        "accepted_df": accepted_df,
+        "scored_embeddings": scored_embeddings_np,
+        "sampling_target": sampling_target,
+        "sampling_num_per_batch": sampling_num_per_batch,
+        "sampling_batch_size": sampling_batch_size,
+        "sampling_max_batches": sampling_max_batches,
+        "target_classes": target_classes,
+        "require_validity": require_validity,
+        "require_two_stars": require_two_stars,
+        "require_novel": require_novel,
+        "require_unique": require_unique,
+        "max_sa": max_sa,
+        "stats": dict(stats),
+        "completed": len(accepted_df) >= sampling_target,
+    }
+    return result
+
+
+def main(args):
+    config = load_config(args.config)
+    f5_cfg = _f5_cfg(config)
+    results_dir = _resolve_path(config["paths"]["results_dir"])
+    results_dir.mkdir(parents=True, exist_ok=True)
+    step_dirs = ensure_step_dirs(results_dir, "step5_foundation_inverse")
+    save_config(config, results_dir / "config_used.yaml")
+    save_config(config, step_dirs["files_dir"] / "config_used.yaml")
+
+    candidate_source = _resolve_candidate_source(args, config)
     encoder_view = _select_encoder_view(config, args.encoder_view)
     encoder_cfg = config.get(VIEW_SPECS[encoder_view]["encoder_key"], {})
     device = encoder_cfg.get("device", "auto")
@@ -660,25 +1214,14 @@ def main(args):
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     assets = _load_view_assets(config=config, view=encoder_view, device=device)
-
-    t0 = time.time()
-    embeddings, kept_indices = _embed_candidates(
-        view=encoder_view,
-        smiles_list=structurally_valid_smiles,
-        assets=assets,
-        device=device,
-    )
-    scored_smiles = [structurally_valid_smiles[i] for i in kept_indices]
-    embed_time = time.time() - t0
+    view_hidden_dim = int(getattr(assets["backbone"], "hidden_size", 0)) or int(config.get("model", {}).get("projection_dim", 256))
 
     alignment_model = None
     if args.use_alignment:
-        view_dims = {encoder_view: embeddings.shape[1] if embeddings.size else assets["backbone"].hidden_size}
+        view_dims = {encoder_view: view_hidden_dim}
         alignment_model = _load_alignment_model(results_dir, view_dims, config, args.alignment_checkpoint)
         if alignment_model is None:
             raise FileNotFoundError("Alignment checkpoint not found for --use_alignment")
-        device_proj = "cuda" if torch.cuda.is_available() else "cpu"
-        embeddings = _project_embeddings(alignment_model, encoder_view, embeddings, device=device_proj)
 
     model_path = args.property_model_path
     if model_path is None:
@@ -690,39 +1233,113 @@ def main(args):
         raise FileNotFoundError(f"Property model not found: {model_path}")
 
     model = _load_property_model(Path(model_path))
-    preds = model.predict(embeddings) if len(scored_smiles) else np.array([], dtype=np.float32)
-    preds = np.asarray(preds, dtype=np.float32).reshape(-1)
-
     target_value = float(args.target)
     epsilon = float(args.epsilon)
-    hits = np.abs(preds - target_value) <= epsilon
+    target_mode = str(args.target_mode).strip().lower()
+
+    train_smiles_path = _resolve_path(config["paths"]["polymer_file"])
+    training_set = _load_training_smiles(train_smiles_path)
+
+    t0 = time.time()
+    source_meta = {"candidate_source": candidate_source}
+    if candidate_source == "csv":
+        csv_path = args.candidates_csv if args.candidates_csv else f5_cfg.get("candidates_csv", "")
+        smiles_col = args.smiles_column if args.smiles_column is not None else f5_cfg.get("smiles_column", None)
+        smiles_list, smiles_col = _load_candidates_csv(csv_path, smiles_col)
+        structural_validity_mask = [_check_validity(smi) and _count_stars(smi) == 2 for smi in smiles_list]
+        structurally_valid_smiles = [s for s, keep in zip(smiles_list, structural_validity_mask) if keep]
+
+        embeddings, kept_indices = _embed_candidates(
+            view=encoder_view,
+            smiles_list=structurally_valid_smiles,
+            assets=assets,
+            device=device,
+        )
+        scored_smiles = [structurally_valid_smiles[i] for i in kept_indices]
+
+        if embeddings.size and alignment_model is not None:
+            projection_device = "cuda" if torch.cuda.is_available() else "cpu"
+            embeddings = _project_embeddings(alignment_model, encoder_view, embeddings, device=projection_device)
+
+        preds = model.predict(embeddings) if len(scored_smiles) else np.array([], dtype=np.float32)
+        preds = np.asarray(preds, dtype=np.float32).reshape(-1)
+        hits = _compute_hits(preds, target_value, epsilon, target_mode) if len(preds) else np.array([], dtype=bool)
+        scored_df = pd.DataFrame(
+            {
+                "smiles": scored_smiles,
+                "prediction": preds,
+                "abs_error": np.abs(preds - target_value) if len(preds) else [],
+                "property_hit": hits,
+                "accepted": hits,
+            }
+        )
+        scored_embeddings = embeddings if len(scored_smiles) else None
+        source_meta.update({"candidates_csv": str(_resolve_path(csv_path)), "smiles_column": smiles_col})
+    else:
+        sampled = _resample_candidates_until_target(
+            config=config,
+            args=args,
+            view=encoder_view,
+            assets=assets,
+            device=device,
+            property_model=model,
+            alignment_model=alignment_model,
+            training_set=training_set,
+            target_value=target_value,
+            epsilon=epsilon,
+            target_mode=target_mode,
+        )
+        smiles_list = sampled["generated_smiles"]
+        structurally_valid_smiles = sampled["structurally_valid_smiles"]
+        scored_df = sampled["scored_df"]
+        scored_embeddings = sampled["scored_embeddings"]
+        source_meta.update(
+            {
+                "sampling_target": int(sampled["sampling_target"]),
+                "sampling_num_per_batch": int(sampled["sampling_num_per_batch"]),
+                "sampling_batch_size": int(sampled["sampling_batch_size"]),
+                "sampling_max_batches": int(sampled["sampling_max_batches"]),
+                "target_classes": sampled["target_classes"],
+                "require_validity": bool(sampled["require_validity"]),
+                "require_two_stars": bool(sampled["require_two_stars"]),
+                "require_novel": bool(sampled["require_novel"]),
+                "require_unique": bool(sampled["require_unique"]),
+                "max_sa": sampled["max_sa"],
+                "stats": sampled["stats"],
+                "sampling_completed": bool(sampled["completed"]),
+            }
+        )
+
+    elapsed_sec = time.time() - t0
+    if scored_df.empty:
+        scored_df = pd.DataFrame(columns=["smiles", "prediction", "abs_error", "property_hit", "accepted"])
+
+    scored_smiles = scored_df["smiles"].astype(str).tolist() if "smiles" in scored_df.columns else []
+    preds = scored_df["prediction"].to_numpy(dtype=np.float32) if "prediction" in scored_df.columns else np.array([], dtype=np.float32)
+    hits = scored_df["property_hit"].to_numpy(dtype=bool) if "property_hit" in scored_df.columns else np.array([], dtype=bool)
+    accepted_mask = scored_df["accepted"].to_numpy(dtype=bool) if "accepted" in scored_df.columns else hits
 
     n_generated = len(smiles_list)
     n_valid = len(structurally_valid_smiles)
     n_scored = len(scored_smiles)
-    n_hits = int(hits.sum()) if n_scored else 0
+    n_hits = int(np.sum(accepted_mask)) if n_scored else 0
     success_rate = n_hits / n_valid if n_valid else 0.0
 
     validity = n_valid / n_generated if n_generated else 0.0
     uniqueness = len(set(structurally_valid_smiles)) / n_valid if n_valid else 0.0
-
-    train_smiles_path = _resolve_path(config["paths"]["polymer_file"])
-    training_set = _load_training_smiles(train_smiles_path)
-    novelty = 0.0
-    if n_valid:
-        novelty = sum(1 for s in structurally_valid_smiles if s not in training_set) / n_valid
+    novelty = sum(1 for s in structurally_valid_smiles if s not in training_set) / n_valid if n_valid else 0.0
 
     d2_distance_scores = None
     rerank_metrics = {
         "rerank_applied": False,
     }
 
-    if args.rerank_strategy == "d2_distance":
+    if args.rerank_strategy == "d2_distance" and scored_embeddings is not None and len(scored_smiles):
         d2_embeddings = _load_d2_embeddings(results_dir, encoder_view)
         if args.use_alignment and alignment_model is not None:
             device_proj = "cuda" if torch.cuda.is_available() else "cpu"
             d2_embeddings = _project_embeddings(alignment_model, encoder_view, d2_embeddings, device=device_proj)
-        distances = knn_distances(embeddings, d2_embeddings, k=args.ood_k)
+        distances = knn_distances(scored_embeddings, d2_embeddings, k=args.ood_k)
         d2_distance_scores = distances.mean(axis=1)
         order = np.argsort(d2_distance_scores)
         top_k = min(int(args.rerank_top_k), len(order))
@@ -744,9 +1361,12 @@ def main(args):
         "model_size": assets["model_size"],
         "property": args.property,
         "target_value": target_value,
+        "target_mode": target_mode,
         "epsilon": epsilon,
+        "candidate_source": candidate_source,
         "n_generated": n_generated,
         "n_valid": n_valid,
+        "n_scored": n_scored,
         "n_hits": n_hits,
         "success_rate": round(success_rate, 4),
         "validity": round(validity, 4),
@@ -755,37 +1375,51 @@ def main(args):
         "novelty": round(novelty, 4),
         "avg_diversity": None,
         **_achievement_rates(preds, target_value),
-        "sampling_time_sec": round(embed_time, 2),
-        "valid_per_compute": round(n_valid / max(embed_time, 1e-9), 4) if n_valid else 0.0,
+        "sampling_time_sec": round(elapsed_sec, 2),
+        "valid_per_compute": round(n_valid / max(elapsed_sec, 1e-9), 4) if n_valid else 0.0,
+        "hits_per_compute": round(n_hits / max(elapsed_sec, 1e-9), 4) if n_hits else 0.0,
         **rerank_metrics,
     }
 
     if rerank_metrics.get("rerank_applied"):
-        metrics_row["valid_per_compute_rerank"] = metrics_row["valid_per_compute"]
+        metrics_row["valid_per_compute_rerank"] = round(rerank_metrics.get("rerank_hits", 0) / max(elapsed_sec, 1e-9), 4)
     else:
         metrics_row["rerank_strategy"] = args.rerank_strategy
 
-    pd.DataFrame([metrics_row]).to_csv(results_dir / "metrics_inverse.csv", index=False)
+    save_csv(
+        pd.DataFrame([metrics_row]),
+        step_dirs["metrics_dir"] / "metrics_inverse.csv",
+        legacy_paths=[results_dir / "metrics_inverse.csv"],
+        index=False,
+    )
 
-    out_dir = results_dir / "step5_foundation_inverse"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = step_dirs["step_dir"]
+    files_dir = step_dirs["files_dir"]
 
-    valid_rows = pd.DataFrame({
-        "smiles": scored_smiles,
-        "prediction": preds,
-        "abs_error": np.abs(preds - target_value) if len(preds) else [],
-        "hit": hits,
-        "d2_distance": d2_distance_scores if d2_distance_scores is not None else None,
-    })
-    valid_rows.to_csv(out_dir / "candidate_scores.csv", index=False)
+    if d2_distance_scores is not None and len(scored_df) == len(d2_distance_scores):
+        scored_df = scored_df.copy()
+        scored_df["d2_distance"] = d2_distance_scores
+    save_csv(
+        scored_df,
+        files_dir / "candidate_scores.csv",
+        legacy_paths=[out_dir / "candidate_scores.csv"],
+        index=False,
+    )
+    accepted_df = scored_df[scored_df["accepted"] == True].copy() if "accepted" in scored_df.columns else scored_df[hits].copy()  # noqa: E712
+    save_csv(
+        accepted_df,
+        files_dir / "accepted_candidates.csv",
+        legacy_paths=[out_dir / "accepted_candidates.csv"],
+        index=False,
+    )
 
-    with open(out_dir / "run_meta.json", "w") as f:
-        json.dump({
-            "candidates_csv": str(candidates_path),
-            "smiles_column": smiles_col,
+    save_json(
+        {
+            **source_meta,
             "encoder_view": encoder_view,
             "property": args.property,
             "target_value": target_value,
+            "target_mode": target_mode,
             "epsilon": epsilon,
             "rerank_strategy": args.rerank_strategy,
             "rerank_top_k": int(args.rerank_top_k),
@@ -793,7 +1427,11 @@ def main(args):
             "n_generated": int(n_generated),
             "n_structurally_valid": int(n_valid),
             "n_scored": int(n_scored),
-        }, f, indent=2)
+            "n_hits": int(n_hits),
+        },
+        files_dir / "run_meta.json",
+        legacy_paths=[out_dir / "run_meta.json"],
+    )
 
     print(f"Saved metrics_inverse.csv to {results_dir}")
 
@@ -802,11 +1440,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--encoder_view", type=str, default=None, choices=list(SUPPORTED_VIEWS))
-    parser.add_argument("--candidates_csv", type=str, required=True)
+    parser.add_argument("--candidate_source", type=str, default=None, choices=["csv", "resample"])
+    parser.add_argument("--candidates_csv", type=str, default=None)
     parser.add_argument("--smiles_column", type=str, default=None)
     parser.add_argument("--property", type=str, required=True)
     parser.add_argument("--target", type=float, required=True)
+    parser.add_argument("--target_mode", type=str, default="window", choices=["window", "ge", "le"])
     parser.add_argument("--epsilon", type=float, default=30.0)
+    parser.add_argument("--sampling_target", type=int, default=None)
+    parser.add_argument("--sampling_num_per_batch", type=int, default=None)
+    parser.add_argument("--sampling_batch_size", type=int, default=None)
+    parser.add_argument("--sampling_max_batches", type=int, default=None)
+    parser.add_argument("--sampling_temperature", type=float, default=None)
+    parser.add_argument("--sampling_num_atoms", type=int, default=None)
+    parser.add_argument("--target_class", type=str, default=None)
+    parser.add_argument("--max_sa", type=float, default=None)
     parser.add_argument("--property_model_path", type=str, default=None)
     parser.add_argument("--rerank_strategy", type=str, default="d2_distance")
     parser.add_argument("--rerank_top_k", type=int, default=100)
