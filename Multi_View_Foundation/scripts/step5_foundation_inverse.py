@@ -219,7 +219,57 @@ def _embed_smiles(smiles_list, tokenizer, backbone, device: str, batch_size: int
     return np.concatenate(embeddings, axis=0)
 
 
+class _PropertyMLP(torch.nn.Module):
+    def __init__(self, input_dim: int, num_layers: int, neurons: int, dropout: float):
+        super().__init__()
+        layers = []
+        current_dim = input_dim
+        for _ in range(max(int(num_layers), 1)):
+            layers.append(torch.nn.Linear(current_dim, int(neurons)))
+            layers.append(torch.nn.ReLU())
+            if float(dropout) > 0:
+                layers.append(torch.nn.Dropout(float(dropout)))
+            current_dim = int(neurons)
+        layers.append(torch.nn.Linear(current_dim, 1))
+        self.net = torch.nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x).squeeze(-1)
+
+
+class _TorchPropertyPredictor:
+    def __init__(self, checkpoint: dict):
+        if checkpoint.get("format") != "mvf_torch_mlp":
+            raise ValueError("Unsupported torch property model format.")
+        self.mean = np.asarray(checkpoint["scaler_mean"], dtype=np.float32)
+        self.scale = np.asarray(checkpoint["scaler_scale"], dtype=np.float32)
+        self.scale = np.where(np.abs(self.scale) < 1e-12, 1.0, self.scale).astype(np.float32, copy=False)
+        self.model = _PropertyMLP(
+            input_dim=int(checkpoint["input_dim"]),
+            num_layers=int(checkpoint["num_layers"]),
+            neurons=int(checkpoint["neurons"]),
+            dropout=float(checkpoint.get("dropout", 0.0)),
+        )
+        self.model.load_state_dict(checkpoint["state_dict"])
+        self.model.eval()
+
+    def predict(self, features: np.ndarray) -> np.ndarray:
+        if features is None or len(features) == 0:
+            return np.zeros((0,), dtype=np.float32)
+        x = np.asarray(features, dtype=np.float32)
+        x = (x - self.mean) / self.scale
+        with torch.no_grad():
+            preds = self.model(torch.tensor(x, dtype=torch.float32)).cpu().numpy()
+        return preds
+
+
 def _load_property_model(model_path: Path):
+    if model_path.suffix in {".pt", ".pth"}:
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+        if isinstance(checkpoint, dict) and checkpoint.get("format") == "mvf_torch_mlp":
+            return _TorchPropertyPredictor(checkpoint)
+        raise ValueError(f"Unsupported torch property model checkpoint: {model_path}")
+
     if joblib is not None:
         return joblib.load(model_path)
     import pickle
@@ -328,7 +378,7 @@ def main(args):
 
     model_path = args.property_model_path
     if model_path is None:
-        model_path = results_dir / "step3_property" / f"{args.property}_ridge.pkl"
+        model_path = results_dir / "step3_property" / f"{args.property}_mlp.pt"
     else:
         model_path = _resolve_path(model_path)
 

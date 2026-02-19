@@ -57,6 +57,13 @@ alignment_e2e:
   datasets: ["d1"]
   max_samples: null
 
+pipeline:
+  step1_alignment_mode: "frozen"  # none|frozen|e2e|both
+  step2_use_alignment: true
+  step3_use_alignment: true
+  step4_use_alignment: true
+  step5_use_alignment: true
+
 evaluation:
   recall_ks: [1, 5, 10]
   max_samples_per_dataset: 5000
@@ -71,9 +78,37 @@ property:
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
-  ridge_alpha: 1.0
+  model_type: "mlp"
   views: null
-  use_alignment: false
+  use_alignment: true
+  hyperparameter_tuning:
+    n_trials: 100
+    enabled: true
+    tuning_epochs: 35
+    tuning_patience: 10
+    final_training_epochs: 200
+    metric: "r2"
+    search_space:
+      num_layers: [3, 4, 5]
+      neurons: [64, 128, 256, 512, 1024]
+      learning_rate: [4.0e-4, 6.0e-4, 8.0e-4, 1.0e-3]
+      dropout: [0.1, 0.2, 0.3]
+      batch_size: [8, 16, 32, 64, 128]
+
+foundation_inverse:
+  enabled: false
+  candidates_csv: ""
+  smiles_column: ""
+  property: "Tg"
+  target: 300.0
+  epsilon: 30.0
+  property_model_path: ""
+  rerank_strategy: "d2_distance"
+  rerank_top_k: 100
+  ood_k: 5
+  encoder_view: ""
+  use_alignment: true
+  alignment_checkpoint: ""
 
 smiles_encoder:
   method_dir: "../Bi_Diffusion_SMILES"

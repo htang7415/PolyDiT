@@ -7,20 +7,15 @@ from pathlib import Path
 import sys
 import importlib.util
 import json
+import copy
 from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-try:
-    import joblib
-except Exception:  # pragma: no cover
-    joblib = None
 
 try:
     from sklearn.metrics import root_mean_squared_error
@@ -387,6 +382,359 @@ def _compute_metrics(y_true, y_pred) -> dict:
     }
 
 
+def _normalize_numeric_options(options, default: List[float], cast=float) -> List:
+    if options is None:
+        options = default
+    if isinstance(options, (int, float, str)):
+        options = [options]
+    normalized = []
+    for option in options:
+        try:
+            normalized.append(cast(option))
+        except Exception:
+            continue
+    return normalized or [cast(v) for v in default]
+
+
+def _stable_seed(seed: int, tag: str) -> int:
+    return int(seed + sum(ord(ch) for ch in tag))
+
+
+class _PropertyMLP(torch.nn.Module):
+    def __init__(self, input_dim: int, num_layers: int, neurons: int, dropout: float):
+        super().__init__()
+        layers = []
+        current_dim = input_dim
+        for _ in range(max(int(num_layers), 1)):
+            layers.append(torch.nn.Linear(current_dim, int(neurons)))
+            layers.append(torch.nn.ReLU())
+            if float(dropout) > 0:
+                layers.append(torch.nn.Dropout(float(dropout)))
+            current_dim = int(neurons)
+        layers.append(torch.nn.Linear(current_dim, 1))
+        self.net = torch.nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x).squeeze(-1)
+
+
+def _build_tuning_config(hyper_cfg: dict, force_enable: Optional[bool] = None) -> dict:
+    hyper_cfg = hyper_cfg or {}
+    search = hyper_cfg.get("search_space", {})
+
+    enabled = bool(hyper_cfg.get("enabled", True)) if force_enable is None else bool(force_enable)
+    metric = str(hyper_cfg.get("metric", "r2")).strip().lower()
+    if metric not in {"r2", "rmse", "mae"}:
+        raise ValueError("hyperparameter_tuning.metric must be one of: r2, rmse, mae")
+
+    cfg = {
+        "enabled": enabled,
+        "n_trials": max(int(hyper_cfg.get("n_trials", 100)), 1),
+        "tuning_epochs": max(int(hyper_cfg.get("tuning_epochs", 35)), 1),
+        "tuning_patience": max(int(hyper_cfg.get("tuning_patience", 10)), 1),
+        "metric": metric,
+        "search_space": {
+            "num_layers": _normalize_numeric_options(search.get("num_layers"), [3, 4, 5], cast=int),
+            "neurons": _normalize_numeric_options(search.get("neurons"), [64, 128, 256, 512, 1024], cast=int),
+            "learning_rate": _normalize_numeric_options(search.get("learning_rate"), [4e-4, 6e-4, 8e-4, 1e-3], cast=float),
+            "dropout": _normalize_numeric_options(search.get("dropout"), [0.1, 0.2, 0.3], cast=float),
+            "batch_size": _normalize_numeric_options(search.get("batch_size"), [8, 16, 32, 64, 128], cast=int),
+        },
+    }
+    return cfg
+
+
+def _objective_value(metrics: dict, metric: str) -> tuple[float, bool]:
+    if metric == "r2":
+        return float(metrics["r2"]), True
+    if metric == "rmse":
+        return float(metrics["rmse"]), False
+    if metric == "mae":
+        return float(metrics["mae"]), False
+    raise ValueError(f"Unsupported tuning metric: {metric}")
+
+
+def _predict_torch_model(
+    model: torch.nn.Module,
+    scaler: StandardScaler,
+    features: np.ndarray,
+    device: str,
+    batch_size: int = 2048,
+) -> np.ndarray:
+    if features.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float32)
+    transformed = scaler.transform(features).astype(np.float32, copy=False)
+    model = model.to(device)
+    model.eval()
+    preds = []
+    with torch.no_grad():
+        for start in range(0, transformed.shape[0], batch_size):
+            batch = torch.tensor(transformed[start:start + batch_size], device=device, dtype=torch.float32)
+            preds.append(model(batch).detach().cpu().numpy())
+    return np.concatenate(preds, axis=0)
+
+
+def _train_one_trial(
+    train_X: np.ndarray,
+    train_y: np.ndarray,
+    val_X: np.ndarray,
+    val_y: np.ndarray,
+    trial_params: dict,
+    tuning_epochs: int,
+    tuning_patience: int,
+    objective_metric: str,
+    trial_seed: int,
+    device: str,
+) -> tuple[torch.nn.Module, StandardScaler, dict, int]:
+    scaler = StandardScaler()
+    train_scaled = scaler.fit_transform(train_X).astype(np.float32, copy=False)
+    val_scaled = scaler.transform(val_X).astype(np.float32, copy=False) if val_X.shape[0] > 0 else np.zeros((0, train_scaled.shape[1]), dtype=np.float32)
+
+    model = _PropertyMLP(
+        input_dim=int(train_scaled.shape[1]),
+        num_layers=int(trial_params["num_layers"]),
+        neurons=int(trial_params["neurons"]),
+        dropout=float(trial_params["dropout"]),
+    ).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(trial_params["learning_rate"]))
+    criterion = torch.nn.MSELoss()
+
+    x_train = torch.tensor(train_scaled, dtype=torch.float32)
+    y_train = torch.tensor(train_y.astype(np.float32, copy=False), dtype=torch.float32)
+
+    batch_size = max(1, int(trial_params["batch_size"]))
+    idx = np.arange(train_scaled.shape[0])
+    rng = np.random.default_rng(trial_seed)
+
+    use_val = val_scaled.shape[0] > 0
+    score_split = "val" if use_val else "train"
+
+    best_state = None
+    best_metrics = None
+    best_score = -float("inf") if objective_metric == "r2" else float("inf")
+    patience_counter = 0
+    best_epoch = 0
+    trained_epochs = 0
+
+    for epoch in range(1, int(tuning_epochs) + 1):
+        trained_epochs = epoch
+        rng.shuffle(idx)
+        model.train()
+        for start in range(0, len(idx), batch_size):
+            batch_idx = idx[start:start + batch_size]
+            xb = x_train[batch_idx].to(device)
+            yb = y_train[batch_idx].to(device)
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss = criterion(pred, yb)
+            loss.backward()
+            optimizer.step()
+
+        model.eval()
+        if use_val:
+            y_pred = _predict_torch_model(model, scaler, val_X, device=device)
+            y_true = val_y
+        else:
+            y_pred = _predict_torch_model(model, scaler, train_X, device=device)
+            y_true = train_y
+
+        metrics = _compute_metrics(y_true, y_pred)
+        score, maximize_metric = _objective_value(metrics, objective_metric)
+        improved = score > best_score if maximize_metric else score < best_score
+
+        if improved:
+            best_score = score
+            best_metrics = metrics
+            best_state = copy.deepcopy(model.state_dict())
+            patience_counter = 0
+            best_epoch = epoch
+        else:
+            patience_counter += 1
+            if patience_counter >= int(tuning_patience):
+                break
+
+    if best_state is None:
+        best_state = copy.deepcopy(model.state_dict())
+        best_metrics = _compute_metrics(train_y, _predict_torch_model(model, scaler, train_X, device=device))
+        best_epoch = int(tuning_epochs)
+
+    model.load_state_dict(best_state)
+    return model, scaler, {
+        "objective_split": score_split,
+        "objective_metric": objective_metric,
+        "best_epoch": int(best_epoch),
+        "rmse": float(best_metrics["rmse"]),
+        "mae": float(best_metrics["mae"]),
+        "r2": float(best_metrics["r2"]),
+    }, int(trained_epochs)
+
+
+def _fit_mlp_with_hpo(
+    train_X: np.ndarray,
+    train_y: np.ndarray,
+    val_X: np.ndarray,
+    val_y: np.ndarray,
+    hyper_cfg: dict,
+    seed: int,
+    device: str,
+    force_enable: Optional[bool] = None,
+) -> tuple[dict, dict, pd.DataFrame]:
+    if train_X.shape[0] == 0:
+        raise ValueError("Cannot train MLP: empty training set.")
+
+    cfg = _build_tuning_config(hyper_cfg, force_enable=force_enable)
+    enabled = bool(cfg["enabled"])
+    n_trials = int(cfg["n_trials"]) if enabled else 1
+    search = cfg["search_space"]
+    objective_metric = str(cfg["metric"])
+    final_training_epochs = max(int((hyper_cfg or {}).get("final_training_epochs", 200)), 1)
+    final_training_patience = max(
+        int((hyper_cfg or {}).get("final_training_patience", final_training_epochs + 1)),
+        1,
+    )
+    final_train_use_val = bool((hyper_cfg or {}).get("final_train_use_val", False))
+
+    rng = np.random.default_rng(seed)
+    best_bundle = None
+    best_summary = None
+    trial_rows = []
+
+    for trial in range(1, n_trials + 1):
+        if enabled:
+            params = {
+                "num_layers": int(search["num_layers"][int(rng.integers(len(search["num_layers"])))]),
+                "neurons": int(search["neurons"][int(rng.integers(len(search["neurons"])))]),
+                "learning_rate": float(search["learning_rate"][int(rng.integers(len(search["learning_rate"])))]),
+                "dropout": float(search["dropout"][int(rng.integers(len(search["dropout"])))]),
+                "batch_size": int(search["batch_size"][int(rng.integers(len(search["batch_size"])))]),
+            }
+        else:
+            params = {
+                "num_layers": int(search["num_layers"][0]),
+                "neurons": int(search["neurons"][0]),
+                "learning_rate": float(search["learning_rate"][0]),
+                "dropout": float(search["dropout"][0]),
+                "batch_size": int(search["batch_size"][0]),
+            }
+
+        model, scaler, trial_result, epochs_trained = _train_one_trial(
+            train_X=train_X,
+            train_y=train_y,
+            val_X=val_X,
+            val_y=val_y,
+            trial_params=params,
+            tuning_epochs=int(cfg["tuning_epochs"]),
+            tuning_patience=int(cfg["tuning_patience"]),
+            objective_metric=objective_metric,
+            trial_seed=seed + trial,
+            device=device,
+        )
+
+        row = {
+            "trial": trial,
+            "tuning_enabled": enabled,
+            "objective_split": trial_result["objective_split"],
+            "objective_metric": objective_metric,
+            "objective_value": float(trial_result[objective_metric]),
+            "val_rmse": float(trial_result["rmse"]),
+            "val_mae": float(trial_result["mae"]),
+            "val_r2": float(trial_result["r2"]),
+            "best_epoch": int(trial_result["best_epoch"]),
+            "epochs_trained": int(epochs_trained),
+            "activation": "relu",
+            **params,
+        }
+        trial_rows.append(row)
+
+        if best_summary is None:
+            is_better = True
+        elif objective_metric == "r2":
+            is_better = row["objective_value"] > best_summary["objective_value"]
+        else:
+            is_better = row["objective_value"] < best_summary["objective_value"]
+
+        if is_better:
+            best_bundle = {
+                "model": model,
+                "scaler": scaler,
+                "params": params,
+            }
+            best_summary = row
+
+    if best_bundle is None or best_summary is None:
+        raise RuntimeError("MLP HPO failed to produce a valid model.")
+
+    if final_train_use_val and val_X.shape[0] > 0:
+        final_train_X = np.concatenate([train_X, val_X], axis=0)
+        final_train_y = np.concatenate([train_y, val_y], axis=0)
+        final_val_X = np.zeros((0, train_X.shape[1]), dtype=np.float32)
+        final_val_y = np.zeros((0,), dtype=np.float32)
+    else:
+        final_train_X = train_X
+        final_train_y = train_y
+        final_val_X = val_X
+        final_val_y = val_y
+
+    final_model, final_scaler, final_result, final_epochs_ran = _train_one_trial(
+        train_X=final_train_X,
+        train_y=final_train_y,
+        val_X=final_val_X,
+        val_y=final_val_y,
+        trial_params=best_bundle["params"],
+        tuning_epochs=final_training_epochs,
+        tuning_patience=final_training_patience,
+        objective_metric=objective_metric,
+        trial_seed=seed + 1000003,
+        device=device,
+    )
+    final_bundle = {
+        "model": final_model,
+        "scaler": final_scaler,
+        "params": best_bundle["params"],
+    }
+
+    hpo_best = {
+        "tuning_enabled": enabled,
+        "objective_metric": objective_metric,
+        "objective_value": float(best_summary["objective_value"]),
+        "best_rmse_hpo": float(best_summary["val_rmse"]),
+        "best_mae_hpo": float(best_summary["val_mae"]),
+        "best_r2_hpo": float(best_summary["val_r2"]),
+        "best_epoch_hpo": int(best_summary["best_epoch"]),
+        "final_training_epochs": int(final_training_epochs),
+        "final_training_patience": int(final_training_patience),
+        "final_train_use_val": bool(final_train_use_val),
+        "final_objective_split": final_result["objective_split"],
+        "final_best_epoch": int(final_result["best_epoch"]),
+        "final_rmse": float(final_result["rmse"]),
+        "final_mae": float(final_result["mae"]),
+        "final_r2": float(final_result["r2"]),
+        "final_epochs_ran": int(final_epochs_ran),
+        "activation": "relu",
+        **final_bundle["params"],
+    }
+
+    return final_bundle, hpo_best, pd.DataFrame(trial_rows)
+
+
+def _save_mlp_bundle(model_path: Path, bundle: dict) -> None:
+    model = bundle["model"].to("cpu")
+    scaler: StandardScaler = bundle["scaler"]
+    params = bundle["params"]
+    checkpoint = {
+        "format": "mvf_torch_mlp",
+        "input_dim": int(model.net[0].in_features),
+        "num_layers": int(params["num_layers"]),
+        "neurons": int(params["neurons"]),
+        "dropout": float(params["dropout"]),
+        "activation": "relu",
+        "state_dict": model.state_dict(),
+        "scaler_mean": scaler.mean_.astype(np.float32),
+        "scaler_scale": scaler.scale_.astype(np.float32),
+    }
+    torch.save(checkpoint, model_path)
+
+
 def _project_embeddings(model: MultiViewModel, view: str, embeddings: np.ndarray, device: str, batch_size: int = 2048) -> np.ndarray:
     if embeddings.size == 0:
         return embeddings
@@ -409,6 +757,9 @@ def main(args):
 
     property_dir = _resolve_path(config["paths"]["property_dir"])
     prop_cfg = config.get("property", {})
+    model_type = str(prop_cfg.get("model_type", "mlp")).strip().lower()
+    if model_type != "mlp":
+        raise ValueError("Only property.model_type='mlp' is supported.")
     file_list = prop_cfg.get("files")
     property_files = _collect_property_files(property_dir, file_list)
     if not property_files:
@@ -500,7 +851,10 @@ def main(args):
     if not view_assets:
         raise RuntimeError("No valid views configured for property prediction.")
 
-    use_alignment = args.use_alignment or bool(prop_cfg.get("use_alignment", False))
+    if args.use_alignment is None:
+        use_alignment = bool(prop_cfg.get("use_alignment", False))
+    else:
+        use_alignment = bool(args.use_alignment)
     alignment_model = None
     if use_alignment:
         ckpt_path = args.alignment_checkpoint
@@ -530,8 +884,10 @@ def main(args):
         raise ValueError("Property split ratios must sum to 1.0")
 
     seed = int(config.get("data", {}).get("random_seed", 42))
-    ridge_alpha = float(prop_cfg.get("ridge_alpha", 1.0))
     max_prop_samples = _to_int_or_none(prop_cfg.get("max_samples"))
+    mlp_hpo_cfg = prop_cfg.get("hyperparameter_tuning")
+    if mlp_hpo_cfg is None:
+        mlp_hpo_cfg = config.get("hyperparameter_tuning", {})
 
     model_dir = results_dir / "step3_property"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -660,16 +1016,25 @@ def main(args):
             if not index_map:
                 continue
 
-            model = Pipeline([
-                ("scaler", StandardScaler()),
-                ("ridge", Ridge(alpha=ridge_alpha)),
-            ])
-
             train_indices = [i for i in splits["train"] if i in index_map]
             train_rows = [index_map[i] for i in train_indices]
             if not train_rows:
                 continue
-            model.fit(embeddings[train_rows], targets[train_indices])
+            val_indices = [i for i in splits["val"] if i in index_map]
+            val_rows = [index_map[i] for i in val_indices]
+
+            model_bundle, hpo_best, trial_df = _fit_mlp_with_hpo(
+                train_X=embeddings[train_rows],
+                train_y=targets[train_indices],
+                val_X=embeddings[val_rows] if val_rows else np.zeros((0, embeddings.shape[1]), dtype=np.float32),
+                val_y=targets[val_indices] if val_indices else np.zeros((0,), dtype=np.float32),
+                hyper_cfg=mlp_hpo_cfg,
+                seed=_stable_seed(seed, f"{prop_name}:{view}"),
+                device=device,
+                force_enable=args.tune,
+            )
+            model = model_bundle["model"]
+            scaler = model_bundle["scaler"]
 
             for split_name, split_indices in splits.items():
                 valid_indices = [i for i in split_indices if i in index_map]
@@ -677,7 +1042,7 @@ def main(args):
                 if not split_rows:
                     metrics = {"mae": 0.0, "rmse": 0.0, "r2": 0.0}
                 else:
-                    preds = model.predict(embeddings[split_rows])
+                    preds = _predict_torch_model(model, scaler, embeddings[split_rows], device=device)
                     metrics = _compute_metrics(targets[valid_indices], preds)
                 rep = "Group_SELFIES" if view == "group_selfies" else "Graph" if view == "graph" else view.upper()
                 rows.append({
@@ -689,15 +1054,13 @@ def main(args):
                     **metrics,
                 })
 
-            model_path = model_dir / f"{prop_name}_{view}_ridge.pkl"
+            model_path = model_dir / f"{prop_name}_{view}_mlp.pt"
             if view == "smiles":
-                model_path = model_dir / f"{prop_name}_ridge.pkl"
-            if joblib is not None:
-                joblib.dump(model, model_path)
-            else:
-                import pickle
-                with open(model_path, "wb") as f:
-                    pickle.dump(model, f)
+                model_path = model_dir / f"{prop_name}_mlp.pt"
+            _save_mlp_bundle(model_path, model_bundle)
+
+            trial_path = model_dir / f"{prop_name}_{view}_mlp_hpo_trials.csv"
+            trial_df.to_csv(trial_path, index=False)
 
             meta_path = model_dir / f"{prop_name}_{view}_meta.json"
             with open(meta_path, "w") as f:
@@ -708,9 +1071,12 @@ def main(args):
                     "train_ratio": train_ratio,
                     "val_ratio": val_ratio,
                     "test_ratio": test_ratio,
-                    "ridge_alpha": ridge_alpha,
+                    "model_type": "mlp",
+                    "hpo_trials": int(mlp_hpo_cfg.get("n_trials", 100)),
+                    "hpo_best": hpo_best,
                     "use_alignment": use_alignment,
                     "model_path": str(model_path),
+                    "hpo_trials_path": str(trial_path),
                 }, f, indent=2)
 
         if len(view_data) >= 2:
@@ -727,14 +1093,23 @@ def main(args):
                 fused = np.mean(np.stack(fused_embeddings), axis=0)
                 fused_map = {orig_idx: row_idx for row_idx, orig_idx in enumerate(common)}
 
-                model = Pipeline([
-                    ("scaler", StandardScaler()),
-                    ("ridge", Ridge(alpha=ridge_alpha)),
-                ])
                 train_indices = [i for i in splits["train"] if i in fused_map]
                 train_rows = [fused_map[i] for i in train_indices]
+                val_indices = [i for i in splits["val"] if i in fused_map]
+                val_rows = [fused_map[i] for i in val_indices]
                 if train_rows:
-                    model.fit(fused[train_rows], targets[train_indices])
+                    model_bundle, hpo_best, trial_df = _fit_mlp_with_hpo(
+                        train_X=fused[train_rows],
+                        train_y=targets[train_indices],
+                        val_X=fused[val_rows] if val_rows else np.zeros((0, fused.shape[1]), dtype=np.float32),
+                        val_y=targets[val_indices] if val_indices else np.zeros((0,), dtype=np.float32),
+                        hyper_cfg=mlp_hpo_cfg,
+                        seed=_stable_seed(seed, f"{prop_name}:multiview_mean"),
+                        device=device,
+                        force_enable=args.tune,
+                    )
+                    model = model_bundle["model"]
+                    scaler = model_bundle["scaler"]
 
                     for split_name, split_indices in splits.items():
                         valid_indices = [i for i in split_indices if i in fused_map]
@@ -742,7 +1117,7 @@ def main(args):
                         if not split_rows:
                             metrics = {"mae": 0.0, "rmse": 0.0, "r2": 0.0}
                         else:
-                            preds = model.predict(fused[split_rows])
+                            preds = _predict_torch_model(model, scaler, fused[split_rows], device=device)
                             metrics = _compute_metrics(targets[valid_indices], preds)
                         rows.append({
                             "method": "Multi_View_Foundation",
@@ -753,13 +1128,11 @@ def main(args):
                             **metrics,
                         })
 
-                    model_path = model_dir / f"{prop_name}_multiview_mean.pkl"
-                    if joblib is not None:
-                        joblib.dump(model, model_path)
-                    else:
-                        import pickle
-                        with open(model_path, "wb") as f:
-                            pickle.dump(model, f)
+                    model_path = model_dir / f"{prop_name}_multiview_mean_mlp.pt"
+                    _save_mlp_bundle(model_path, model_bundle)
+
+                    trial_path = model_dir / f"{prop_name}_multiview_mean_mlp_hpo_trials.csv"
+                    trial_df.to_csv(trial_path, index=False)
 
                     meta_path = model_dir / f"{prop_name}_multiview_mean_meta.json"
                     with open(meta_path, "w") as f:
@@ -771,9 +1144,12 @@ def main(args):
                             "train_ratio": train_ratio,
                             "val_ratio": val_ratio,
                             "test_ratio": test_ratio,
-                            "ridge_alpha": ridge_alpha,
+                            "model_type": "mlp",
+                            "hpo_trials": int(mlp_hpo_cfg.get("n_trials", 100)),
+                            "hpo_best": hpo_best,
                             "use_alignment": use_alignment,
                             "model_path": str(model_path),
+                            "hpo_trials_path": str(trial_path),
                         }, f, indent=2)
 
     metrics_df = pd.DataFrame(rows)
@@ -784,7 +1160,12 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
-    parser.add_argument("--use_alignment", action="store_true")
+    parser.add_argument("--use_alignment", dest="use_alignment", action="store_true")
+    parser.add_argument("--no_alignment", dest="use_alignment", action="store_false")
+    parser.set_defaults(use_alignment=None)
+    parser.add_argument("--tune", dest="tune", action="store_true")
+    parser.add_argument("--no_tune", dest="tune", action="store_false")
+    parser.set_defaults(tune=None)
     parser.add_argument("--alignment_checkpoint", type=str, default=None)
     parser.add_argument("--views", type=str, default=None, help="comma-separated list of views")
     main(parser.parse_args())
