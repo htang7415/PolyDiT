@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""F5: Foundation-enhanced inverse design with reranking.
-
-Supports candidate sources from CSV files or on-the-fly resampling.
-"""
+"""F5: Foundation-enhanced inverse design with reranking via resampling."""
 
 import argparse
 import json
@@ -52,7 +49,6 @@ except Exception:  # pragma: no cover
 
 
 SUPPORTED_VIEWS = ("smiles", "smiles_bpe", "selfies", "group_selfies", "graph")
-SUPPORTED_CANDIDATE_SOURCES = ("csv", "resample")
 
 VIEW_SPECS = {
     "smiles": {
@@ -103,7 +99,6 @@ DEFAULT_POLYMER_PATTERNS = {
 }
 
 DEFAULT_F5_RESAMPLE_SETTINGS = {
-    "candidate_source": "csv",
     "sampling_target": 100,
     "sampling_num_per_batch": 512,
     "sampling_batch_size": 128,
@@ -806,36 +801,6 @@ def _match_polymer_class(smiles: str, target_classes: List[str], compiled_patter
     return False, ""
 
 
-def _resolve_candidate_source(args, config: dict) -> str:
-    cfg = _f5_cfg(config)
-    source = args.candidate_source
-    if source is None:
-        source = cfg.get("candidate_source", "csv")
-    source = str(source).strip().lower()
-    if source not in SUPPORTED_CANDIDATE_SOURCES:
-        allowed = "|".join(SUPPORTED_CANDIDATE_SOURCES)
-        raise ValueError(f"foundation_inverse.candidate_source must be one of: {allowed}")
-    return source
-
-
-def _load_candidates_csv(path_str: str, smiles_column: Optional[str]) -> Tuple[List[str], str]:
-    if not path_str:
-        raise ValueError("candidates_csv is required when candidate_source=csv")
-    candidates_path = _resolve_path(path_str)
-    if not candidates_path.exists():
-        raise FileNotFoundError(f"Candidates CSV not found: {candidates_path}")
-    candidates_df = pd.read_csv(candidates_path)
-    smiles_col = smiles_column
-    if smiles_col is None:
-        for candidate in ["smiles", "p_smiles", "psmiles"]:
-            if candidate in candidates_df.columns:
-                smiles_col = candidate
-                break
-    if smiles_col is None or smiles_col not in candidates_df.columns:
-        raise ValueError("Candidates CSV must include a SMILES column.")
-    return candidates_df[smiles_col].astype(str).tolist(), smiles_col
-
-
 def _create_generator(view: str, assets: dict, device: str, sampling_temperature: Optional[float], sampling_num_atoms: Optional[int]):
     method_dir = assets["method_dir"]
     method_cfg = assets.get("method_cfg", {}) or {}
@@ -1009,7 +974,7 @@ def _resample_candidates_until_target(
         max_sa = float(max_sa)
 
     if sampling_target <= 0:
-        raise ValueError("sampling_target must be > 0 for candidate_source=resample")
+        raise ValueError("sampling_target must be > 0")
     if sampling_num_per_batch <= 0 or sampling_batch_size <= 0:
         raise ValueError("sampling_num_per_batch and sampling_batch_size must both be > 0")
     if sampling_max_batches <= 0:
@@ -1204,14 +1169,12 @@ def _resample_candidates_until_target(
 
 def main(args):
     config = load_config(args.config)
-    f5_cfg = _f5_cfg(config)
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
     step_dirs = ensure_step_dirs(results_dir, "step5_foundation_inverse")
     save_config(config, results_dir / "config_used.yaml")
     save_config(config, step_dirs["files_dir"] / "config_used.yaml")
 
-    candidate_source = _resolve_candidate_source(args, config)
     encoder_view = _select_encoder_view(config, args.encoder_view)
     encoder_cfg = config.get(VIEW_SPECS[encoder_view]["encoder_key"], {})
     device = encoder_cfg.get("device", "auto")
@@ -1246,74 +1209,40 @@ def main(args):
     training_set = _load_training_smiles(train_smiles_path)
 
     t0 = time.time()
-    source_meta = {"candidate_source": candidate_source}
-    if candidate_source == "csv":
-        csv_path = args.candidates_csv if args.candidates_csv else f5_cfg.get("candidates_csv", "")
-        smiles_col = args.smiles_column if args.smiles_column is not None else f5_cfg.get("smiles_column", None)
-        smiles_list, smiles_col = _load_candidates_csv(csv_path, smiles_col)
-        structural_validity_mask = [_check_validity(smi) and _count_stars(smi) == 2 for smi in smiles_list]
-        structurally_valid_smiles = [s for s, keep in zip(smiles_list, structural_validity_mask) if keep]
-
-        embeddings, kept_indices = _embed_candidates(
-            view=encoder_view,
-            smiles_list=structurally_valid_smiles,
-            assets=assets,
-            device=device,
-        )
-        scored_smiles = [structurally_valid_smiles[i] for i in kept_indices]
-
-        if embeddings.size and alignment_model is not None:
-            projection_device = "cuda" if torch.cuda.is_available() else "cpu"
-            embeddings = _project_embeddings(alignment_model, encoder_view, embeddings, device=projection_device)
-
-        preds = model.predict(embeddings) if len(scored_smiles) else np.array([], dtype=np.float32)
-        preds = np.asarray(preds, dtype=np.float32).reshape(-1)
-        hits = _compute_hits(preds, target_value, epsilon, target_mode) if len(preds) else np.array([], dtype=bool)
-        scored_df = pd.DataFrame(
-            {
-                "smiles": scored_smiles,
-                "prediction": preds,
-                "abs_error": np.abs(preds - target_value) if len(preds) else [],
-                "property_hit": hits,
-                "accepted": hits,
-            }
-        )
-        scored_embeddings = embeddings if len(scored_smiles) else None
-        source_meta.update({"candidates_csv": str(_resolve_path(csv_path)), "smiles_column": smiles_col})
-    else:
-        sampled = _resample_candidates_until_target(
-            config=config,
-            args=args,
-            view=encoder_view,
-            assets=assets,
-            device=device,
-            property_model=model,
-            alignment_model=alignment_model,
-            training_set=training_set,
-            target_value=target_value,
-            epsilon=epsilon,
-            target_mode=target_mode,
-        )
-        smiles_list = sampled["generated_smiles"]
-        structurally_valid_smiles = sampled["structurally_valid_smiles"]
-        scored_df = sampled["scored_df"]
-        scored_embeddings = sampled["scored_embeddings"]
-        source_meta.update(
-            {
-                "sampling_target": int(sampled["sampling_target"]),
-                "sampling_num_per_batch": int(sampled["sampling_num_per_batch"]),
-                "sampling_batch_size": int(sampled["sampling_batch_size"]),
-                "sampling_max_batches": int(sampled["sampling_max_batches"]),
-                "target_classes": sampled["target_classes"],
-                "require_validity": bool(sampled["require_validity"]),
-                "require_two_stars": bool(sampled["require_two_stars"]),
-                "require_novel": bool(sampled["require_novel"]),
-                "require_unique": bool(sampled["require_unique"]),
-                "max_sa": sampled["max_sa"],
-                "stats": sampled["stats"],
-                "sampling_completed": bool(sampled["completed"]),
-            }
-        )
+    source_meta = {"candidate_source": "resample"}
+    sampled = _resample_candidates_until_target(
+        config=config,
+        args=args,
+        view=encoder_view,
+        assets=assets,
+        device=device,
+        property_model=model,
+        alignment_model=alignment_model,
+        training_set=training_set,
+        target_value=target_value,
+        epsilon=epsilon,
+        target_mode=target_mode,
+    )
+    smiles_list = sampled["generated_smiles"]
+    structurally_valid_smiles = sampled["structurally_valid_smiles"]
+    scored_df = sampled["scored_df"]
+    scored_embeddings = sampled["scored_embeddings"]
+    source_meta.update(
+        {
+            "sampling_target": int(sampled["sampling_target"]),
+            "sampling_num_per_batch": int(sampled["sampling_num_per_batch"]),
+            "sampling_batch_size": int(sampled["sampling_batch_size"]),
+            "sampling_max_batches": int(sampled["sampling_max_batches"]),
+            "target_classes": sampled["target_classes"],
+            "require_validity": bool(sampled["require_validity"]),
+            "require_two_stars": bool(sampled["require_two_stars"]),
+            "require_novel": bool(sampled["require_novel"]),
+            "require_unique": bool(sampled["require_unique"]),
+            "max_sa": sampled["max_sa"],
+            "stats": sampled["stats"],
+            "sampling_completed": bool(sampled["completed"]),
+        }
+    )
 
     elapsed_sec = time.time() - t0
     if scored_df.empty:
@@ -1368,7 +1297,7 @@ def main(args):
         "target_value": target_value,
         "target_mode": target_mode,
         "epsilon": epsilon,
-        "candidate_source": candidate_source,
+        "candidate_source": "resample",
         "n_generated": n_generated,
         "n_valid": n_valid,
         "n_scored": n_scored,
@@ -1484,9 +1413,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--encoder_view", type=str, default=None, choices=list(SUPPORTED_VIEWS))
-    parser.add_argument("--candidate_source", type=str, default=None, choices=list(SUPPORTED_CANDIDATE_SOURCES))
-    parser.add_argument("--candidates_csv", type=str, default=None)
-    parser.add_argument("--smiles_column", type=str, default=None)
     parser.add_argument("--property", type=str, required=True)
     parser.add_argument("--target", type=float, required=True)
     parser.add_argument("--target_mode", type=str, default="window", choices=["window", "ge", "le"])

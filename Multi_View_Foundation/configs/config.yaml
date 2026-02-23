@@ -1,5 +1,28 @@
 # Multi-View Foundation configuration (scaffold)
+#
+# Step-to-args map (F0-F7):
+# F0 paired dataset build:
+#   paths.data_dir, paths.polymer_file, paths.polymer_file_d2, paths.paired_index
+#   data.random_seed, data.max_samples_d1, data.max_samples_d2
+#   alignment_views, views.*
+# F1 alignment embeddings / alignment training:
+#   alignment_views, views.*, *_encoder.*
+#   model.*, training.*, alignment_training.*, alignment_e2e.*
+#   pipeline.step1_alignment_mode
+# F2 retrieval evaluation:
+#   evaluation.*, pipeline.step2_use_alignment
+# F3 property heads:
+#   property.*, pipeline.step3_use_alignment
+# F4 OOD analysis:
+#   ood.*, pipeline.step4_use_alignment
+# F5 foundation inverse (resample):
+#   foundation_inverse.*, pipeline.step5_use_alignment
+# F6 OOD-aware inverse objective:
+#   ood_aware_inverse.*
+# F7 chemistry/physics analysis:
+#   chem_physics_analysis.*
 
+# F0 shared paths/data for paired dataset construction
 paths:
   data_dir: "../Data"
   polymer_file: "../Data/Polymer/SMiPoly_polymers.gz"
@@ -10,9 +33,10 @@ paths:
 
 data:
   random_seed: 42
-  max_samples_d1: 50000
+  max_samples_d1: 1000000
   max_samples_d2: 12888
 
+# F0/F1 view selection
 alignment_views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
 
 views:
@@ -26,6 +50,7 @@ views:
   graph:
     enabled: true
 
+# F1 alignment model + optimization args
 model:
   projection_dim: 384  # default for small; run_pipeline.sh aligns with 9-method backbone sizes: 384/640/960/1280
   projection_hidden_dims: [768]  # default for small; presets: [768],[1280],[1920],[2560]
@@ -57,6 +82,7 @@ alignment_e2e:
   datasets: ["d1"]
   max_samples: null
 
+# F1/F2/F3/F4/F5 pipeline toggles
 pipeline:
   step1_alignment_mode: "frozen"  # none|frozen|e2e|both
   step2_use_alignment: true
@@ -64,14 +90,17 @@ pipeline:
   step4_use_alignment: true
   step5_use_alignment: true
 
+# F2 retrieval args
 evaluation:
   recall_ks: [1, 5, 10]
   max_samples_per_dataset: 5000
 
+# F4 OOD args
 ood:
   nn_k: 50
   use_faiss: true
 
+# F3 property-head args
 property:
   files: ["Tg.csv", "Eg.csv", "Tm.csv", "Td.csv"]
   max_samples: null
@@ -84,7 +113,7 @@ property:
   hyperparameter_tuning:
     n_trials: 150
     enabled: true
-    tuning_epochs: 35
+    tuning_epochs: 50
     tuning_patience: 10
     final_training_epochs: 200
     metric: "r2"
@@ -95,21 +124,19 @@ property:
       dropout: [0.1, 0.2, 0.3]
       batch_size: [8, 16, 32, 64, 128]
 
+# F5 foundation inverse args
 foundation_inverse:
   enabled: true
   run_all_properties: true       # if true, F5 loops over property.files (or MVF_PROPERTY_LIST)
-  candidate_source: "csv"  # csv|resample
-  candidates_csv: ""
-  smiles_column: ""
-  property: "Td"  # Tg, Tm, Td, Eg
+  property: "Tg"  # Tg, Tm, Td, Eg
   target: 300.0
-  target_mode: "ge"  # window|ge|le
+  target_mode: "ge"  # window: |pred-target|<=epsilon, ge: pred>=target, le: pred<=target
   epsilon: 20.0
   # Optional per-property overrides used when run_all_properties=true.
   targets: {}
   target_modes: {}
   epsilons: {}
-  sampling_target: 100              # used when candidate_source=resample
+  sampling_target: 100              # accepted hit target for resampling
   sampling_num_per_batch: 512       # candidates generated each outer batch
   sampling_batch_size: 128          # model decode batch size inside sampler
   sampling_max_batches: 200         # hard stop to avoid infinite loops
@@ -132,14 +159,15 @@ foundation_inverse:
   use_alignment: true
   alignment_checkpoint: ""
 
+# F6 OOD-aware inverse args
 ood_aware_inverse:
-  enabled: false
+  enabled: true
   run_all_properties: true       # if true, F6 loops over property.files (or MVF_PROPERTY_LIST)
   candidate_scores_csv: ""      # default: results/step5_foundation_inverse/files/candidate_scores.csv
   encoder_view: ""              # fallback: foundation_inverse.encoder_view
   property: ""                  # fallback: foundation_inverse.property
   target: null                  # fallback: foundation_inverse.target
-  target_mode: ""               # fallback: foundation_inverse.target_mode
+  target_mode: ""               # fallback: foundation_inverse.target_mode (window/ge/le)
   epsilon: null                 # fallback: foundation_inverse.epsilon
   # Optional per-property overrides used when run_all_properties=true.
   targets: {}
@@ -154,6 +182,7 @@ ood_aware_inverse:
   use_alignment: true
   alignment_checkpoint: ""
 
+# F7 chemistry/physics analysis args
 chem_physics_analysis:
   enabled: true
   properties: ["Tg", "Tm", "Td", "Eg"]
@@ -170,6 +199,7 @@ chem_physics_analysis:
   target_modes: {}
   epsilons: {}
 
+# F1 backbone encoder args (used by F1/F5/F6)
 smiles_encoder:
   method_dir: "../Bi_Diffusion_SMILES"
   config_path: "../Bi_Diffusion_SMILES/configs/config.yaml"
