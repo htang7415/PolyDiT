@@ -104,7 +104,7 @@ ood:
 
 # F3 property-head args
 property:
-  files: ["Tg.csv", "Tm.csv", "Td.csv", "Eg.csv"]
+  files: ["Td.csv"]
   max_samples: null
   train_ratio: 0.8
   val_ratio: 0.1
@@ -129,8 +129,8 @@ property:
 # F5 foundation inverse args
 foundation_inverse:
   enabled: true
-  run_all_properties: true       # if true, F5 loops over property.files (or MVF_PROPERTY_LIST)
-  property: "Tg"  # Tg, Tm, Td, Eg
+  run_all_properties: false       # single-property test default
+  property: "Td"  # Tg, Tm, Td, Eg
   target: 300.0
   target_mode: "ge"  # window: |pred-target|<=epsilon, ge: pred>=target, le: pred<=target
   epsilon: 20.0
@@ -154,23 +154,23 @@ foundation_inverse:
   require_novel: true
   require_unique: true
   max_sa: 4.0
-  committee_properties: ["Tg", "Tm", "Td", "Eg"]  # explicit committee export list for F5/F6/F7 workflow
-  property_model_mode: "all"      # single|all; all = aggregate all available F3 models for this property
+  committee_properties: ["Td"]  # explicit committee export list for F5/F6/F7 workflow
+  property_model_mode: "single"      # single|all; all = aggregate all available F3 models for this property
   property_model_path: ""
   rerank_strategy: "d2_distance"
   rerank_top_k: 100
   ood_k: 5
-  encoder_view: "smiles"  # F5 scoring backbone + fallback proposal view
+  encoder_view: "selfies"  # F5 scoring backbone + fallback proposal view
   use_alignment: true
   alignment_checkpoint: ""
 
 # F6 OOD-aware inverse args
 ood_aware_inverse:
   enabled: true
-  run_all_properties: true       # if true, F6 loops over property.files (or MVF_PROPERTY_LIST)
+  run_all_properties: false       # single-property test default
   encoder_view: ""              # fallback anchor view for metadata/model_size if needed
   ood_views: "all"              # all|csv list; multi-view OOD distance aggregation uses mean over available views
-  property: ""                  # fallback: foundation_inverse.property
+  property: "Td"                # fallback: foundation_inverse.property
   target: null                  # fallback: foundation_inverse.target
   target_mode: ""               # fallback: foundation_inverse.target_mode (window/ge/le)
   epsilon: null                 # fallback: foundation_inverse.epsilon
@@ -195,7 +195,7 @@ ood_aware_inverse:
 # F7 chemistry/physics analysis args
 chem_physics_analysis:
   enabled: true
-  properties: ["Tg", "Tm", "Td", "Eg"]
+  properties: ["Td"]
   # Optional path templates with {property}, e.g.:
   # "results/step5_foundation_inverse/files/candidate_scores_{property}.csv"
   candidate_scores_template: ""

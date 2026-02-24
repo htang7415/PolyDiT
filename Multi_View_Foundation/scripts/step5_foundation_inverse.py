@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import time
+import importlib
 import importlib.util
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,11 +32,15 @@ except Exception:  # pragma: no cover
     joblib = None
 
 try:
-    from rdkit import Chem
+    from rdkit import Chem, rdBase
     from rdkit.Chem import RDConfig
+    # Keep F5 logs readable when many invalid candidates are rejected.
+    rdBase.DisableLog("rdApp.error")
+    rdBase.DisableLog("rdApp.warning")
 except Exception:  # pragma: no cover
     Chem = None
     RDConfig = None
+    rdBase = None
 
 try:
     import os
@@ -316,6 +321,29 @@ def _resolve_view_device(config: dict, view: str) -> str:
 
 
 def _load_module(module_name: str, path: Path):
+    module_path = path.resolve()
+
+    # Prefer package import when the module is within this repo, so relative
+    # imports inside the target module (e.g., from ..utils import ...) work.
+    import_name = None
+    try:
+        rel = module_path.relative_to(REPO_ROOT.resolve())
+        if rel.suffix == ".py":
+            parts = list(rel.with_suffix("").parts)
+            if parts and parts[-1] == "__init__":
+                parts = parts[:-1]
+            if parts and all(part.isidentifier() for part in parts):
+                import_name = ".".join(parts)
+    except Exception:
+        import_name = None
+
+    if import_name:
+        try:
+            return importlib.import_module(import_name)
+        except Exception:
+            # Fall back to direct file import for backward compatibility.
+            pass
+
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot import module {module_name} from {path}")
@@ -1278,6 +1306,8 @@ def _resample_candidates_until_target(
     for class_name in target_classes:
         if class_name not in compiled_patterns:
             raise ValueError(f"Unknown target class '{class_name}'. Available classes: {sorted(compiled_patterns.keys())}")
+    if target_classes:
+        print(f"[F5 resample] target_class filter enabled: {','.join(target_classes)}")
 
     scoring_generator = _create_generator(
         view=scoring_view,
@@ -1298,6 +1328,8 @@ def _resample_candidates_until_target(
     active_generator_view: Optional[str] = None
     active_generator_assets: Optional[dict] = None
     active_generator: Optional[dict] = None
+    available_proposal_views = list(proposal_views)
+    disabled_proposal_views: Dict[str, str] = {}
 
     def _get_proposal_generator(view: str) -> dict:
         nonlocal active_generator_view, active_generator_assets, active_generator
@@ -1336,9 +1368,32 @@ def _resample_candidates_until_target(
         if accepted >= sampling_target:
             break
 
-        proposal_view = proposal_views[(batch_idx - 1) % len(proposal_views)]
-        generator = _get_proposal_generator(proposal_view)
-        batch_smiles = _sample_batch_from_generator(generator, sampling_num_per_batch, sampling_batch_size)
+        if not available_proposal_views:
+            stats["stop_no_proposal_views"] += 1
+            print("[F5 resample] no proposal views remain; stopping early.")
+            break
+
+        proposal_view = available_proposal_views[(batch_idx - 1) % len(available_proposal_views)]
+        try:
+            generator = _get_proposal_generator(proposal_view)
+        except Exception as exc:
+            stats["proposal_view_init_failed"] += 1
+            stats[f"proposal_view_init_failed_{proposal_view}"] += 1
+            disabled_proposal_views[proposal_view] = str(exc)
+            available_proposal_views = [v for v in available_proposal_views if v != proposal_view]
+            print(f"[F5 resample] disabling view={proposal_view} due to init error: {exc}")
+            continue
+
+        try:
+            batch_smiles = _sample_batch_from_generator(generator, sampling_num_per_batch, sampling_batch_size)
+        except Exception as exc:
+            stats["proposal_view_sample_failed"] += 1
+            stats[f"proposal_view_sample_failed_{proposal_view}"] += 1
+            disabled_proposal_views[proposal_view] = str(exc)
+            available_proposal_views = [v for v in available_proposal_views if v != proposal_view]
+            print(f"[F5 resample] disabling view={proposal_view} due to sample error: {exc}")
+            continue
+
         stats[f"n_generated_{proposal_view}"] += len(batch_smiles)
         stats[f"n_batches_{proposal_view}"] += 1
         stats["n_generated"] += len(batch_smiles)
@@ -1413,7 +1468,8 @@ def _resample_candidates_until_target(
 
         if not prefilter_smiles:
             print(
-                f"[F5 resample] batch={batch_idx} generated={len(batch_smiles)} prefilter=0 accepted={accepted}/{sampling_target}"
+                f"[F5 resample] batch={batch_idx} view={proposal_view} generated={len(batch_smiles)} prefilter=0 "
+                f"accepted={accepted}/{sampling_target}"
             )
             continue
 
@@ -1485,6 +1541,12 @@ def _resample_candidates_until_target(
     if scored_embeddings:
         scored_embeddings_np = np.stack(scored_embeddings, axis=0)
 
+    if len(accepted_df) == 0 and target_classes and stats.get("reject_class", 0) > 0:
+        print(
+            f"[F5 resample] warning: class filter rejected {int(stats.get('reject_class', 0))} "
+            "candidates; consider relaxing foundation_inverse.target_class."
+        )
+
     result = {
         "candidate_source": "resample",
         "generated_smiles": generated_smiles_all,
@@ -1497,6 +1559,8 @@ def _resample_candidates_until_target(
         "sampling_batch_size": sampling_batch_size,
         "sampling_max_batches": sampling_max_batches,
         "proposal_views": list(proposal_views),
+        "proposal_views_remaining": list(available_proposal_views),
+        "proposal_views_disabled": dict(disabled_proposal_views),
         "scoring_view": scoring_view,
         "target_classes": target_classes,
         "require_validity": require_validity,
