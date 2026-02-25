@@ -33,11 +33,11 @@ except Exception:  # pragma: no cover
 PUBLICATION_STYLE = {
     "font.family": "serif",
     "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 10,
-    "axes.titlesize": 10,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "legend.fontsize": 8,
+    "axes.labelsize": 15,
+    "axes.titlesize": 15,
+    "xtick.labelsize": 15,
+    "ytick.labelsize": 15,
+    "legend.fontsize": 15,
     "axes.linewidth": 0.9,
     "lines.linewidth": 1.8,
     "figure.dpi": 300,
@@ -96,7 +96,7 @@ def _plot_f4_ood_diagnostics(
     ax0.set_xlabel("Distance")
     ax0.set_ylabel("Count")
     ax0.grid(alpha=0.25)
-    ax0.legend(loc="best", fontsize=8)
+    ax0.legend(loc="best", fontsize=15)
 
     summary_keys = [
         ("d1_to_d2_mean_dist", "D1->D2 mean"),
@@ -120,10 +120,10 @@ def _plot_f4_ood_diagnostics(
         y = np.arange(len(labels), dtype=np.float32)
         bars = ax1.barh(y, np.asarray(values, dtype=np.float32), color=["#59A14F", "#F28E2B", "#B07AA1"][: len(labels)])
         ax1.set_yticks(y)
-        ax1.set_yticklabels(labels, fontsize=9)
+        ax1.set_yticklabels(labels, fontsize=15)
         ax1.grid(axis="x", alpha=0.25)
         for bar, val in zip(bars, values):
-            ax1.text(float(val), bar.get_y() + bar.get_height() / 2.0, f"  {val:.4f}", va="center", ha="left", fontsize=8)
+            ax1.text(float(val), bar.get_y() + bar.get_height() / 2.0, f"  {val:.4f}", va="center", ha="left", fontsize=15)
     else:
         ax1.text(0.5, 0.5, "No finite summary metrics", ha="center", va="center")
         ax1.set_axis_off()

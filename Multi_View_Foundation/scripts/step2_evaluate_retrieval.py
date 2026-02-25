@@ -31,11 +31,11 @@ except Exception:  # pragma: no cover
 PUBLICATION_STYLE = {
     "font.family": "serif",
     "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 10,
-    "axes.titlesize": 10,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "legend.fontsize": 8,
+    "axes.labelsize": 15,
+    "axes.titlesize": 15,
+    "xtick.labelsize": 15,
+    "ytick.labelsize": 15,
+    "legend.fontsize": 15,
     "axes.linewidth": 0.9,
     "lines.linewidth": 1.8,
     "figure.dpi": 300,
@@ -99,14 +99,14 @@ def _draw_heatmap(fig, ax, matrix: np.ndarray, row_labels, col_labels, vmin=0.0,
     masked = np.ma.masked_invalid(arr)
     im = ax.imshow(masked, cmap="YlGnBu", vmin=vmin, vmax=vmax, aspect="auto")
     ax.set_yticks(np.arange(len(row_labels)))
-    ax.set_yticklabels(row_labels, fontsize=8)
+    ax.set_yticklabels(row_labels, fontsize=15)
     ax.set_xticks(np.arange(len(col_labels)))
-    ax.set_xticklabels(col_labels, rotation=30, ha="right", fontsize=8)
+    ax.set_xticklabels(col_labels, rotation=30, ha="right", fontsize=15)
     for r in range(arr.shape[0]):
         for c in range(arr.shape[1]):
             val = arr[r, c]
             if np.isfinite(val):
-                ax.text(c, r, f"{float(val):.3f}", ha="center", va="center", fontsize=7, color="black")
+                ax.text(c, r, f"{float(val):.3f}", ha="center", va="center", fontsize=15, color="black")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
 

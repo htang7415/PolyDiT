@@ -41,11 +41,11 @@ except Exception:  # pragma: no cover
 PUBLICATION_STYLE = {
     "font.family": "serif",
     "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 10,
-    "axes.titlesize": 10,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "legend.fontsize": 8,
+    "axes.labelsize": 15,
+    "axes.titlesize": 15,
+    "xtick.labelsize": 15,
+    "ytick.labelsize": 15,
+    "legend.fontsize": 15,
     "axes.linewidth": 0.9,
     "lines.linewidth": 1.8,
     "figure.dpi": 300,
@@ -143,10 +143,10 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
     ax0.bar(x - width / 2.0, d1, width=width, color="#4E79A7", alpha=0.9, label="D1")
     ax0.bar(x + width / 2.0, d2, width=width, color="#F28E2B", alpha=0.9, label="D2")
     ax0.set_xticks(x)
-    ax0.set_xticklabels(views, rotation=30, ha="right", fontsize=8)
+    ax0.set_xticklabels(views, rotation=30, ha="right", fontsize=15)
     ax0.set_ylabel("Samples")
     ax0.grid(axis="y", alpha=0.25)
-    ax0.legend(loc="best", fontsize=8)
+    ax0.legend(loc="best", fontsize=15)
 
     total_time = pd.to_numeric(meta_df["total_time_sec"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
     bars = ax1.bar(views, total_time, color="#59A14F", alpha=0.9)
@@ -154,7 +154,7 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
     ax1.grid(axis="y", alpha=0.25)
     ax1.tick_params(axis="x", rotation=30)
     for bar, val in zip(bars, total_time):
-        ax1.text(bar.get_x() + bar.get_width() / 2.0, float(val), f"{float(val):.1f}", ha="center", va="bottom", fontsize=8)
+        ax1.text(bar.get_x() + bar.get_width() / 2.0, float(val), f"{float(val):.1f}", ha="center", va="bottom", fontsize=15)
 
     emb_dim = pd.to_numeric(meta_df["embedding_dim"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
     ax2.bar(views, emb_dim, color="#B07AA1", alpha=0.9)
@@ -172,7 +172,7 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
         "Model sizes:",
         *model_sizes,
     ]
-    ax3.text(0.02, 0.98, "\n".join(summary_lines), va="top", ha="left", fontsize=9, family="monospace")
+    ax3.text(0.02, 0.98, "\n".join(summary_lines), va="top", ha="left", fontsize=15, family="monospace")
 
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f1_embedding_summary")
@@ -195,16 +195,37 @@ def _plot_alignment_loss_curve(curve_path: Path, output_base: Path) -> bool:
     if not mask.any():
         return False
     x = epochs[mask].to_numpy(dtype=np.float32)
+    train_arr = train_loss[mask].to_numpy(dtype=np.float32) if len(train_loss) else np.array([], dtype=np.float32)
+    val_arr = val_loss[mask].to_numpy(dtype=np.float32) if len(val_loss) else np.array([], dtype=np.float32)
 
     fig, ax = plt.subplots(figsize=(7.6, 4.6))
-    if train_loss.notna().any():
-        ax.plot(x, train_loss[mask].to_numpy(dtype=np.float32), label="train_loss", color="#4E79A7", linewidth=1.8)
-    if val_loss.notna().any():
-        ax.plot(x, val_loss[mask].to_numpy(dtype=np.float32), label="val_loss", color="#E15759", linewidth=1.8)
+    if train_loss.notna().any() and train_arr.size:
+        ax.plot(x, train_arr, label="train_loss", color="#4E79A7", linewidth=1.8)
+    if val_loss.notna().any() and val_arr.size:
+        ax.plot(x, val_arr, label="val_loss", color="#E15759", linewidth=1.8)
+        finite = np.isfinite(val_arr) & np.isfinite(x)
+        if finite.any():
+            x_finite = x[finite]
+            val_finite = val_arr[finite]
+            best_idx = int(np.argmin(val_finite))
+            best_epoch = float(x_finite[best_idx])
+            best_val = float(val_finite[best_idx])
+            ax.axvline(best_epoch, color="#111111", linestyle="--", linewidth=1.0, alpha=0.85)
+            ax.scatter([best_epoch], [best_val], color="#111111", s=28, zorder=5)
+            ax.annotate(
+                f"best val: epoch {int(round(best_epoch))}\nloss={best_val:.4f}",
+                xy=(best_epoch, best_val),
+                xytext=(6, 8),
+                textcoords="offset points",
+                ha="left",
+                va="bottom",
+                fontsize=15,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.75, edgecolor="#999999"),
+            )
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
     ax.grid(alpha=0.25)
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=15)
     fig.tight_layout()
     _save_figure_png(fig, output_base)
     plt.close(fig)

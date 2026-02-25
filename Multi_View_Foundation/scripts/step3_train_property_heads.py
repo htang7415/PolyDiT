@@ -70,11 +70,11 @@ REPRESENTATION_COLORS = {
 PUBLICATION_STYLE = {
     "font.family": "serif",
     "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 10,
-    "axes.titlesize": 10,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "legend.fontsize": 8,
+    "axes.labelsize": 15,
+    "axes.titlesize": 15,
+    "xtick.labelsize": 15,
+    "ytick.labelsize": 15,
+    "legend.fontsize": 15,
     "axes.linewidth": 0.9,
     "lines.linewidth": 1.8,
     "figure.dpi": 300,
@@ -476,14 +476,14 @@ def _draw_heatmap(
     masked = np.ma.masked_invalid(arr)
     im = ax.imshow(masked, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
     ax.set_yticks(np.arange(len(row_labels)))
-    ax.set_yticklabels(row_labels, fontsize=9)
+    ax.set_yticklabels(row_labels, fontsize=15)
     ax.set_xticks(np.arange(len(col_labels)))
-    ax.set_xticklabels(col_labels, rotation=30, ha="right", fontsize=9)
+    ax.set_xticklabels(col_labels, rotation=30, ha="right", fontsize=15)
     for r in range(arr.shape[0]):
         for c in range(arr.shape[1]):
             val = arr[r, c]
             if np.isfinite(val):
-                ax.text(c, r, format(float(val), value_fmt), ha="center", va="center", fontsize=8, color="black")
+                ax.text(c, r, format(float(val), value_fmt), ha="center", va="center", fontsize=15, color="black")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
 
@@ -535,7 +535,7 @@ def _plot_f3_metrics_by_split(metrics_df: pd.DataFrame, figures_dir: Path) -> No
                 )
 
             ax.set_xticks(x)
-            ax.set_xticklabels(reps, rotation=30, ha="right", fontsize=8)
+            ax.set_xticklabels(reps, rotation=30, ha="right", fontsize=15)
             ax.set_ylabel(metric_label)
             ax.grid(axis="y", alpha=0.25)
             if metric_col == "r2":
@@ -545,7 +545,7 @@ def _plot_f3_metrics_by_split(metrics_df: pd.DataFrame, figures_dir: Path) -> No
                 ax.set_ylim(min(-0.1, low), 1.0)
 
             if row_idx == 0 and col_idx == 0:
-                ax.legend(loc="best", fontsize=8)
+                ax.legend(loc="best", fontsize=15)
 
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f3_metrics_by_split")
@@ -654,7 +654,7 @@ def _plot_f3_test_head_leaderboard(metrics_df: pd.DataFrame, figures_dir: Path) 
             colors = [_representation_color(rep) for rep in reps]
             bars = ax.barh(y, vals, color=colors, alpha=0.92)
             ax.set_yticks(y)
-            ax.set_yticklabels(reps, fontsize=8)
+            ax.set_yticklabels(reps, fontsize=15)
             ax.invert_yaxis()
             ax.set_xlabel(metric_label)
             ax.grid(axis="x", alpha=0.25)
@@ -673,7 +673,7 @@ def _plot_f3_test_head_leaderboard(metrics_df: pd.DataFrame, figures_dir: Path) 
                     f"  {val:.3f}",
                     va="center",
                     ha="left",
-                    fontsize=7,
+                    fontsize=15,
                 )
                 ranking_rows.append(
                     {
@@ -776,7 +776,7 @@ def _plot_f3_fusion_gain(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
         bars = ax.bar(x, values, color=colors, alpha=0.9)
         ax.axhline(0.0, color="#444444", linewidth=1.0)
         ax.set_xticks(x)
-        ax.set_xticklabels(props, rotation=30, ha="right", fontsize=8)
+        ax.set_xticklabels(props, rotation=30, ha="right", fontsize=15)
         ax.set_ylabel(label_text)
         ax.grid(axis="y", alpha=0.25)
         finite = values[np.isfinite(values)]
@@ -786,7 +786,7 @@ def _plot_f3_fusion_gain(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
                 continue
             text_y = float(val) + (offset if val >= 0 else -offset)
             va = "bottom" if val >= 0 else "top"
-            ax.text(bar.get_x() + bar.get_width() / 2.0, text_y, f"{val:+.3f}", ha="center", va=va, fontsize=8)
+            ax.text(bar.get_x() + bar.get_width() / 2.0, text_y, f"{val:+.3f}", ha="center", va=va, fontsize=15)
 
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f3_fusion_gain_vs_best_single")
@@ -852,7 +852,7 @@ def _plot_f3_head_coverage(model_dir: Path, figures_dir: Path) -> None:
         colors = [_representation_color(rep) for rep in reps]
         bars = ax.bar(x, effective, width=0.52, color=colors, alpha=0.92, label="effective_samples")
         ax.set_xticks(x)
-        ax.set_xticklabels(reps, rotation=30, ha="right", fontsize=8)
+        ax.set_xticklabels(reps, rotation=30, ha="right", fontsize=15)
         ax.set_ylabel("Samples")
         ax.grid(axis="y", alpha=0.25)
 
@@ -865,11 +865,11 @@ def _plot_f3_head_coverage(model_dir: Path, figures_dir: Path) -> None:
                 f"{int(round(float(val)))}",
                 ha="center",
                 va="bottom",
-                fontsize=7,
+                fontsize=15,
             )
 
         if row_idx == 0:
-            ax.legend(loc="best", fontsize=8)
+            ax.legend(loc="best", fontsize=15)
 
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f3_head_coverage")
@@ -950,7 +950,7 @@ def _plot_f3_hpo_progress(model_dir: Path, figures_dir: Path) -> None:
         ax.set_xlabel("Trial")
         ax.set_ylabel(f"Best {metric_text}")
         ax.grid(alpha=0.3)
-        ax.legend(loc="best", fontsize=8, ncol=2)
+        ax.legend(loc="best", fontsize=15, ncol=2)
 
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f3_hpo_progress")

@@ -135,11 +135,11 @@ DEFAULT_F5_RESAMPLE_SETTINGS = {
 PUBLICATION_STYLE = {
     "font.family": "serif",
     "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 10,
-    "axes.titlesize": 10,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "legend.fontsize": 8,
+    "axes.labelsize": 15,
+    "axes.titlesize": 15,
+    "xtick.labelsize": 15,
+    "ytick.labelsize": 15,
+    "legend.fontsize": 15,
     "axes.linewidth": 0.9,
     "lines.linewidth": 1.8,
     "figure.dpi": 300,
@@ -211,41 +211,90 @@ def _plot_f5_diagnostics(
         return
 
     df = scored_df.copy()
+    mode = str(target_mode).strip().lower()
     accepted_mask = pd.to_numeric(df.get("accepted", pd.Series([0] * len(df), index=df.index)), errors="coerce").fillna(0).to_numpy(dtype=np.float32) > 0
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
     ax0, ax1, ax2, ax3 = axes.reshape(-1)
 
-    # A) prediction distribution.
-    pred = pd.to_numeric(df.get("prediction", pd.Series(dtype=float)), errors="coerce").dropna()
-    pred_accepted = pd.to_numeric(df.loc[accepted_mask, "prediction"] if "prediction" in df.columns else pd.Series(dtype=float), errors="coerce").dropna()
-    if len(pred):
-        ax0.hist(pred.to_numpy(dtype=np.float32), bins=40, color="#4E79A7", alpha=0.65, label="Scored")
-    if len(pred_accepted):
-        ax0.hist(pred_accepted.to_numpy(dtype=np.float32), bins=30, color="#E15759", alpha=0.75, label="Accepted")
-    ax0.axvline(float(target_value), color="#222222", linestyle="--", linewidth=1.1, label="Target")
-    if str(target_mode).lower() == "window":
+    # A) score distribution.
+    if mode in {"ge", "le"}:
+        if "target_excess" in df.columns:
+            excess_all = pd.to_numeric(df["target_excess"], errors="coerce").dropna()
+            excess_acc = pd.to_numeric(df.loc[accepted_mask, "target_excess"], errors="coerce").dropna()
+        else:
+            pred_vals = pd.to_numeric(df.get("prediction", pd.Series(dtype=float)), errors="coerce")
+            pred_acc_vals = pd.to_numeric(df.loc[accepted_mask, "prediction"] if "prediction" in df.columns else pd.Series(dtype=float), errors="coerce")
+            excess_all = pd.Series(_compute_target_excess(pred_vals.to_numpy(dtype=np.float32), float(target_value), mode)).dropna()
+            excess_acc = pd.Series(_compute_target_excess(pred_acc_vals.to_numpy(dtype=np.float32), float(target_value), mode)).dropna()
+        if len(excess_all):
+            ax0.hist(excess_all.to_numpy(dtype=np.float32), bins=40, color="#4E79A7", alpha=0.65, label="Scored")
+        if len(excess_acc):
+            ax0.hist(excess_acc.to_numpy(dtype=np.float32), bins=30, color="#E15759", alpha=0.75, label="Accepted")
+        ax0.axvline(0.0, color="#222222", linestyle="--", linewidth=1.1, label="Target boundary")
+        ax0.set_xlabel(_target_excess_axis_label(property_name, mode))
+    else:
+        pred = pd.to_numeric(df.get("prediction", pd.Series(dtype=float)), errors="coerce").dropna()
+        pred_accepted = pd.to_numeric(df.loc[accepted_mask, "prediction"] if "prediction" in df.columns else pd.Series(dtype=float), errors="coerce").dropna()
+        if len(pred):
+            ax0.hist(pred.to_numpy(dtype=np.float32), bins=40, color="#4E79A7", alpha=0.65, label="Scored")
+        if len(pred_accepted):
+            ax0.hist(pred_accepted.to_numpy(dtype=np.float32), bins=30, color="#E15759", alpha=0.75, label="Accepted")
+        ax0.axvline(float(target_value), color="#222222", linestyle="--", linewidth=1.1, label="Target")
         ax0.axvspan(float(target_value) - float(epsilon), float(target_value) + float(epsilon), color="#59A14F", alpha=0.15)
-    ax0.set_xlabel(f"Predicted {property_name}")
+        ax0.set_xlabel(f"Predicted {property_name}")
     ax0.set_ylabel("Count")
     ax0.grid(alpha=0.25)
-    ax0.legend(loc="best", fontsize=8)
+    ax0.legend(loc="best", fontsize=15)
 
     # B) prediction vs OOD distance.
     if {"prediction", "d2_distance"}.issubset(set(df.columns)):
         scatter_df = df.dropna(subset=["prediction", "d2_distance"]).copy()
         if not scatter_df.empty:
-            hit_vals = scatter_df.get("property_hit", pd.Series([False] * len(scatter_df), index=scatter_df.index)).astype(bool)
-            base = scatter_df[~hit_vals]
-            hit = scatter_df[hit_vals]
-            if not base.empty:
-                ax1.scatter(base["d2_distance"], base["prediction"], s=16, alpha=0.35, color="#9ECAE1", label="Non-hit")
-            if not hit.empty:
-                ax1.scatter(hit["d2_distance"], hit["prediction"], s=24, alpha=0.9, color="#D94801", label="Hit")
-            ax1.axhline(float(target_value), color="#222222", linestyle="--", linewidth=1.0)
-            ax1.set_xlabel("D2 distance")
-            ax1.set_ylabel(f"Predicted {property_name}")
-            ax1.grid(alpha=0.25)
-            ax1.legend(loc="best", fontsize=8)
+            if mode in {"ge", "le"}:
+                if "target_excess" in scatter_df.columns:
+                    y_vals = pd.to_numeric(scatter_df["target_excess"], errors="coerce")
+                else:
+                    y_vals = pd.Series(
+                        _compute_target_excess(
+                            pd.to_numeric(scatter_df["prediction"], errors="coerce").to_numpy(dtype=np.float32),
+                            float(target_value),
+                            mode,
+                        ),
+                        index=scatter_df.index,
+                    )
+                mask = y_vals.notna()
+                scatter_df = scatter_df.loc[mask].copy()
+                y_vals = y_vals.loc[mask]
+                if not scatter_df.empty:
+                    sc = ax1.scatter(
+                        scatter_df["d2_distance"],
+                        y_vals,
+                        c=y_vals,
+                        cmap="RdYlGn",
+                        s=24,
+                        alpha=0.82,
+                    )
+                    ax1.axhline(0.0, color="#222222", linestyle="--", linewidth=1.0)
+                    ax1.set_xlabel("D2 distance")
+                    ax1.set_ylabel(f"{_target_excess_axis_label(property_name, mode)} (>=0 is hit)")
+                    ax1.grid(alpha=0.25)
+                    fig.colorbar(sc, ax=ax1, fraction=0.046, pad=0.04, label="Target excess")
+                else:
+                    ax1.text(0.5, 0.5, "No finite points", ha="center", va="center")
+                    ax1.set_axis_off()
+            else:
+                hit_vals = scatter_df.get("property_hit", pd.Series([False] * len(scatter_df), index=scatter_df.index)).astype(bool)
+                base = scatter_df[~hit_vals]
+                hit = scatter_df[hit_vals]
+                if not base.empty:
+                    ax1.scatter(base["d2_distance"], base["prediction"], s=16, alpha=0.35, color="#9ECAE1", label="Non-hit")
+                if not hit.empty:
+                    ax1.scatter(hit["d2_distance"], hit["prediction"], s=24, alpha=0.9, color="#D94801", label="Hit")
+                ax1.axhline(float(target_value), color="#222222", linestyle="--", linewidth=1.0)
+                ax1.set_xlabel("D2 distance")
+                ax1.set_ylabel(f"Predicted {property_name}")
+                ax1.grid(alpha=0.25)
+                ax1.legend(loc="best", fontsize=15)
         else:
             ax1.text(0.5, 0.5, "No finite points", ha="center", va="center")
             ax1.set_axis_off()
@@ -267,7 +316,7 @@ def _plot_f5_diagnostics(
             ax2.grid(axis="y", alpha=0.25)
             ax2.tick_params(axis="x", rotation=30)
             for bar, val in zip(bars, grp.to_numpy(dtype=np.float32)):
-                ax2.text(bar.get_x() + bar.get_width() / 2.0, float(val), f"{int(val)}", ha="center", va="bottom", fontsize=8)
+                ax2.text(bar.get_x() + bar.get_width() / 2.0, float(val), f"{int(val)}", ha="center", va="bottom", fontsize=15)
         else:
             ax2.text(0.5, 0.5, "No accepted candidates", ha="center", va="center")
             ax2.set_axis_off()
@@ -278,13 +327,20 @@ def _plot_f5_diagnostics(
     # D) cumulative hits by ranking.
     hit_col = df.get("property_hit", pd.Series([False] * len(df))).astype(bool).to_numpy(dtype=bool)
     if len(df):
-        mode = str(target_mode).lower()
-        if mode == "ge":
-            order = np.argsort(-pd.to_numeric(df.get("prediction", pd.Series(dtype=float)), errors="coerce").fillna(-np.inf).to_numpy(dtype=np.float32))
-        elif mode == "le":
-            order = np.argsort(pd.to_numeric(df.get("prediction", pd.Series(dtype=float)), errors="coerce").fillna(np.inf).to_numpy(dtype=np.float32))
+        if mode in {"ge", "le"}:
+            if "target_excess" in df.columns:
+                excess = pd.to_numeric(df["target_excess"], errors="coerce").fillna(-np.inf).to_numpy(dtype=np.float32)
+            else:
+                pred_vals = pd.to_numeric(df.get("prediction", pd.Series(dtype=float)), errors="coerce").fillna(np.nan).to_numpy(dtype=np.float32)
+                excess = _compute_target_excess(pred_vals, float(target_value), mode)
+                excess = np.nan_to_num(excess, nan=-np.inf, neginf=-np.inf, posinf=np.inf)
+            order = np.argsort(-excess)
         else:
-            order = np.argsort(pd.to_numeric(df.get("abs_error", pd.Series(dtype=float)), errors="coerce").fillna(np.inf).to_numpy(dtype=np.float32))
+            if "target_violation" in df.columns:
+                order_vals = pd.to_numeric(df["target_violation"], errors="coerce").fillna(np.inf).to_numpy(dtype=np.float32)
+            else:
+                order_vals = pd.to_numeric(df.get("abs_error", pd.Series(dtype=float)), errors="coerce").fillna(np.inf).to_numpy(dtype=np.float32)
+            order = np.argsort(order_vals)
         ordered_hits = hit_col[order].astype(np.int64, copy=False)
         cum_hits = np.cumsum(ordered_hits)
         x = np.arange(1, len(cum_hits) + 1, dtype=np.int64)
@@ -820,7 +876,8 @@ def _embed_graph(smiles_list: List[str], assets: dict, device: str) -> Tuple[np.
             data = assets["tokenizer"].encode(smi)
             graph_batches.append(data)
             valid_indices.append(idx)
-        except Exception:
+        except Exception as e:
+            print(f"[F5] Warning: graph encoding failed for molecule {idx}: {str(e)[:80]}")
             continue
     embeddings = []
     for start in range(0, len(graph_batches), assets["batch_size"]):
@@ -1193,6 +1250,37 @@ def _compute_hits(preds: np.ndarray, target: float, epsilon: float, target_mode:
     raise ValueError(f"Unsupported target_mode={target_mode}. Use window|ge|le.")
 
 
+def _compute_target_excess(preds: np.ndarray, target: float, target_mode: str) -> np.ndarray:
+    """Signed distance to target boundary.
+
+    Positive values indicate better achievement:
+    - window: pred - target
+    - ge: pred - target
+    - le: target - pred
+    """
+    arr = np.asarray(preds, dtype=np.float32).reshape(-1)
+    mode = str(target_mode).strip().lower()
+    if mode == "le":
+        return (float(target) - arr).astype(np.float32, copy=False)
+    return (arr - float(target)).astype(np.float32, copy=False)
+
+
+def _compute_target_violation(preds: np.ndarray, target: float, target_mode: str) -> np.ndarray:
+    """Non-negative boundary violation in property units."""
+    excess = _compute_target_excess(preds, target, target_mode)
+    mode = str(target_mode).strip().lower()
+    if mode == "window":
+        return np.abs(excess).astype(np.float32, copy=False)
+    return np.maximum(0.0, -excess).astype(np.float32, copy=False)
+
+
+def _target_excess_axis_label(property_name: str, target_mode: str) -> str:
+    mode = str(target_mode).strip().lower()
+    if mode == "le":
+        return f"Target excess (target - predicted {property_name})"
+    return f"Target excess (predicted {property_name} - target)"
+
+
 _SA_SCORE_FN = None
 
 
@@ -1226,6 +1314,82 @@ def _compute_sa_score(smiles: str) -> Optional[float]:
         return float(score)
     except Exception:
         return None
+
+
+def _count_aromatic_rings(smiles: str) -> Optional[int]:
+    """Count aromatic rings in a SMILES string using RDKit."""
+    if Chem is None:
+        return None
+    try:
+        mol = Chem.MolFromSmiles(smiles.replace("*", "[H]"))
+        if mol is None:
+            mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+        from rdkit.Chem import rdMolDescriptors
+        return int(rdMolDescriptors.CalcNumAromaticRings(mol))
+    except Exception:
+        return None
+
+
+def _compute_pairwise_tanimoto_diversity(smiles_list: List[str], max_pairs: int = 10000) -> Optional[float]:
+    """Compute mean pairwise Tanimoto diversity (1 - similarity) over accepted candidates."""
+    if Chem is None or len(smiles_list) < 2:
+        return None
+    try:
+        from rdkit.Chem import AllChem, DataStructs
+    except ImportError:
+        return None
+    fps = []
+    for smi in smiles_list:
+        try:
+            mol = Chem.MolFromSmiles(smi)
+            if mol is None:
+                continue
+            fps.append(AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048))
+        except Exception:
+            continue
+    n = len(fps)
+    if n < 2:
+        return None
+    # For large sets, subsample pairs to avoid O(n^2) blowup
+    if n * (n - 1) // 2 <= max_pairs:
+        total_dist = 0.0
+        count = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                sim = DataStructs.TanimotoSimilarity(fps[i], fps[j])
+                total_dist += 1.0 - sim
+                count += 1
+        return total_dist / count if count > 0 else None
+    else:
+        rng = np.random.RandomState(42)
+        indices = rng.randint(0, n, size=(max_pairs, 2))
+        # Ensure different indices in each pair
+        mask = indices[:, 0] != indices[:, 1]
+        indices = indices[mask]
+        total_dist = 0.0
+        count = 0
+        for i, j in indices:
+            sim = DataStructs.TanimotoSimilarity(fps[i], fps[j])
+            total_dist += 1.0 - sim
+            count += 1
+        return total_dist / count if count > 0 else None
+
+
+def _parse_descriptor_min_constraints(config: dict) -> Dict[str, int]:
+    """Extract hard minimum constraints from ood_aware_inverse.descriptor_constraints."""
+    desc_cfg = config.get("ood_aware_inverse", {}).get("descriptor_constraints", {})
+    if not desc_cfg or not isinstance(desc_cfg, dict):
+        return {}
+    mins: Dict[str, int] = {}
+    for name, spec in desc_cfg.items():
+        if isinstance(spec, dict) and spec.get("min") is not None:
+            try:
+                mins[str(name).strip().lower()] = int(spec["min"])
+            except (ValueError, TypeError):
+                pass
+    return mins
 
 
 def _canonicalize_smiles(smiles: str) -> str:
@@ -1508,6 +1672,10 @@ def _resample_candidates_until_target(
             f"min_hits_per_view={per_view_min_hits}, relax_after_batch={per_view_quota_relax_after_batches}"
         )
 
+    descriptor_min_constraints = _parse_descriptor_min_constraints(config)
+    if descriptor_min_constraints:
+        print(f"[F5 resample] descriptor min constraints: {descriptor_min_constraints}")
+
     scoring_generator = _create_generator(
         view=scoring_view,
         assets=scoring_assets,
@@ -1654,6 +1822,30 @@ def _resample_candidates_until_target(
                     _bump("reject_sa")
                     continue
 
+            # Hard descriptor minimum constraints (e.g., aromatic_ring_count >= 2)
+            descriptor_ok = True
+            if descriptor_min_constraints:
+                for desc_name, min_val in descriptor_min_constraints.items():
+                    if desc_name == "aromatic_ring_count":
+                        count = _count_aromatic_rings(text)
+                        if count is not None and count < min_val:
+                            descriptor_ok = False
+                            break
+                    elif desc_name == "ring_count":
+                        if Chem is not None:
+                            try:
+                                mol = Chem.MolFromSmiles(text.replace("*", "[H]"))
+                                if mol is None:
+                                    mol = Chem.MolFromSmiles(text)
+                                if mol is not None and mol.GetRingInfo().NumRings() < min_val:
+                                    descriptor_ok = False
+                                    break
+                            except Exception:
+                                pass
+            if not descriptor_ok:
+                _bump("reject_descriptor_min")
+                continue
+
             prefilter_smiles.append(text)
             prefilter_meta.append(
                 {
@@ -1710,10 +1902,14 @@ def _resample_candidates_until_target(
         for row_idx, meta in enumerate(kept_meta):
             pred_value = float(preds[row_idx])
             hit = bool(hits[row_idx])
+            excess_value = float(_compute_target_excess(np.asarray([pred_value], dtype=np.float32), target_value, target_mode)[0])
+            violation_value = float(_compute_target_violation(np.asarray([pred_value], dtype=np.float32), target_value, target_mode)[0])
             record = {
                 **meta,
                 "prediction": pred_value,
                 "abs_error": abs(pred_value - target_value),
+                "target_excess": excess_value,
+                "target_violation": violation_value,
                 "property_hit": hit,
                 "accepted": False,
             }
@@ -1756,7 +1952,17 @@ def _resample_candidates_until_target(
 
     scored_df = pd.DataFrame(scored_records)
     if scored_df.empty:
-        scored_df = pd.DataFrame(columns=["smiles", "prediction", "abs_error", "property_hit", "accepted"])
+        scored_df = pd.DataFrame(
+            columns=[
+                "smiles",
+                "prediction",
+                "abs_error",
+                "target_excess",
+                "target_violation",
+                "property_hit",
+                "accepted",
+            ]
+        )
     accepted_df = scored_df[scored_df["accepted"] == True].head(sampling_target).copy()  # noqa: E712
 
     scored_embeddings_np = None
@@ -1989,6 +2195,8 @@ def main(args):
             scored_df["prediction_n_models"] = np.nan
 
         scored_df["abs_error"] = np.abs(ensemble_pred - target_value)
+        scored_df["target_excess"] = _compute_target_excess(ensemble_pred, target_value, target_mode)
+        scored_df["target_violation"] = _compute_target_violation(ensemble_pred, target_value, target_mode)
         valid_pred = np.isfinite(ensemble_pred)
         hit_mask = _compute_hits(ensemble_pred, target_value, epsilon, target_mode)
         hit_mask = np.logical_and(hit_mask, valid_pred)
@@ -2030,7 +2238,17 @@ def main(args):
 
     elapsed_sec = time.time() - t0
     if scored_df.empty:
-        scored_df = pd.DataFrame(columns=["smiles", "prediction", "abs_error", "property_hit", "accepted"])
+        scored_df = pd.DataFrame(
+            columns=[
+                "smiles",
+                "prediction",
+                "abs_error",
+                "target_excess",
+                "target_violation",
+                "property_hit",
+                "accepted",
+            ]
+        )
 
     scored_smiles = scored_df["smiles"].astype(str).tolist() if "smiles" in scored_df.columns else []
     preds = scored_df["prediction"].to_numpy(dtype=np.float32) if "prediction" in scored_df.columns else np.array([], dtype=np.float32)
@@ -2073,6 +2291,17 @@ def main(args):
         else:
             rerank_metrics = {"rerank_applied": False}
 
+    # Compute pairwise Tanimoto diversity over accepted candidates
+    accepted_smiles_for_div = scored_df.loc[accepted_mask, "smiles"].astype(str).tolist() if n_hits > 1 else []
+    avg_diversity = _compute_pairwise_tanimoto_diversity(accepted_smiles_for_div)
+    if avg_diversity is not None:
+        avg_diversity = round(avg_diversity, 4)
+
+    target_excess = _compute_target_excess(preds, target_value, target_mode) if preds.size else np.array([], dtype=np.float32)
+    target_violation = _compute_target_violation(preds, target_value, target_mode) if preds.size else np.array([], dtype=np.float32)
+    mean_target_excess = float(np.nanmean(target_excess)) if target_excess.size else np.nan
+    mean_target_violation = float(np.nanmean(target_violation)) if target_violation.size else np.nan
+
     metrics_row = {
         "method": "Multi_View_Foundation",
         "representation": _view_to_representation(encoder_view),
@@ -2091,7 +2320,9 @@ def main(args):
         "validity_two_stars": round(validity, 4),
         "uniqueness": round(uniqueness, 4),
         "novelty": round(novelty, 4),
-        "avg_diversity": None,
+        "avg_diversity": avg_diversity,
+        "mean_target_excess": round(mean_target_excess, 6) if np.isfinite(mean_target_excess) else np.nan,
+        "mean_target_violation": round(mean_target_violation, 6) if np.isfinite(mean_target_violation) else np.nan,
         **_achievement_rates(preds, target_value),
         "sampling_time_sec": round(elapsed_sec, 2),
         "valid_per_compute": round(n_valid / max(elapsed_sec, 1e-9), 4) if n_valid else 0.0,

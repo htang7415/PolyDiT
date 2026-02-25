@@ -67,11 +67,11 @@ SUPPORTED_DESCRIPTOR_CONSTRAINTS = {
 PUBLICATION_STYLE = {
     "font.family": "serif",
     "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 10,
-    "axes.titlesize": 10,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "legend.fontsize": 8,
+    "axes.labelsize": 15,
+    "axes.titlesize": 15,
+    "xtick.labelsize": 15,
+    "ytick.labelsize": 15,
+    "legend.fontsize": 15,
     "axes.linewidth": 0.9,
     "lines.linewidth": 1.8,
     "figure.dpi": 300,
@@ -133,6 +133,7 @@ def _plot_f6_objective_diagnostics(
     valid_df: pd.DataFrame,
     top_df: pd.DataFrame,
     property_name: str,
+    target_mode: str,
     normalized_term_weights: Dict[str, float],
     figures_dir: Path,
 ) -> None:
@@ -152,17 +153,26 @@ def _plot_f6_objective_diagnostics(
     ax0.set_xlabel("Objective (lower is better)")
     ax0.set_ylabel("Count")
     ax0.grid(alpha=0.25)
-    ax0.legend(loc="best", fontsize=8)
+    ax0.legend(loc="best", fontsize=15)
 
-    # B) property vs OOD trade-off.
-    x = pd.to_numeric(valid_df.get("d2_distance_objective", pd.Series(dtype=float)), errors="coerce")
-    y = pd.to_numeric(valid_df.get("property_error_objective", pd.Series(dtype=float)), errors="coerce")
+    # B) property-vs-OOD trade-off.
+    mode = str(target_mode).strip().lower()
+    if mode in {"ge", "le"} and "target_excess" in valid_df.columns:
+        x = pd.to_numeric(valid_df.get("d2_distance", pd.Series(dtype=float)), errors="coerce")
+        y = pd.to_numeric(valid_df.get("target_excess", pd.Series(dtype=float)), errors="coerce")
+        x_label = "D2 distance"
+        y_label = "Target excess (>=0 is hit)"
+    else:
+        x = pd.to_numeric(valid_df.get("d2_distance_objective", pd.Series(dtype=float)), errors="coerce")
+        y = pd.to_numeric(valid_df.get("property_error_objective", pd.Series(dtype=float)), errors="coerce")
+        x_label = "OOD objective term"
+        y_label = "Property objective term"
     c = pd.to_numeric(valid_df.get("conservative_objective", pd.Series(dtype=float)), errors="coerce")
     mask = x.notna() & y.notna() & c.notna()
     if mask.any():
         sc = ax1.scatter(x[mask], y[mask], c=c[mask], cmap="viridis", s=18, alpha=0.7)
-        ax1.set_xlabel("OOD objective term")
-        ax1.set_ylabel("Property objective term")
+        ax1.set_xlabel(x_label)
+        ax1.set_ylabel(y_label)
         ax1.grid(alpha=0.25)
         fig.colorbar(sc, ax=ax1, fraction=0.046, pad=0.04, label="Conservative objective")
     else:
@@ -180,7 +190,7 @@ def _plot_f6_objective_diagnostics(
         ax2.grid(axis="y", alpha=0.25)
         ax2.tick_params(axis="x", rotation=30)
         for bar, val in zip(bars, values):
-            ax2.text(bar.get_x() + bar.get_width() / 2.0, float(val), f"{float(val):.2f}", ha="center", va="bottom", fontsize=8)
+            ax2.text(bar.get_x() + bar.get_width() / 2.0, float(val), f"{float(val):.2f}", ha="center", va="bottom", fontsize=15)
     else:
         ax2.text(0.5, 0.5, "No active objective terms", ha="center", va="center")
         ax2.set_axis_off()
@@ -476,6 +486,23 @@ def _normalize_scores(values: np.ndarray, mode: str) -> np.ndarray:
     if span <= 1e-12:
         return np.zeros_like(x, dtype=np.float32)
     return (x - x_min) / span
+
+
+def _compute_target_excess(predictions: np.ndarray, target_value: float, target_mode: str) -> np.ndarray:
+    """Signed distance to target boundary; >=0 means meeting directional target."""
+    preds = np.asarray(predictions, dtype=np.float32).reshape(-1)
+    mode = str(target_mode).strip().lower()
+    if mode == "le":
+        return (float(target_value) - preds).astype(np.float32, copy=False)
+    return (preds - float(target_value)).astype(np.float32, copy=False)
+
+
+def _target_violation_from_excess(target_excess: np.ndarray, target_mode: str) -> np.ndarray:
+    mode = str(target_mode).strip().lower()
+    excess = np.asarray(target_excess, dtype=np.float32).reshape(-1)
+    if mode == "window":
+        return np.abs(excess).astype(np.float32, copy=False)
+    return np.maximum(0.0, -excess).astype(np.float32, copy=False)
 
 
 def _resolve_prediction_columns(df: pd.DataFrame, property_name: str) -> tuple[str, Optional[str], Optional[str]]:
@@ -966,6 +993,8 @@ def main(args):
         print("[F6] Warning: uncertainty term disabled because prediction_uncertainty has no variation.")
 
     hit_mask = compute_property_hits(pred, target_value=float(target), epsilon=float(epsilon), target_mode=target_mode)
+    target_excess = _compute_target_excess(pred, target_value=float(target), target_mode=target_mode)
+    target_violation_raw = _target_violation_from_excess(target_excess, target_mode=target_mode)
     property_error_raw = compute_property_error(pred, target_value=float(target), target_mode=target_mode)
     property_error_obj = _normalize_scores(property_error_raw, normalization)
     d2_obj = _normalize_scores(d2, normalization)
@@ -1098,6 +1127,8 @@ def main(args):
     objective_rank[order] = np.arange(objective.shape[0], dtype=np.int64)
 
     valid_df["property_hit"] = hit_mask.astype(bool)
+    valid_df["target_excess"] = target_excess
+    valid_df["target_violation"] = target_violation_raw
     valid_df["property_error_normed"] = property_error_raw
     valid_df["property_error_objective"] = property_error_obj
     valid_df["d2_distance_objective"] = d2_obj
@@ -1171,7 +1202,9 @@ def main(args):
         "top_k_hit_rate_ood_only": round(float(top_ood["property_hit"].mean()) if len(top_ood) else 0.0, 4),
         "top_k_mean_prediction": round(float(top_df["prediction"].mean()) if len(top_df) else 0.0, 6),
         "top_k_mean_prediction_uncertainty": round(float(top_df["prediction_uncertainty"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_abs_error": round(float(np.abs(top_df["prediction"] - float(target)).mean()) if len(top_df) else 0.0, 6),
+        "top_k_mean_abs_error": round(float(top_df["target_violation"].mean()) if len(top_df) else 0.0, 6),
+        "top_k_mean_target_excess": round(float(top_df["target_excess"].mean()) if len(top_df) else 0.0, 6),
+        "top_k_mean_target_violation": round(float(top_df["target_violation"].mean()) if len(top_df) else 0.0, 6),
         "top_k_mean_d2_distance": round(float(top_df["d2_distance"].mean()) if len(top_df) else 0.0, 6),
         "top_k_mean_constraint_violation": round(float(top_df["constraint_violation_total"].mean()) if len(top_df) else 0.0, 6),
         "top_k_mean_descriptor_violation": round(float(top_df["descriptor_violation_total"].mean()) if len(top_df) else 0.0, 6),
@@ -1297,6 +1330,7 @@ def main(args):
             valid_df=valid_df,
             top_df=top_df,
             property_name=property_name,
+            target_mode=target_mode,
             normalized_term_weights=normalized_term_weights,
             figures_dir=step_dirs["figures_dir"],
         )

@@ -120,12 +120,12 @@ PUBLICATION_STYLE = {
     "axes.spines.right": False,
     "axes.linewidth": 0.8,
     "axes.titleweight": "bold",
-    "axes.labelsize": 10,
-    "axes.titlesize": 11,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
+    "axes.labelsize": 15,
+    "axes.titlesize": 15,
+    "xtick.labelsize": 15,
+    "ytick.labelsize": 15,
     "legend.frameon": False,
-    "legend.fontsize": 9,
+    "legend.fontsize": 15,
     "figure.dpi": 300,
     "savefig.dpi": 600,
 }
@@ -681,6 +681,29 @@ def _property_error_from_predictions(
     return np.abs(pred - target).astype(np.float32, copy=False)
 
 
+def _target_excess_from_predictions(
+    pred: np.ndarray,
+    target: Optional[float],
+    target_mode: str,
+) -> np.ndarray:
+    if target is None:
+        return np.full_like(pred, np.nan, dtype=np.float32)
+    target = float(target)
+    mode = str(target_mode).strip().lower()
+    if mode == "le":
+        return (target - pred).astype(np.float32, copy=False)
+    return (pred - target).astype(np.float32, copy=False)
+
+
+def _target_excess_axis_label(property_name: str, target_mode: str) -> str:
+    mode = str(target_mode).strip().lower()
+    if mode == "ge":
+        return f"Target excess (predicted {property_name} - target)"
+    if mode == "le":
+        return f"Target excess (target - predicted {property_name})"
+    return "Signed error (prediction - target)"
+
+
 def _resolve_target_config(
     property_name: str,
     cfg_step7: dict,
@@ -706,24 +729,115 @@ def _resolve_target_config(
     return target, target_mode, epsilon
 
 
+def _resolve_reference_class(
+    *,
+    property_name: str,
+    cfg_step7: dict,
+    cfg_f5: dict,
+    candidate_df: pd.DataFrame,
+    topk_df: pd.DataFrame,
+    override_class: Optional[str] = None,
+) -> str:
+    text = str(override_class or "").strip().lower()
+    if text:
+        return text
+
+    class_map = cfg_step7.get("reference_classes", {}) or {}
+    if isinstance(class_map, dict):
+        text = str(class_map.get(property_name, "")).strip().lower()
+        if text:
+            return text
+
+    text = str(cfg_step7.get("reference_class", "")).strip().lower()
+    if text:
+        return text
+
+    # Use F5 target_class when this property is the active F5 target.
+    f5_prop = str(cfg_f5.get("property", "")).strip()
+    if f5_prop == property_name:
+        text = str(cfg_f5.get("target_class", "")).strip().lower()
+        if text:
+            return text
+
+    # Optional per-property class map from F5 configs.
+    f5_class_map = cfg_f5.get("target_classes", {}) or {}
+    if isinstance(f5_class_map, dict):
+        text = str(f5_class_map.get(property_name, "")).strip().lower()
+        if text:
+            return text
+
+    # Last fallback: infer single matched_class from candidate/top-k tables.
+    for df in (topk_df, candidate_df):
+        if "matched_class" not in df.columns:
+            continue
+        series = df["matched_class"].astype(str).str.strip().str.lower()
+        uniq = sorted({x for x in series.tolist() if x})
+        if len(uniq) == 1:
+            return uniq[0]
+    return ""
+
+
+def _apply_reference_class_filter(
+    *,
+    property_name: str,
+    ref_df: pd.DataFrame,
+    ref_desc: pd.DataFrame,
+    reference_class: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[str]]:
+    cls = str(reference_class).strip().lower()
+    if not cls:
+        return ref_df, ref_desc, None
+    motif_col = f"motif_{cls}"
+    if motif_col not in ref_desc.columns:
+        return ref_df, ref_desc, f"{property_name}: reference class filter '{cls}' not found in motif columns; using unfiltered reference."
+
+    mask = ref_desc[motif_col].fillna(False).astype(bool)
+    n_match = int(mask.sum())
+    if n_match <= 0:
+        return ref_df, ref_desc, f"{property_name}: reference class filter '{cls}' matched 0 rows; using unfiltered reference."
+
+    filtered_desc = ref_desc.loc[mask].copy()
+    allowed_smiles = set(filtered_desc["smiles"].astype(str).tolist())
+    filtered_ref = ref_df[ref_df["smiles"].astype(str).isin(allowed_smiles)].copy()
+    if filtered_ref.empty:
+        return ref_df, ref_desc, f"{property_name}: reference class filter '{cls}' removed all property rows; using unfiltered reference."
+    return filtered_ref, filtered_desc, None
+
+
 def _prepare_candidate_error_df(candidate_df: pd.DataFrame, target: Optional[float], target_mode: str) -> pd.DataFrame:
     cdf = candidate_df.copy()
     if "prediction" in cdf.columns:
         cdf["prediction"] = pd.to_numeric(cdf["prediction"], errors="coerce")
     if "d2_distance" in cdf.columns:
         cdf["d2_distance"] = pd.to_numeric(cdf["d2_distance"], errors="coerce")
-    if "abs_error" in cdf.columns:
-        cdf["property_error"] = pd.to_numeric(cdf["abs_error"], errors="coerce")
+
+    if "target_excess" in cdf.columns:
+        cdf["target_excess"] = pd.to_numeric(cdf["target_excess"], errors="coerce")
     elif "prediction" in cdf.columns and target is not None:
-        cdf["property_error"] = _property_error_from_predictions(
+        cdf["target_excess"] = _target_excess_from_predictions(
             cdf["prediction"].to_numpy(dtype=np.float32),
             target=target,
             target_mode=target_mode,
         )
-    elif "property_error_normed" in cdf.columns:
-        cdf["property_error"] = pd.to_numeric(cdf["property_error_normed"], errors="coerce")
     else:
-        cdf["property_error"] = np.nan
+        cdf["target_excess"] = np.nan
+
+    if "target_violation" in cdf.columns:
+        cdf["target_violation"] = pd.to_numeric(cdf["target_violation"], errors="coerce")
+    elif "prediction" in cdf.columns and target is not None:
+        cdf["target_violation"] = _property_error_from_predictions(
+            cdf["prediction"].to_numpy(dtype=np.float32),
+            target=target,
+            target_mode=target_mode,
+        )
+    elif "abs_error" in cdf.columns:
+        cdf["target_violation"] = pd.to_numeric(cdf["abs_error"], errors="coerce")
+    elif "property_error_normed" in cdf.columns:
+        cdf["target_violation"] = pd.to_numeric(cdf["property_error_normed"], errors="coerce")
+    else:
+        cdf["target_violation"] = np.nan
+
+    cdf["property_error"] = cdf["target_violation"]
     return cdf
 
 
@@ -758,7 +872,7 @@ def _plot_descriptor_detail_figure(property_name: str, descriptor_shift_df: pd.D
             if np.isfinite(lo) and np.isfinite(hi):
                 ax1.plot([lo, hi], [lo, hi], linestyle="--", color=COLOR_MUTED, linewidth=1.1)
             for _, row in pair_df.iterrows():
-                ax1.text(float(row["ref_median"]), float(row["topk_median"]), str(row["descriptor"]), fontsize=7, alpha=0.8)
+                ax1.text(float(row["ref_median"]), float(row["topk_median"]), str(row["descriptor"]), fontsize=15, alpha=0.8)
             ax1.set_xlabel("Reference median")
             ax1.set_ylabel("Top-k median")
             ax1.grid(alpha=0.25)
@@ -865,10 +979,17 @@ def _plot_property_ood_landscape_figure(
     if plt is None or candidate_df.empty:
         return
     cdf = _prepare_candidate_error_df(candidate_df, target=target, target_mode=target_mode)
-    if {"d2_distance", "property_error", "smiles"}.issubset(set(cdf.columns)) is False:
+    use_target_excess = str(target_mode).strip().lower() in {"ge", "le"} and cdf["target_excess"].notna().any()
+    y_col = "target_excess" if use_target_excess else "property_error"
+    y_label = (
+        f"{_target_excess_axis_label(property_name, target_mode)} (>=0 is hit)"
+        if use_target_excess
+        else "Property error"
+    )
+    if {"d2_distance", y_col, "smiles"}.issubset(set(cdf.columns)) is False:
         return
 
-    plot_df = cdf.dropna(subset=["d2_distance", "property_error"]).copy()
+    plot_df = cdf.dropna(subset=["d2_distance", y_col]).copy()
     if plot_df.empty:
         return
     if len(plot_df) > 12000:
@@ -883,22 +1004,24 @@ def _plot_property_ood_landscape_figure(
         ax0, ax1 = axes
 
         if not base.empty:
-            ax0.scatter(base["d2_distance"], base["property_error"], s=10, alpha=0.22, color=COLOR_PRIMARY, label="Candidates")
+            ax0.scatter(base["d2_distance"], base[y_col], s=10, alpha=0.22, color=COLOR_PRIMARY, label="Candidates")
         if not tk.empty:
-            ax0.scatter(tk["d2_distance"], tk["property_error"], s=26, alpha=0.9, color=COLOR_SECONDARY, label="F6 top-k")
+            ax0.scatter(tk["d2_distance"], tk[y_col], s=26, alpha=0.9, color=COLOR_SECONDARY, label="F6 top-k")
+        if use_target_excess:
+            ax0.axhline(0.0, color="#111111", linewidth=1.0, linestyle="--")
         ax0.set_xlabel("D2 distance (lower is better)")
-        ax0.set_ylabel("Property error")
+        ax0.set_ylabel(y_label)
         ax0.grid(alpha=0.25)
         ax0.legend(loc="best")
 
-        err_cand = _numeric_array(base["property_error"] if not base.empty else [])
-        err_top = _numeric_array(tk["property_error"] if not tk.empty else [])
+        err_cand = _numeric_array(base[y_col] if not base.empty else [])
+        err_top = _numeric_array(tk[y_col] if not tk.empty else [])
         if err_cand.size:
             ax1.hist(err_cand, bins=40, color=COLOR_PRIMARY, alpha=0.5, label="Candidates")
         if err_top.size:
             ax1.hist(err_top, bins=25, color=COLOR_SECONDARY, alpha=0.75, label="F6 top-k")
         if err_cand.size or err_top.size:
-            ax1.set_xlabel("Property error")
+            ax1.set_xlabel(y_label)
             ax1.set_ylabel("Count")
             ax1.grid(alpha=0.25)
             ax1.legend(loc="best")
@@ -1075,38 +1198,31 @@ def _plot_property_figure(
         ax2.set_axis_off()
 
     # Panel C: property error vs OOD distance
-    cdf = candidate_df.copy()
-    if "prediction" in cdf.columns:
-        cdf["prediction"] = pd.to_numeric(cdf["prediction"], errors="coerce")
-    if "d2_distance" in cdf.columns:
-        cdf["d2_distance"] = pd.to_numeric(cdf["d2_distance"], errors="coerce")
-    if "abs_error" in cdf.columns:
-        cdf["property_error"] = pd.to_numeric(cdf["abs_error"], errors="coerce")
-    elif "prediction" in cdf.columns and target is not None:
-        cdf["property_error"] = _property_error_from_predictions(
-            cdf["prediction"].to_numpy(dtype=np.float32),
-            target=target,
-            target_mode=target_mode,
-        )
-    elif "property_error_normed" in cdf.columns:
-        cdf["property_error"] = pd.to_numeric(cdf["property_error_normed"], errors="coerce")
-    else:
-        cdf["property_error"] = np.nan
+    cdf = _prepare_candidate_error_df(candidate_df, target=target, target_mode=target_mode)
+    use_target_excess = str(target_mode).strip().lower() in {"ge", "le"} and cdf["target_excess"].notna().any()
+    y_col = "target_excess" if use_target_excess else "property_error"
+    y_label = (
+        f"{_target_excess_axis_label(property_name, target_mode)} (>=0 is hit)"
+        if use_target_excess
+        else "Property error/proxy"
+    )
 
-    if {"d2_distance", "property_error", "smiles"}.issubset(set(cdf.columns)):
-        plot_df = cdf.dropna(subset=["d2_distance", "property_error"]).copy()
+    if {"d2_distance", y_col, "smiles"}.issubset(set(cdf.columns)):
+        plot_df = cdf.dropna(subset=["d2_distance", y_col]).copy()
         if not plot_df.empty:
             topk_set = set(topk_df["smiles"].astype(str).tolist()) if "smiles" in topk_df.columns else set()
             plot_df["is_topk"] = plot_df["smiles"].astype(str).isin(topk_set)
             base = plot_df[~plot_df["is_topk"]]
             tk = plot_df[plot_df["is_topk"]]
             if not base.empty:
-                ax3.scatter(base["d2_distance"], base["property_error"], s=12, alpha=0.35, label="Candidates", color="#9ECAE1")
+                ax3.scatter(base["d2_distance"], base[y_col], s=12, alpha=0.35, label="Candidates", color="#9ECAE1")
             if not tk.empty:
-                ax3.scatter(tk["d2_distance"], tk["property_error"], s=24, alpha=0.9, label="F6 top-k", color="#D94801")
+                ax3.scatter(tk["d2_distance"], tk[y_col], s=24, alpha=0.9, label="F6 top-k", color="#D94801")
+            if use_target_excess:
+                ax3.axhline(0.0, color="#111111", linewidth=1.0, linestyle="--")
             ax3.set_xlabel("D2 distance (lower is closer)")
-            ax3.set_ylabel("Property error/proxy")
-            ax3.legend(frameon=False, loc="best", fontsize=9)
+            ax3.set_ylabel(y_label)
+            ax3.legend(frameon=False, loc="best", fontsize=15)
         else:
             ax3.text(0.5, 0.5, "No valid scatter points", ha="center", va="center")
             ax3.set_axis_off()
@@ -1203,6 +1319,12 @@ def main(args):
     if skip_missing is None:
         skip_missing = True
     skip_missing = bool(skip_missing)
+
+    reference_class_override = str(args.reference_class or "").strip().lower() or None
+    reference_class_filter_enabled = args.reference_class_filter_enabled
+    if reference_class_filter_enabled is None:
+        reference_class_filter_enabled = _to_bool(cfg_step7.get("reference_class_filter_enabled", True), True)
+    reference_class_filter_enabled = bool(reference_class_filter_enabled)
 
     sa_score_fn = _load_sa_score_fn()
     compiled_motifs = _compile_motifs()
@@ -1313,6 +1435,15 @@ def main(args):
 
         target, target_mode, epsilon = _resolve_target_config(prop, cfg_step7, cfg_f5)
 
+        resolved_reference_class = _resolve_reference_class(
+            property_name=prop,
+            cfg_step7=cfg_step7,
+            cfg_f5=cfg_f5,
+            candidate_df=candidate_df,
+            topk_df=topk_df,
+            override_class=reference_class_override,
+        )
+
         ref_desc = _descriptor_and_motif_rows(
             ref_df["smiles"].astype(str).tolist(),
             property_name=prop,
@@ -1320,6 +1451,22 @@ def main(args):
             sa_score_fn=sa_score_fn,
             compiled_motifs=compiled_motifs,
         )
+        ref_df_used = ref_df
+        ref_desc_used = ref_desc
+        if reference_class_filter_enabled and resolved_reference_class:
+            ref_df_used, ref_desc_used, ref_filter_msg = _apply_reference_class_filter(
+                property_name=prop,
+                ref_df=ref_df,
+                ref_desc=ref_desc,
+                reference_class=resolved_reference_class,
+            )
+            if ref_filter_msg:
+                skipped.append(ref_filter_msg)
+            else:
+                print(
+                    f"[F7] Applied reference class filter '{resolved_reference_class}' "
+                    f"for {prop}: {len(ref_df_used)}/{len(ref_df)} reference rows kept."
+                )
         cand_desc = _descriptor_and_motif_rows(
             candidate_df["smiles"].astype(str).tolist(),
             property_name=prop,
@@ -1335,17 +1482,17 @@ def main(args):
             compiled_motifs=compiled_motifs,
         )
 
-        if ref_desc.empty or top_desc.empty:
+        if ref_desc_used.empty or top_desc.empty:
             msg = f"{prop}: insufficient descriptor rows after RDKit parsing."
             if skip_missing:
                 skipped.append(msg)
                 continue
             raise RuntimeError(msg)
 
-        shift_df = _descriptor_shift_table(prop, ref_desc, cand_desc, top_desc)
-        motif_df = _motif_enrichment_table(prop, ref_desc, cand_desc, top_desc)
+        shift_df = _descriptor_shift_table(prop, ref_desc_used, cand_desc, top_desc)
+        motif_df = _motif_enrichment_table(prop, ref_desc_used, cand_desc, top_desc)
         physics_df = _physics_consistency_table(prop, shift_df, motif_df)
-        nn_df = _nearest_neighbor_explanations(prop, ref_df, topk_df, ref_desc, top_desc)
+        nn_df = _nearest_neighbor_explanations(prop, ref_df_used, topk_df, ref_desc_used, top_desc)
 
         all_descriptor_shift.append(shift_df)
         all_motif.append(motif_df)
@@ -1387,9 +1534,11 @@ def main(args):
             {
                 "method": "Multi_View_Foundation",
                 "property": prop,
-                "n_reference": int(len(ref_df)),
+                "n_reference": int(len(ref_df_used)),
                 "n_candidates": int(len(candidate_df)),
                 "n_topk": int(len(topk_df)),
+                "reference_class_filter_enabled": bool(reference_class_filter_enabled and bool(resolved_reference_class)),
+                "reference_class_filter": resolved_reference_class if resolved_reference_class else "",
                 "descriptor_consistency_rate": round(consistency_rate, 4) if np.isfinite(consistency_rate) else np.nan,
                 "mean_nn_similarity": round(mean_nn, 4) if np.isfinite(mean_nn) else np.nan,
                 "topk_hit_rate": round(topk_hit_rate, 4) if np.isfinite(topk_hit_rate) else np.nan,
@@ -1480,6 +1629,8 @@ def main(args):
             "skipped": skipped,
             "candidate_scores_template": candidate_template,
             "topk_scores_template": topk_template,
+            "reference_class_filter_enabled": bool(reference_class_filter_enabled),
+            "reference_class_override": reference_class_override or "",
             "generate_figures": bool(generate_figures),
         },
         step_dirs["files_dir"] / "run_meta.json",
@@ -1501,6 +1652,10 @@ if __name__ == "__main__":
     parser.add_argument("--topk_scores_template", type=str, default=None, help="Path template for F6 top-k CSV; supports {property}")
     parser.add_argument("--max_reference_samples", type=int, default=None)
     parser.add_argument("--top_k", type=int, default=None)
+    parser.add_argument("--reference_class", type=str, default=None, help="Reference class filter (e.g., polyamide)")
+    parser.add_argument("--enable_reference_class_filter", dest="reference_class_filter_enabled", action="store_true")
+    parser.add_argument("--disable_reference_class_filter", dest="reference_class_filter_enabled", action="store_false")
+    parser.set_defaults(reference_class_filter_enabled=None)
     parser.add_argument("--generate_figures", dest="generate_figures", action="store_true")
     parser.add_argument("--no_figures", dest="generate_figures", action="store_false")
     parser.set_defaults(generate_figures=None)
