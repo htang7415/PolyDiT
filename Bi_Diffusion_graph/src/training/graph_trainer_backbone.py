@@ -1,13 +1,14 @@
 """Trainer for graph diffusion backbone model."""
 
 import warnings
+import time
+import math
 from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.amp import autocast, GradScaler
 import pandas as pd
@@ -15,6 +16,9 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, List
 from tqdm import tqdm
+from shared.optimizer_setup import build_step1_backbone_optimizer
+
+NAT_TO_BPB = 1.0 / math.log(2.0)
 
 
 def _to_float(value, name: str) -> float:
@@ -112,7 +116,9 @@ class GraphBackboneTrainer:
         opt_config = config.get('optimization', {})
         self.use_amp = opt_config.get('use_amp', False) and _is_cuda_device(device)
         self.compile_model = opt_config.get('compile_model', False)
+        self.compile_in_ddp = bool(opt_config.get('compile_in_ddp', False))
         self.grad_accum_steps = opt_config.get('gradient_accumulation_steps', 1)
+        self.fp8_phase2_eval_cfg = opt_config.get('fp8_phase2_eval', {})
 
         # Enable cuDNN benchmark for consistent input sizes
         if opt_config.get('cudnn_benchmark', True):
@@ -125,8 +131,11 @@ class GraphBackboneTrainer:
         self.scaler = GradScaler(enabled=self.use_amp)
 
         # Compile model for faster execution (guard against older GPUs)
-        if self.compile_model and self.distributed:
-            warnings.warn("torch.compile disabled for DDP to avoid compilation issues.")
+        if self.compile_model and self.distributed and not self.compile_in_ddp:
+            warnings.warn(
+                "torch.compile disabled for DDP by config. "
+                "Set optimization.compile_in_ddp=true to enable."
+            )
             self.compile_model = False
         if self.compile_model and _is_cuda_device(device):
             if not _supports_torch_compile(device):
@@ -154,12 +163,21 @@ class GraphBackboneTrainer:
         self.save_last = ckpt_cfg.get('save_last', False)
         self.save_periodic = ckpt_cfg.get('save_periodic', False)
 
-        # Initialize optimizer
-        self.optimizer = AdamW(
-            self.model.parameters(),
-            lr=self.learning_rate,
-            weight_decay=self.weight_decay
+        # Initialize optimizer (AdamW or Muon+AdamW multi-group, config-driven).
+        self.optimizer, optimizer_info = build_step1_backbone_optimizer(
+            model=self.model,
+            optimization_config=opt_config,
+            base_learning_rate=self.learning_rate,
+            weight_decay=self.weight_decay,
         )
+        if self.is_main_process and optimizer_info.get("type") == "muon_adamw":
+            print(
+                "Using Muon+AdamW optimizer groups: "
+                f"muon_tensors={optimizer_info.get('num_muon_tensors')}, "
+                f"adamw_tensors={optimizer_info.get('num_adamw_tensors')}, "
+                f"adamw_lr={optimizer_info.get('adamw_lr'):.3e}, "
+                f"muon_lr={optimizer_info.get('muon_lr'):.3e}"
+            )
 
         # Initialize scheduler (warmup + cosine decay)
         warmup_scheduler = LinearLR(
@@ -190,6 +208,12 @@ class GraphBackboneTrainer:
         self.val_edge_losses = []
         self.val_steps = []
         self.learning_rates = []
+        self.epoch_train_losses = []
+        self.epoch_train_node_losses = []
+        self.epoch_train_edge_losses = []
+        self.epoch_val_losses = []
+        self.epoch_val_node_losses = []
+        self.epoch_val_edge_losses = []
 
     def _wrap_ddp(self, model: nn.Module) -> nn.Module:
         """Wrap model with DistributedDataParallel when enabled."""
@@ -249,6 +273,12 @@ class GraphBackboneTrainer:
 
             # Validation
             val_loss, val_node_loss, val_edge_loss = self._validate()
+            self.epoch_train_losses.append(train_loss)
+            self.epoch_train_node_losses.append(node_loss)
+            self.epoch_train_edge_losses.append(edge_loss)
+            self.epoch_val_losses.append(val_loss)
+            self.epoch_val_node_losses.append(val_node_loss)
+            self.epoch_val_edge_losses.append(val_edge_loss)
 
             # Save checkpoint
             self._save_checkpoint(val_loss, epoch)
@@ -274,6 +304,8 @@ class GraphBackboneTrainer:
         # Save training history
         self._save_history()
 
+        fp8_phase2_eval = self._run_fp8_phase2_eval()
+
         return {
             'train_losses': self.train_losses,
             'train_node_losses': self.train_node_losses,
@@ -282,7 +314,10 @@ class GraphBackboneTrainer:
             'val_node_losses': self.val_node_losses,
             'val_edge_losses': self.val_edge_losses,
             'learning_rates': self.learning_rates,
-            'best_val_loss': self.best_val_loss
+            'epoch_train_losses': self.epoch_train_losses,
+            'epoch_val_losses': self.epoch_val_losses,
+            'best_val_loss': self.best_val_loss,
+            'fp8_phase2_eval': fp8_phase2_eval,
         }
 
     def _train_epoch(self, epoch: int):
@@ -308,11 +343,9 @@ class GraphBackboneTrainer:
                 break
 
             is_last_batch = (batch_idx + 1) == len(self.train_dataloader)
-            hits_step_limit = (self.global_step + 1) >= self.max_steps
             should_step = (
                 ((batch_idx + 1) % self.grad_accum_steps == 0) or
-                is_last_batch or
-                hits_step_limit
+                is_last_batch
             )
             loss, node_loss, edge_loss = self._train_step(batch, should_step=should_step)
             total_loss += loss
@@ -333,26 +366,27 @@ class GraphBackboneTrainer:
                     'edge': f'{edge_loss:.4f}'
                 })
 
-            # Periodic validation
-            if self.global_step > 0 and self.global_step % self.eval_every == 0:
-                val_loss, val_node, val_edge = self._validate()
-                self.model.train()
-                if self.is_main_process:
-                    self.val_losses.append(val_loss)
-                    self.val_node_losses.append(val_node)
-                    self.val_edge_losses.append(val_edge)
-                    self.val_steps.append(self.global_step)
-                    self._save_checkpoint(val_loss, epoch)
-                if self.distributed and dist.is_available() and dist.is_initialized():
-                    dist.barrier()
+            if should_step:
+                self.global_step += 1
 
-            # Periodic save
-            if (not self.save_best_only and self.save_periodic and self.global_step > 0 and self.global_step % self.save_every == 0):
-                self._save_periodic_checkpoint(epoch)
-                if self.distributed and dist.is_available() and dist.is_initialized():
-                    dist.barrier()
+                # Periodic validation
+                if self.global_step > 0 and self.global_step % self.eval_every == 0:
+                    val_loss, val_node, val_edge = self._validate()
+                    self.model.train()
+                    if self.is_main_process:
+                        self.val_losses.append(val_loss)
+                        self.val_node_losses.append(val_node)
+                        self.val_edge_losses.append(val_edge)
+                        self.val_steps.append(self.global_step)
+                        self._save_checkpoint(val_loss, epoch)
+                    if self.distributed and dist.is_available() and dist.is_initialized():
+                        dist.barrier()
 
-            self.global_step += 1
+                # Periodic save
+                if (not self.save_best_only and self.save_periodic and self.global_step > 0 and self.global_step % self.save_every == 0):
+                    self._save_periodic_checkpoint(epoch)
+                    if self.distributed and dist.is_available() and dist.is_initialized():
+                        dist.barrier()
 
         # Barrier before final reduce to ensure all ranks exit loop together
         if self.distributed and dist.is_available() and dist.is_initialized():
@@ -455,6 +489,132 @@ class GraphBackboneTrainer:
             self._reduce_mean(avg_edge)
         )
 
+    def _benchmark_autocast_eval(self, dtype: torch.dtype, num_steps: int, warmup_steps: int) -> Dict[str, float]:
+        """Benchmark graph eval throughput/loss under a target autocast dtype."""
+        self.model.eval()
+        losses: List[float] = []
+        node_losses: List[float] = []
+        edge_losses: List[float] = []
+        elapsed_sec = 0.0
+        node_count = 0
+
+        total_iters = warmup_steps + num_steps
+        data_iter = iter(self.val_dataloader)
+        device_obj = torch.device(self.device)
+        device_index = device_obj.index if device_obj.index is not None else torch.cuda.current_device()
+
+        with torch.no_grad():
+            for step_idx in range(total_iters):
+                try:
+                    batch = next(data_iter)
+                except StopIteration:
+                    data_iter = iter(self.val_dataloader)
+                    batch = next(data_iter)
+
+                X = batch['X'].to(self.device)
+                E = batch['E'].to(self.device)
+                M = batch['M'].to(self.device)
+
+                torch.cuda.synchronize(device_index)
+                start = time.perf_counter()
+                with autocast('cuda', dtype=dtype, enabled=True):
+                    outputs = self.model(X, E, M)
+                torch.cuda.synchronize(device_index)
+                elapsed = time.perf_counter() - start
+
+                if step_idx >= warmup_steps:
+                    elapsed_sec += elapsed
+                    losses.append(float(outputs['loss'].item()))
+                    node_losses.append(float(outputs['node_loss'].item()))
+                    edge_losses.append(float(outputs['edge_loss'].item()))
+                    node_count += int(M.sum().item())
+
+        eps = 1e-12
+        return {
+            'mean_loss': float(np.mean(losses)) if losses else float('nan'),
+            'mean_node_loss': float(np.mean(node_losses)) if node_losses else float('nan'),
+            'mean_edge_loss': float(np.mean(edge_losses)) if edge_losses else float('nan'),
+            'nodes_per_sec': node_count / max(elapsed_sec, eps),
+            'steps_per_sec': num_steps / max(elapsed_sec, eps),
+            'elapsed_sec': elapsed_sec,
+            'nodes': float(node_count),
+        }
+
+    def _save_fp8_phase2_eval(self, metrics: Dict[str, float]) -> None:
+        """Save FP8 phase-2 evaluation metrics."""
+        if not self.is_main_process:
+            return
+        fp8_df = pd.DataFrame([metrics])
+        fp8_df.to_csv(self.metrics_dir / 'fp8_phase2_eval.csv', index=False)
+
+    def _run_fp8_phase2_eval(self) -> Optional[Dict[str, float]]:
+        """Evaluate FP8 throughput/loss as an optional second phase."""
+        cfg = self.fp8_phase2_eval_cfg if isinstance(self.fp8_phase2_eval_cfg, dict) else {}
+        if not bool(cfg.get('enabled', False)):
+            return None
+
+        if not self.is_main_process:
+            return None
+
+        metrics: Dict[str, float] = {
+            'enabled': True,
+        }
+
+        if not _is_cuda_device(self.device) or not torch.cuda.is_available():
+            if self.is_main_process:
+                print("Skipping FP8 phase-2 evaluation: CUDA is unavailable.")
+            metrics['status'] = 'skipped_no_cuda'
+            self._save_fp8_phase2_eval(metrics)
+            return metrics
+
+        dtype_name = str(cfg.get('dtype', 'float8_e4m3fn'))
+        fp8_dtype = getattr(torch, dtype_name, None)
+        if fp8_dtype is None:
+            if self.is_main_process:
+                print(f"Skipping FP8 phase-2 evaluation: torch.{dtype_name} is unavailable.")
+            metrics['status'] = 'skipped_unsupported_dtype'
+            metrics['requested_dtype'] = dtype_name
+            self._save_fp8_phase2_eval(metrics)
+            return metrics
+
+        num_steps = max(1, int(cfg.get('num_steps', 100)))
+        warmup_steps = max(0, int(cfg.get('warmup_steps', 10)))
+
+        try:
+            bf16_stats = self._benchmark_autocast_eval(torch.bfloat16, num_steps, warmup_steps)
+            fp8_stats = self._benchmark_autocast_eval(fp8_dtype, num_steps, warmup_steps)
+        except Exception as exc:
+            if self.is_main_process:
+                print(f"Skipping FP8 phase-2 evaluation due to runtime error: {exc}")
+            metrics['status'] = 'skipped_runtime_error'
+            metrics['error'] = str(exc)
+            metrics['requested_dtype'] = dtype_name
+            self._save_fp8_phase2_eval(metrics)
+            return metrics
+
+        metrics.update({
+            'status': 'ok',
+            'requested_dtype': dtype_name,
+            'num_steps': float(num_steps),
+            'warmup_steps': float(warmup_steps),
+            'bf16_mean_loss': bf16_stats['mean_loss'],
+            'bf16_nodes_per_sec': bf16_stats['nodes_per_sec'],
+            'bf16_steps_per_sec': bf16_stats['steps_per_sec'],
+            'fp8_mean_loss': fp8_stats['mean_loss'],
+            'fp8_nodes_per_sec': fp8_stats['nodes_per_sec'],
+            'fp8_steps_per_sec': fp8_stats['steps_per_sec'],
+            'fp8_nodes_per_sec_speedup': fp8_stats['nodes_per_sec'] / max(bf16_stats['nodes_per_sec'], 1e-12),
+            'fp8_loss_delta_vs_bf16': fp8_stats['mean_loss'] - bf16_stats['mean_loss'],
+        })
+        if self.is_main_process:
+            print(
+                "FP8 phase-2 evaluation complete: "
+                f"speedup={metrics['fp8_nodes_per_sec_speedup']:.3f}x, "
+                f"loss_delta={metrics['fp8_loss_delta_vs_bf16']:.6f}"
+            )
+        self._save_fp8_phase2_eval(metrics)
+        return metrics
+
     def _save_checkpoint(self, val_loss: float, epoch: int, final: bool = False):
         """Save model checkpoint.
 
@@ -521,11 +681,14 @@ class GraphBackboneTrainer:
         rounded_edge_losses = [round(loss, 4) for loss in self.train_edge_losses]
         rounded_learning_rates = [round(lr, 8) for lr in self.learning_rates]
         rounded_val_losses = [round(loss, 4) for loss in self.val_losses]
+        rounded_train_bpb = [round(loss * NAT_TO_BPB, 4) for loss in self.train_losses]
+        rounded_val_bpb = [round(loss * NAT_TO_BPB, 4) for loss in self.val_losses]
 
         # Create loss curve CSV
         train_df = pd.DataFrame({
             'step': list(range(len(self.train_losses))),
             'train_loss': rounded_train_losses,
+            'train_bpb': rounded_train_bpb,
             'node_loss': rounded_node_losses,
             'edge_loss': rounded_edge_losses,
             'learning_rate': rounded_learning_rates
@@ -542,10 +705,26 @@ class GraphBackboneTrainer:
             val_df = pd.DataFrame({
                 'step': self.val_steps[:paired_count],
                 'val_loss': rounded_val_losses[:paired_count],
+                'val_bpb': rounded_val_bpb[:paired_count],
                 'val_node_loss': [round(l, 4) for l in self.val_node_losses[:paired_count]],
                 'val_edge_loss': [round(l, 4) for l in self.val_edge_losses[:paired_count]]
             })
             val_df.to_csv(self.metrics_dir / 'graph_backbone_val_loss.csv', index=False)
+
+        if self.epoch_train_losses and self.epoch_val_losses:
+            paired_count = min(len(self.epoch_train_losses), len(self.epoch_val_losses))
+            epoch_df = pd.DataFrame({
+                'epoch': list(range(1, paired_count + 1)),
+                'train_loss': [round(loss, 4) for loss in self.epoch_train_losses[:paired_count]],
+                'val_loss': [round(loss, 4) for loss in self.epoch_val_losses[:paired_count]],
+                'train_bpb': [round(loss * NAT_TO_BPB, 4) for loss in self.epoch_train_losses[:paired_count]],
+                'val_bpb': [round(loss * NAT_TO_BPB, 4) for loss in self.epoch_val_losses[:paired_count]],
+                'train_node_loss': [round(loss, 4) for loss in self.epoch_train_node_losses[:paired_count]],
+                'train_edge_loss': [round(loss, 4) for loss in self.epoch_train_edge_losses[:paired_count]],
+                'val_node_loss': [round(loss, 4) for loss in self.epoch_val_node_losses[:paired_count]],
+                'val_edge_loss': [round(loss, 4) for loss in self.epoch_val_edge_losses[:paired_count]],
+            })
+            epoch_df.to_csv(self.metrics_dir / 'graph_backbone_epoch_loss_curve.csv', index=False)
 
     def load_checkpoint(self, checkpoint_path: str):
         """Load checkpoint.

@@ -4,6 +4,8 @@
 import os
 import sys
 import argparse
+import math
+from functools import partial
 from pathlib import Path
 
 # Add parent directory to path
@@ -23,12 +25,17 @@ from src.utils.model_scales import (
     get_results_dir, print_model_info
 )
 from src.data.tokenizer import PSmilesTokenizer
-from src.data.dataset import PolymerDataset, collate_fn
+from src.data.dataset import PolymerDataset, collate_fn, dynamic_collate_fn
+from src.data.samplers import LengthBucketBatchSampler
 from src.model.backbone import DiffusionBackbone
 from src.model.diffusion import DiscreteMaskingDiffusion
 from src.training.trainer_backbone import BackboneTrainer
 from src.utils.reproducibility import seed_everything, save_run_metadata
 from shared.unlabeled_data import require_preprocessed_unlabeled_splits
+from shared.step1_recommendations import (
+    apply_auto_step1_recommendations,
+    maybe_apply_cuda_oom_env,
+)
 
 
 def init_distributed():
@@ -55,6 +62,7 @@ def main(args):
     """Main function."""
     # Load config
     config = load_config(args.config)
+    cuda_alloc_conf = maybe_apply_cuda_oom_env(config)
 
     distributed, rank, world_size, local_rank, dist_device = init_distributed()
     is_main_process = (not distributed) or rank == 0
@@ -63,6 +71,8 @@ def main(args):
     device = dist_device if distributed else ('cuda' if torch.cuda.is_available() else 'cpu')
     if is_main_process:
         print(f"Using device: {device}")
+        if cuda_alloc_conf:
+            print(f"CUDA allocator config: PYTORCH_CUDA_ALLOC_CONF={cuda_alloc_conf}")
 
     # Override results_dir if model_size specified
     base_results_dir = config['paths']['results_dir']
@@ -94,6 +104,92 @@ def main(args):
         config['training_backbone']['max_steps'] = training_config['max_steps']
         config['training_backbone']['warmup_steps'] = training_config['warmup_steps']
         config['optimization']['gradient_accumulation_steps'] = training_config['gradient_accumulation_steps']
+
+    opt_config = config.setdefault('optimization', {})
+    auto_recommend_summary = apply_auto_step1_recommendations(
+        config=config,
+        pipeline_kind='sequence',
+        world_size=world_size,
+        model_num_layers=int(backbone_config['num_layers']),
+        model_config=backbone_config,
+    )
+    if auto_recommend_summary and is_main_process:
+        gpu_info = auto_recommend_summary['gpu']
+        system_info = auto_recommend_summary.get('system', {})
+        gpu_mem = gpu_info.get('min_memory_gb', gpu_info.get('memory_gb'))
+        print(
+            "Applied system/GPU-based Step1 recommendations: "
+            f"pipeline={auto_recommend_summary['pipeline_kind']}, "
+            f"world_size={auto_recommend_summary['world_size']}, "
+            f"reference_world_size={auto_recommend_summary['reference_world_size']}, "
+            f"visible_gpus={gpu_info.get('device_count')}, "
+            f"gpu={gpu_info.get('name')}, capability={gpu_info.get('capability')}, "
+            f"min_gpu_mem_gb={gpu_mem}, "
+            f"cpu_count={system_info.get('cpu_count')}, "
+            f"avail_ram_gb={system_info.get('available_ram_gb')}, "
+            f"override_existing={auto_recommend_summary['override_existing']}"
+        )
+        if auto_recommend_summary['applied_optimization']:
+            print(
+                "Optimization overrides applied: "
+                f"{auto_recommend_summary['applied_optimization']}"
+            )
+        else:
+            print("Auto recommendations enabled, but no optimization keys changed.")
+        if auto_recommend_summary.get('applied_training_backbone'):
+            print(
+                "Training backbone overrides applied: "
+                f"{auto_recommend_summary['applied_training_backbone']}"
+            )
+        memory_meta = auto_recommend_summary.get('memory_aware_batch_meta', {})
+        if memory_meta.get('enabled'):
+            original_b = memory_meta.get('original_per_rank_batch_size')
+            recommended_b = memory_meta.get('recommended_per_rank_batch_size')
+            if original_b != recommended_b:
+                print(
+                    "Memory-aware batch adjustment: "
+                    f"per_rank_batch {original_b} -> {recommended_b} "
+                    f"(gpu_mem_gb={memory_meta.get('gpu_memory_gb')}, "
+                    f"seq_len={memory_meta.get('seq_len')})"
+                )
+        cpu_meta = auto_recommend_summary.get('cpu_oom_guard_meta', {})
+        if cpu_meta.get('enabled'):
+            print(
+                "CPU OOM guard: "
+                f"workers={cpu_meta.get('recommended_workers')}, "
+                f"prefetch_factor={cpu_meta.get('recommended_prefetch_factor')}, "
+                f"per_rank_cpu_budget={cpu_meta.get('per_rank_cpu_budget')}"
+            )
+
+    # Optional: preserve global batch size when scaling to more GPUs.
+    target_global_batch = opt_config.get('target_global_batch_size')
+    if target_global_batch is not None:
+        target_global_batch = int(target_global_batch)
+        if target_global_batch <= 0:
+            raise ValueError("optimization.target_global_batch_size must be > 0 when set.")
+        per_rank_batch = int(config['training_backbone']['batch_size'])
+        micro_batch_global = per_rank_batch * max(1, world_size)
+        grad_accum_steps = max(1, (target_global_batch + micro_batch_global - 1) // micro_batch_global)
+        opt_config['gradient_accumulation_steps'] = grad_accum_steps
+        if is_main_process:
+            achieved_global_batch = micro_batch_global * grad_accum_steps
+            print(
+                "Adjusted gradient accumulation for world-size scaling: "
+                f"target_global_batch={target_global_batch}, "
+                f"micro_batch_global={micro_batch_global}, "
+                f"grad_accum={grad_accum_steps}, "
+                f"achieved_global_batch={achieved_global_batch}"
+            )
+
+    if is_main_process:
+        per_rank_batch = int(config['training_backbone']['batch_size'])
+        grad_accum_steps = int(config.get('optimization', {}).get('gradient_accumulation_steps', 1))
+        effective_global_batch = per_rank_batch * max(1, world_size) * grad_accum_steps
+        print(
+            "Step1 effective global batch size: "
+            f"{effective_global_batch} "
+            f"(per_rank_batch={per_rank_batch}, world_size={world_size}, grad_accum={grad_accum_steps})"
+        )
 
     # Load tokenizer (from base results dir which has the tokenizer)
     if is_main_process:
@@ -164,6 +260,11 @@ def main(args):
     )
     pin_memory = opt_config.get('pin_memory', True)
     prefetch_factor = opt_config.get('prefetch_factor', 2)
+    dynamic_padding = bool(opt_config.get('dynamic_padding', False))
+    length_bucket_sampler = bool(opt_config.get('length_bucket_sampler', False))
+    bucket_size_multiplier = int(opt_config.get('bucket_size_multiplier', 50))
+    if bucket_size_multiplier <= 0:
+        raise ValueError("optimization.bucket_size_multiplier must be > 0.")
 
     # Bound DataLoader workers to per-rank CPU budget to avoid oversubscription.
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1") or 1)
@@ -205,30 +306,66 @@ def main(args):
         cache_tokenization = False
 
     # Create datasets
-    train_dataset = PolymerDataset(train_df, tokenizer, cache_tokenization=cache_tokenization)
-    val_dataset = PolymerDataset(val_df, tokenizer, cache_tokenization=cache_tokenization)
+    train_dataset = PolymerDataset(
+        train_df,
+        tokenizer,
+        cache_tokenization=cache_tokenization,
+        pad_to_max_length=not dynamic_padding,
+    )
+    val_dataset = PolymerDataset(
+        val_df,
+        tokenizer,
+        cache_tokenization=cache_tokenization,
+        pad_to_max_length=not dynamic_padding,
+    )
+
+    active_collate_fn = collate_fn
+    if dynamic_padding:
+        active_collate_fn = partial(dynamic_collate_fn, pad_token_id=tokenizer.pad_token_id)
 
     # Create dataloaders
     batch_size = config['training_backbone']['batch_size']
-    train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
     val_sampler = DistributedSampler(val_dataset, shuffle=False) if distributed else None
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=train_sampler is None,
-        sampler=train_sampler,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        persistent_workers=persistent_workers,
-        pin_memory=pin_memory,
-        prefetch_factor=prefetch_factor if num_workers > 0 else None
-    )
+    if length_bucket_sampler:
+        train_lengths = train_df['p_smiles'].astype(str).str.len().tolist()
+        train_batch_sampler = LengthBucketBatchSampler(
+            lengths=train_lengths,
+            batch_size=batch_size,
+            drop_last=False,
+            shuffle=True,
+            seed=config['data']['random_seed'],
+            bucket_size_multiplier=bucket_size_multiplier,
+            num_replicas=world_size if distributed else 1,
+            rank=rank if distributed else 0,
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_batch_sampler,
+            collate_fn=active_collate_fn,
+            num_workers=num_workers,
+            persistent_workers=persistent_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None
+        )
+    else:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=train_sampler is None,
+            sampler=train_sampler,
+            collate_fn=active_collate_fn,
+            num_workers=num_workers,
+            persistent_workers=persistent_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None
+        )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         sampler=val_sampler,
-        collate_fn=collate_fn,
+        collate_fn=active_collate_fn,
         num_workers=num_workers,
         persistent_workers=persistent_workers,
         pin_memory=pin_memory,
@@ -238,6 +375,12 @@ def main(args):
     if is_main_process:
         print(f"Train batches: {len(train_loader)}")
         print(f"Val batches: {len(val_loader)}")
+        if dynamic_padding:
+            print("Using dynamic batch padding for Step1 dataloaders.")
+        if length_bucket_sampler:
+            print(
+                f"Using length-bucket batching (bucket_size_multiplier={bucket_size_multiplier})."
+            )
         print(f"DataLoader workers per rank: {num_workers}")
 
     # Create model
@@ -321,6 +464,20 @@ def main(args):
             title='Backbone Training Loss',
             save_path=figures_dir / 'backbone_loss_curve.png'
         )
+
+        epoch_train_losses = history.get('epoch_train_losses', [])
+        epoch_val_losses = history.get('epoch_val_losses', [])
+        if epoch_train_losses:
+            train_bpb = [loss / math.log(2.0) for loss in epoch_train_losses]
+            val_bpb = [loss / math.log(2.0) for loss in epoch_val_losses] if epoch_val_losses else None
+            plotter.loss_curve(
+                train_losses=train_bpb,
+                val_losses=val_bpb,
+                xlabel='Epoch',
+                ylabel='BPB',
+                title='Backbone Training BPB',
+                save_path=figures_dir / 'backbone_bpb_curve.png'
+            )
 
         print("\n" + "=" * 50)
         print("Backbone training complete!")

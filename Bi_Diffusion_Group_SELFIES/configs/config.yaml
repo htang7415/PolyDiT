@@ -78,61 +78,61 @@ proxy_backbone:
 # Model size presets for scaling law experiments
 model_sizes:
   small:
-    # Architecture (~12M params)
+    # Architecture (nanochat-style depth-locked shape; ~11M params)
     hidden_size: 384
     num_layers: 6
-    num_heads: 6
+    num_heads: 3
     ffn_hidden_size: 1536
     dropout: 0.1
     max_position_embeddings: 256
     # Training
-    max_steps: 200000
-    warmup_steps: 1000
+    max_steps: 94460
+    warmup_steps: 945
     batch_size: 128
     gradient_accumulation_steps: 4
-    learning_rate: 3.0e-4
+    learning_rate: 2.598e-4
   medium:
-    # Architecture (~50M params)
-    hidden_size: 640
-    num_layers: 10
-    num_heads: 10
-    ffn_hidden_size: 2560
+    # Architecture (nanochat-style depth-locked shape; ~52M params)
+    hidden_size: 768
+    num_layers: 12
+    num_heads: 6
+    ffn_hidden_size: 3072
     dropout: 0.1
     max_position_embeddings: 256
     # Training
-    max_steps: 200000
-    warmup_steps: 2000
+    max_steps: 70850
+    warmup_steps: 708
     batch_size: 128
     gradient_accumulation_steps: 4
     learning_rate: 3.0e-4
   large:
-    # Architecture (~150M params)
-    hidden_size: 960
-    num_layers: 14
-    num_heads: 12
-    ffn_hidden_size: 3840
+    # Architecture (nanochat-style depth-locked shape; ~176M params)
+    hidden_size: 1152
+    num_layers: 18
+    num_heads: 9
+    ffn_hidden_size: 4608
     dropout: 0.1
     max_position_embeddings: 256
     # Training
-    max_steps: 200000
-    warmup_steps: 3000
+    max_steps: 47230
+    warmup_steps: 472
     batch_size: 128
     gradient_accumulation_steps: 8
-    learning_rate: 1.0e-4
+    learning_rate: 3.518e-4
   xl:
-    # Architecture (~400M params)
-    hidden_size: 1280
-    num_layers: 20
-    num_heads: 16
-    ffn_hidden_size: 5120
+    # Architecture (nanochat-style depth-locked shape; ~412M params)
+    hidden_size: 1536
+    num_layers: 24
+    num_heads: 12
+    ffn_hidden_size: 6144
     dropout: 0.1
     max_position_embeddings: 256
     # Training
-    max_steps: 200000
-    warmup_steps: 4000
+    max_steps: 40480
+    warmup_steps: 405
     batch_size: 64
     gradient_accumulation_steps: 16
-    learning_rate: 1.0e-4
+    learning_rate: 3.824e-4
 
 # Diffusion
 diffusion:
@@ -152,7 +152,7 @@ training_backbone:
   eval_every: 10000
   val_max_samples: 100000  # Optional Step1 validation cap for faster periodic eval.
   save_every: 100000
-  num_epochs: 50
+  num_epochs: 300
 
 # Training property heads
 training_property:
@@ -175,7 +175,74 @@ checkpointing:
 optimization:
   use_amp: true                    # Mixed precision (BF16)
   compile_model: true              # torch.compile()
-  gradient_accumulation_steps: 4   # Effective batch = 256 * 4 = 1024
+  compile_in_ddp: false            # Keep false by default; set true to allow compile under DDP.
+  gradient_accumulation_steps: 4   # Per-rank gradient accumulation microsteps.
+  target_global_batch_size: null   # Optional: auto-adjust grad_accum for world size (e.g., 8xH100).
+  auto_recommend_from_system:      # Optional: derive Step1 optimization from detected GPU/system.
+    enabled: true
+    reference_world_size: 4        # Preserve this baseline world size when scaling out.
+    device_index: 0                # CUDA device index used for capability detection.
+    override_existing: true        # Overwrite manual optimization keys with recommended values.
+  auto_batch_law:                  # Optional nanochat-style depth->global-batch scaling.
+    enabled: false
+    reference_total_batch_size: 6144
+    reference_num_layers: 12
+    depth_exponent: 0.6666666667   # 2/3 power-law on depth.
+    batch_lr_scale: 1.0            # Extra multiplier (nanochat's batch_lr_scale).
+  h100_8x_preset:                  # Auto-applied on Hopper when world_size >= min_world_size.
+    enabled: true
+    min_world_size: 8
+    reference_total_batch_size: 8192   # Sequences; ~1M tokens at seq_len~128.
+    reference_num_layers: 12
+    depth_exponent: 0.6666666667
+    batch_lr_scale: 1.0
+    compute_optimal:               # Nanochat-style token:param compute-optimal schedule.
+      enabled: true
+      objective: token_param_ratio
+      target_param_data_ratio: 10.5
+      scaling_params_key: transformer_matrices_lm_head
+      include_lm_head: true
+      lm_head_vocab_size: 233
+      tokens_per_sample_estimate: 36.5228
+      train_num_samples_estimate: 19345999
+      min_effective_epochs: 30.0
+      reference_total_batch_size: 8192
+      reference_max_steps: 300000
+      reference_learning_rate: 3.0e-4
+      lr_power: 0.5
+      min_learning_rate: 8.0e-5
+      max_learning_rate: 4.0e-4
+      warmup_fraction: 0.01
+      min_warmup_steps: 315
+      max_warmup_steps: 6000
+      min_steps: 100
+      step_round_multiple: 10
+      use_achieved_global_batch: true
+      use_batch_scaled_learning_rate: true
+    optimizer:
+      type: muon_adamw
+      muon_adamw:
+        enabled: true
+        adamw_lr: null
+        muon_lr: 0.01               # More aggressive Muon LR for H100 throughput.
+        muon_lr_multiplier: 20.0
+        adamw_betas: [0.8, 0.95]
+        adamw_eps: 1.0e-8
+        muon_momentum: 0.95
+        muon_nesterov: true
+        backend_steps: 5
+  optimizer:                       # Optional optimizer backend switch for Step1.
+    type: adamw                    # adamw | muon_adamw
+    muon_adamw:
+      enabled: false
+      adamw_lr: null               # null => uses training_backbone.learning_rate
+      muon_lr: null                # null => adamw_lr * muon_lr_multiplier
+      muon_lr_multiplier: 20.0
+      adamw_betas: [0.9, 0.95]
+      adamw_eps: 1.0e-8
+      muon_momentum: 0.95
+      muon_nesterov: true
+      backend_steps: 5
   num_workers: 0                   # 0 = auto-select workers per rank from CPU budget
   persistent_workers: true         # Keep workers alive across epochs to reduce startup overhead.
   dynamic_padding: true            # Pad to per-batch max length instead of global max length.
@@ -187,6 +254,11 @@ optimization:
   prefetch_factor: 2               # DataLoader prefetching
   cache_tokenization: false        # Full-cache is too memory-heavy at Group SELFIES scale.
   cache_tokenization_max_samples: 500000  # Auto-disable cache above this many samples.
+  fp8_phase2_eval:                 # Optional post-training FP8 benchmark (throughput + loss drift).
+    enabled: false
+    dtype: float8_e4m3fn
+    num_steps: 100
+    warmup_steps: 10
 
 # Property head architecture
 property_head:

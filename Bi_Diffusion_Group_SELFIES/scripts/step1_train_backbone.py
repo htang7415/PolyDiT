@@ -4,6 +4,7 @@
 import os
 import sys
 import argparse
+import math
 from pathlib import Path
 from functools import partial
 
@@ -31,6 +32,10 @@ from src.model.diffusion import DiscreteMaskingDiffusion
 from src.training.trainer_backbone import BackboneTrainer
 from src.utils.reproducibility import seed_everything, save_run_metadata
 from shared.unlabeled_data import require_preprocessed_unlabeled_splits
+from shared.step1_recommendations import (
+    apply_auto_step1_recommendations,
+    maybe_apply_cuda_oom_env,
+)
 
 
 def init_distributed():
@@ -57,6 +62,7 @@ def main(args):
     """Main function."""
     # Load config
     config = load_config(args.config)
+    cuda_alloc_conf = maybe_apply_cuda_oom_env(config)
 
     distributed, rank, world_size, local_rank, dist_device = init_distributed()
     is_main_process = (not distributed) or rank == 0
@@ -65,6 +71,8 @@ def main(args):
     device = dist_device if distributed else ('cuda' if torch.cuda.is_available() else 'cpu')
     if is_main_process:
         print(f"Using device: {device}")
+        if cuda_alloc_conf:
+            print(f"CUDA allocator config: PYTORCH_CUDA_ALLOC_CONF={cuda_alloc_conf}")
 
     # Override results_dir if model_size specified
     base_results_dir = config['paths']['results_dir']
@@ -96,6 +104,92 @@ def main(args):
         config['training_backbone']['max_steps'] = training_config['max_steps']
         config['training_backbone']['warmup_steps'] = training_config['warmup_steps']
         config['optimization']['gradient_accumulation_steps'] = training_config['gradient_accumulation_steps']
+
+    opt_config = config.setdefault('optimization', {})
+    auto_recommend_summary = apply_auto_step1_recommendations(
+        config=config,
+        pipeline_kind='group_selfies',
+        world_size=world_size,
+        model_num_layers=int(backbone_config['num_layers']),
+        model_config=backbone_config,
+    )
+    if auto_recommend_summary and is_main_process:
+        gpu_info = auto_recommend_summary['gpu']
+        system_info = auto_recommend_summary.get('system', {})
+        gpu_mem = gpu_info.get('min_memory_gb', gpu_info.get('memory_gb'))
+        print(
+            "Applied system/GPU-based Step1 recommendations: "
+            f"pipeline={auto_recommend_summary['pipeline_kind']}, "
+            f"world_size={auto_recommend_summary['world_size']}, "
+            f"reference_world_size={auto_recommend_summary['reference_world_size']}, "
+            f"visible_gpus={gpu_info.get('device_count')}, "
+            f"gpu={gpu_info.get('name')}, capability={gpu_info.get('capability')}, "
+            f"min_gpu_mem_gb={gpu_mem}, "
+            f"cpu_count={system_info.get('cpu_count')}, "
+            f"avail_ram_gb={system_info.get('available_ram_gb')}, "
+            f"override_existing={auto_recommend_summary['override_existing']}"
+        )
+        if auto_recommend_summary['applied_optimization']:
+            print(
+                "Optimization overrides applied: "
+                f"{auto_recommend_summary['applied_optimization']}"
+            )
+        else:
+            print("Auto recommendations enabled, but no optimization keys changed.")
+        if auto_recommend_summary.get('applied_training_backbone'):
+            print(
+                "Training backbone overrides applied: "
+                f"{auto_recommend_summary['applied_training_backbone']}"
+            )
+        memory_meta = auto_recommend_summary.get('memory_aware_batch_meta', {})
+        if memory_meta.get('enabled'):
+            original_b = memory_meta.get('original_per_rank_batch_size')
+            recommended_b = memory_meta.get('recommended_per_rank_batch_size')
+            if original_b != recommended_b:
+                print(
+                    "Memory-aware batch adjustment: "
+                    f"per_rank_batch {original_b} -> {recommended_b} "
+                    f"(gpu_mem_gb={memory_meta.get('gpu_memory_gb')}, "
+                    f"seq_len={memory_meta.get('seq_len')})"
+                )
+        cpu_meta = auto_recommend_summary.get('cpu_oom_guard_meta', {})
+        if cpu_meta.get('enabled'):
+            print(
+                "CPU OOM guard: "
+                f"workers={cpu_meta.get('recommended_workers')}, "
+                f"prefetch_factor={cpu_meta.get('recommended_prefetch_factor')}, "
+                f"per_rank_cpu_budget={cpu_meta.get('per_rank_cpu_budget')}"
+            )
+
+    # Optional: preserve global batch size when scaling to more GPUs.
+    target_global_batch = opt_config.get('target_global_batch_size')
+    if target_global_batch is not None:
+        target_global_batch = int(target_global_batch)
+        if target_global_batch <= 0:
+            raise ValueError("optimization.target_global_batch_size must be > 0 when set.")
+        per_rank_batch = int(config['training_backbone']['batch_size'])
+        micro_batch_global = per_rank_batch * max(1, world_size)
+        grad_accum_steps = max(1, (target_global_batch + micro_batch_global - 1) // micro_batch_global)
+        opt_config['gradient_accumulation_steps'] = grad_accum_steps
+        if is_main_process:
+            achieved_global_batch = micro_batch_global * grad_accum_steps
+            print(
+                "Adjusted gradient accumulation for world-size scaling: "
+                f"target_global_batch={target_global_batch}, "
+                f"micro_batch_global={micro_batch_global}, "
+                f"grad_accum={grad_accum_steps}, "
+                f"achieved_global_batch={achieved_global_batch}"
+            )
+
+    if is_main_process:
+        per_rank_batch = int(config['training_backbone']['batch_size'])
+        grad_accum_steps = int(config.get('optimization', {}).get('gradient_accumulation_steps', 1))
+        effective_global_batch = per_rank_batch * max(1, world_size) * grad_accum_steps
+        print(
+            "Step1 effective global batch size: "
+            f"{effective_global_batch} "
+            f"(per_rank_batch={per_rank_batch}, world_size={world_size}, grad_accum={grad_accum_steps})"
+        )
 
     # Load tokenizer (from base results dir which has the tokenizer)
     if is_main_process:
@@ -186,9 +280,11 @@ def main(args):
     opt_config = config.get('optimization', {})
     cache_tokenization = opt_config.get('cache_tokenization', False)
     cache_max_samples = int(opt_config.get('cache_tokenization_max_samples', 500000))
-    num_workers = int(opt_config.get('num_workers', 4))
+    num_workers = int(opt_config.get('step1_num_workers', opt_config.get('num_workers', 4)))
     tokenize_canonicalize = bool(opt_config.get('tokenize_canonicalize', False))
-    persistent_workers = bool(opt_config.get('persistent_workers', False)) and num_workers > 0
+    step1_persistent_workers = bool(
+        opt_config.get('step1_persistent_workers', opt_config.get('persistent_workers', False))
+    )
     pin_memory = opt_config.get('pin_memory', True)
     prefetch_factor = opt_config.get('prefetch_factor', 2)
     dynamic_padding = bool(opt_config.get('dynamic_padding', False))
@@ -220,7 +316,7 @@ def main(args):
                 f"(cpu_budget={per_rank_cpu_budget}, local_world_size={local_world_size})"
             )
         num_workers = per_rank_worker_cap
-    persistent_workers = bool(opt_config.get('persistent_workers', False)) and num_workers > 0
+    persistent_workers = step1_persistent_workers and num_workers > 0
 
     # Guard against memory blow-up: Group SELFIES full-cache is too large for multi-million datasets.
     total_samples = len(train_df) + len(val_df)
@@ -407,6 +503,20 @@ def main(args):
             title='Backbone Training Loss',
             save_path=figures_dir / 'backbone_loss_curve.png'
         )
+
+        epoch_train_losses = history.get('epoch_train_losses', [])
+        epoch_val_losses = history.get('epoch_val_losses', [])
+        if epoch_train_losses:
+            train_bpb = [loss / math.log(2.0) for loss in epoch_train_losses]
+            val_bpb = [loss / math.log(2.0) for loss in epoch_val_losses] if epoch_val_losses else None
+            plotter.loss_curve(
+                train_losses=train_bpb,
+                val_losses=val_bpb,
+                xlabel='Epoch',
+                ylabel='BPB',
+                title='Backbone Training BPB',
+                save_path=figures_dir / 'backbone_bpb_curve.png'
+            )
 
         print("\n" + "=" * 50)
         print("Backbone training complete!")

@@ -19,7 +19,8 @@ class PolymerDataset(Dataset):
         tokenizer: Union[PSmilesTokenizer, SelfiesTokenizer],
         smiles_col: str = 'selfies',
         max_length: Optional[int] = None,
-        cache_tokenization: bool = False
+        cache_tokenization: bool = False,
+        pad_to_max_length: bool = True,
     ):
         """Initialize dataset.
 
@@ -29,11 +30,13 @@ class PolymerDataset(Dataset):
             smiles_col: Name of SELFIES/SMILES column (default: 'selfies').
             max_length: Maximum sequence length (overrides tokenizer).
             cache_tokenization: Whether to pre-tokenize and cache all samples.
+            pad_to_max_length: Whether to pad each sample to tokenizer.max_length.
         """
         self.df = df.reset_index(drop=True)
         self.tokenizer = tokenizer
         self.smiles_col = smiles_col
         self.cache_tokenization = cache_tokenization
+        self.pad_to_max_length = pad_to_max_length
         self._cache: Dict[int, Dict[str, torch.Tensor]] = {}
 
         if max_length:
@@ -50,7 +53,7 @@ class PolymerDataset(Dataset):
             encoded = self.tokenizer.encode(
                 smiles,
                 add_special_tokens=True,
-                padding=True,
+                padding=self.pad_to_max_length,
                 return_attention_mask=True
             )
             self._cache[idx] = {
@@ -72,7 +75,7 @@ class PolymerDataset(Dataset):
         encoded = self.tokenizer.encode(
             smiles,
             add_special_tokens=True,
-            padding=True,
+            padding=self.pad_to_max_length,
             return_attention_mask=True
         )
 
@@ -208,4 +211,31 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     result = {}
     for key in batch[0].keys():
         result[key] = torch.stack([item[key] for item in batch])
+    return result
+
+
+def dynamic_collate_fn(
+    batch: List[Dict[str, torch.Tensor]],
+    pad_token_id: int
+) -> Dict[str, torch.Tensor]:
+    """Collate with dynamic batch padding to reduce attention FLOPs."""
+    batch_size = len(batch)
+    max_len = max(item['input_ids'].shape[0] for item in batch)
+
+    input_ids = torch.full((batch_size, max_len), pad_token_id, dtype=torch.long)
+    attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
+
+    for i, item in enumerate(batch):
+        seq_len = item['input_ids'].shape[0]
+        input_ids[i, :seq_len] = item['input_ids']
+        attention_mask[i, :seq_len] = item['attention_mask']
+
+    result = {
+        'input_ids': input_ids,
+        'attention_mask': attention_mask,
+    }
+
+    if 'labels' in batch[0]:
+        result['labels'] = torch.stack([item['labels'] for item in batch])
+
     return result

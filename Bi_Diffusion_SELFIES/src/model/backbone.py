@@ -1,6 +1,5 @@
 """GPT-2-small-like Transformer backbone for diffusion model."""
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,7 +21,6 @@ class MultiHeadAttention(nn.Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
-        self.scale = self.head_dim ** -0.5
 
         self.q_proj = nn.Linear(hidden_size, hidden_size)
         self.k_proj = nn.Linear(hidden_size, hidden_size)
@@ -52,20 +50,29 @@ class MultiHeadAttention(nn.Module):
         k = self.k_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Compute attention scores
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-
-        # Apply attention mask (bidirectional - mask padding only)
-        if attention_mask is not None:
-            # Expand mask: [batch, seq_len] -> [batch, 1, 1, seq_len]
-            mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            attn_scores = attn_scores.masked_fill(mask == 0, -1e9)
-
-        attn_probs = F.softmax(attn_scores, dim=-1)
-        attn_probs = self.dropout(attn_probs)
-
-        # Apply attention to values
-        out = torch.matmul(attn_probs, v)
+        # Use PyTorch SDPA to unlock FlashAttention-style kernels on modern GPUs.
+        sdpa = getattr(F, "scaled_dot_product_attention", None)
+        if sdpa is not None:
+            sdpa_mask = None
+            if attention_mask is not None:
+                # SDPA expects True for positions that are visible.
+                sdpa_mask = attention_mask.to(dtype=torch.bool).unsqueeze(1).unsqueeze(2)
+            out = sdpa(
+                q,
+                k,
+                v,
+                attn_mask=sdpa_mask,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=False,
+            )
+        else:
+            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+            if attention_mask is not None:
+                mask = attention_mask.unsqueeze(1).unsqueeze(2)
+                attn_scores = attn_scores.masked_fill(mask == 0, -1e9)
+            attn_probs = F.softmax(attn_scores, dim=-1)
+            attn_probs = self.dropout(attn_probs)
+            out = torch.matmul(attn_probs, v)
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size)
 
         return self.out_proj(out)
