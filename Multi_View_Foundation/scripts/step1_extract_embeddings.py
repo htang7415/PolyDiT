@@ -136,124 +136,114 @@ def _load_f1_meta_table(results_dir: Path, step_dirs: dict) -> pd.DataFrame:
 
 
 def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None:
+    """6-panel summary (2×3) of the F1 embedding extraction step."""
     if plt is None or meta_df.empty:
         return
     views = meta_df["view"].astype(str).tolist()
     x = np.arange(len(views), dtype=np.float32)
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-    ax0, ax1, ax2, ax3 = axes.reshape(-1)
-
     d1 = pd.to_numeric(meta_df["d1_samples"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
     d2 = pd.to_numeric(meta_df["d2_samples"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
-    width = 0.36
-    ax0.bar(x - width / 2.0, d1, width=width, color="#4E79A7", alpha=0.9, label="D1")
-    ax0.bar(x + width / 2.0, d2, width=width, color="#F28E2B", alpha=0.9, label="D2")
-    ax0.set_xticks(x)
-    ax0.set_xticklabels(views, rotation=30, ha="right", fontsize=15)
-    ax0.set_ylabel("Samples")
-    ax0.grid(axis="y", alpha=0.25)
-    ax0.legend(loc="best", fontsize=15)
-
-    total_time = pd.to_numeric(meta_df["total_time_sec"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
-    bars = ax1.bar(views, total_time, color="#59A14F", alpha=0.9)
-    ax1.set_ylabel("Seconds (D1 + D2)")
-    ax1.grid(axis="y", alpha=0.25)
-    ax1.tick_params(axis="x", rotation=30)
-    for bar, val in zip(bars, total_time):
-        ax1.text(bar.get_x() + bar.get_width() / 2.0, float(val), f"{float(val):.1f}", ha="center", va="bottom", fontsize=15)
-
-    # Encoding throughput: (D1 + D2 samples) / total_time_sec
+    d1_time = pd.to_numeric(meta_df.get("d1_time_sec", pd.Series([0.0] * len(meta_df))), errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+    d2_time = pd.to_numeric(meta_df.get("d2_time_sec", pd.Series([0.0] * len(meta_df))), errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+    total_time = d1_time + d2_time
     total_samples = d1 + d2
     speed = np.where(total_time > 0, total_samples / total_time, 0.0).astype(np.float32)
-    bars2 = ax2.bar(views, speed, color="#B07AA1", alpha=0.9)
+    emb_dims = pd.to_numeric(meta_df.get("embedding_dim", pd.Series([0] * len(meta_df))), errors="coerce").fillna(0).to_numpy(dtype=np.float32)
+    model_sizes_list = meta_df["model_size"].astype(str).tolist()
+
+    fig, axes = plt.subplots(2, 3, figsize=(21, 11))
+    ax0, ax1, ax2, ax3, ax4, ax5 = axes.reshape(-1)
+
+    # (A) D1 vs D2 sample counts
+    width = 0.36
+    ax0.bar(x - width / 2.0, d1, width=width, color="#4E79A7", alpha=0.9, label="D1 (backbone train)")
+    ax0.bar(x + width / 2.0, d2, width=width, color="#F28E2B", alpha=0.9, label="D2 (property train)")
+    ax0.set_xticks(x)
+    ax0.set_xticklabels(views, rotation=30, ha="right")
+    ax0.set_ylabel("Embedded samples")
+    ax0.set_title("(A) Dataset coverage per view")
+    ax0.grid(axis="y", alpha=0.25)
+    ax0.legend()
+    for i, (d1v, d2v) in enumerate(zip(d1, d2)):
+        ax0.text(i - width / 2.0, float(d1v), f"{int(d1v):,}", ha="center", va="bottom", fontsize=10)
+        ax0.text(i + width / 2.0, float(d2v), f"{int(d2v):,}", ha="center", va="bottom", fontsize=10)
+
+    # (B) Stacked encoding time: D1 vs D2 per view
+    ax1.bar(x, d1_time, width=0.55, color="#4E79A7", alpha=0.85, label="D1 time")
+    ax1.bar(x, d2_time, width=0.55, bottom=d1_time, color="#F28E2B", alpha=0.85, label="D2 time")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(views, rotation=30, ha="right")
+    ax1.set_ylabel("Encoding time (s)")
+    ax1.set_title("(B) Encoding time breakdown (D1 + D2)")
+    ax1.grid(axis="y", alpha=0.25)
+    ax1.legend()
+    for i, tot in enumerate(total_time):
+        if tot > 0:
+            ax1.text(float(i), float(tot), f"{float(tot):.1f}s", ha="center", va="bottom", fontsize=11)
+
+    # (C) Encoding throughput
+    palette_c = ["#4E79A7", "#F28E2B", "#59A14F", "#E15759", "#B07AA1"]
+    bar_colors = [palette_c[i % len(palette_c)] for i in range(len(views))]
+    bars2 = ax2.bar(x, speed, color=bar_colors, alpha=0.9)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(views, rotation=30, ha="right")
     ax2.set_ylabel("Throughput (samples/sec)")
+    ax2.set_title("(C) Encoding throughput")
     ax2.grid(axis="y", alpha=0.25)
-    ax2.tick_params(axis="x", rotation=30)
     for bar, val in zip(bars2, speed):
         if val > 0:
             ax2.text(bar.get_x() + bar.get_width() / 2.0, float(val),
                      f"{float(val):.0f}", ha="center", va="bottom", fontsize=11)
 
-    # Summary table
-    ax3.axis("off")
-    model_sizes_list = meta_df["model_size"].astype(str).tolist()
-    emb_dims = pd.to_numeric(meta_df["embedding_dim"], errors="coerce").fillna(0).astype(int).tolist()
+    # (D) Embedding dimensionality per view
+    dim_colors = [palette_c[i % len(palette_c)] for i in range(len(views))]
+    bars3 = ax3.bar(x, emb_dims, color=dim_colors, alpha=0.9)
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(views, rotation=30, ha="right")
+    ax3.set_ylabel("Embedding dimension")
+    ax3.set_title("(D) Backbone embedding dimensionality")
+    ax3.grid(axis="y", alpha=0.25)
+    for bar, val in zip(bars3, emb_dims):
+        ax3.text(bar.get_x() + bar.get_width() / 2.0, float(val),
+                 f"{int(val)}", ha="center", va="bottom", fontsize=12)
+
+    # (E) Samples-per-second vs embedding-dim scatter
+    finite_mask = np.isfinite(speed) & np.isfinite(emb_dims) & (speed > 0) & (emb_dims > 0)
+    if finite_mask.any():
+        sc = ax4.scatter(emb_dims[finite_mask], speed[finite_mask],
+                         c=np.arange(int(finite_mask.sum())), cmap="tab10", s=100, zorder=5)
+        for i, (v, spd, dim) in enumerate(zip(np.array(views)[finite_mask], speed[finite_mask], emb_dims[finite_mask])):
+            ax4.annotate(v, (float(dim), float(spd)), xytext=(5, 3), textcoords="offset points", fontsize=11)
+        ax4.set_xlabel("Embedding dimension")
+        ax4.set_ylabel("Throughput (samples/sec)")
+        ax4.set_title("(E) Throughput vs. embedding dimension")
+        ax4.grid(alpha=0.25)
+    else:
+        ax4.text(0.5, 0.5, "No finite throughput/dim data", ha="center", va="center")
+        ax4.set_axis_off()
+
+    # (F) Summary table
+    ax5.axis("off")
+    emb_dims_int = [int(d) for d in emb_dims]
     table_data = [
-        [v, f"{int(d1_v):,}", f"{int(d2_v):,}", f"{dim}", m]
-        for v, d1_v, d2_v, dim, m in zip(views, d1, d2, emb_dims, model_sizes_list)
+        [v, f"{int(d1_v):,}", f"{int(d2_v):,}", f"{dim:,}", f"{t:.1f}s", m]
+        for v, d1_v, d2_v, dim, t, m in zip(views, d1, d2, emb_dims_int, total_time, model_sizes_list)
     ]
-    col_labels = ["View", "D1 samples", "D2 samples", "Dim", "Model size"]
-    tbl = ax3.table(
-        cellText=table_data,
-        colLabels=col_labels,
-        loc="center",
-        cellLoc="center",
-    )
+    col_labels = ["View", "D1 samples", "D2 samples", "Emb dim", "Time (s)", "Model"]
+    tbl = ax5.table(cellText=table_data, colLabels=col_labels, loc="center", cellLoc="center")
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(11)
-    tbl.scale(1.0, 1.8)
+    tbl.scale(1.0, 2.0)
     for col_idx in range(len(col_labels)):
         tbl[(0, col_idx)].set_facecolor("#4E79A7")
         tbl[(0, col_idx)].set_text_props(color="white", fontweight="bold")
-    ax3.set_title(f"Embedding summary  (total time: {float(np.sum(total_time)):.1f}s)", fontsize=12, pad=4)
+    ax5.set_title(f"(F) Embedding summary  (total time: {float(np.sum(total_time)):.1f}s)")
 
+    fig.suptitle("F1: Backbone Embedding Extraction Summary", fontsize=18, fontweight="bold", y=1.01)
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f1_embedding_summary")
     plt.close(fig)
-
-
-def _plot_alignment_loss_curve(curve_path: Path, output_base: Path) -> bool:
-    if plt is None or not curve_path.exists():
-        return False
-    try:
-        df = pd.read_csv(curve_path)
-    except Exception:
-        return False
-    if df.empty or "epoch" not in df.columns:
-        return False
-    train_loss = pd.to_numeric(df.get("train_loss", pd.Series(dtype=float)), errors="coerce")
-    val_loss = pd.to_numeric(df.get("val_loss", pd.Series(dtype=float)), errors="coerce")
-    epochs = pd.to_numeric(df["epoch"], errors="coerce")
-    mask = epochs.notna()
-    if not mask.any():
-        return False
-    x = epochs[mask].to_numpy(dtype=np.float32)
-    train_arr = train_loss[mask].to_numpy(dtype=np.float32) if len(train_loss) else np.array([], dtype=np.float32)
-    val_arr = val_loss[mask].to_numpy(dtype=np.float32) if len(val_loss) else np.array([], dtype=np.float32)
-
-    fig, ax = plt.subplots(figsize=(7.6, 4.6))
-    if train_loss.notna().any() and train_arr.size:
-        ax.plot(x, train_arr, label="train_loss", color="#4E79A7", linewidth=1.8)
-    if val_loss.notna().any() and val_arr.size:
-        ax.plot(x, val_arr, label="val_loss", color="#E15759", linewidth=1.8)
-        finite = np.isfinite(val_arr) & np.isfinite(x)
-        if finite.any():
-            x_finite = x[finite]
-            val_finite = val_arr[finite]
-            best_idx = int(np.argmin(val_finite))
-            best_epoch = float(x_finite[best_idx])
-            best_val = float(val_finite[best_idx])
-            ax.axvline(best_epoch, color="#111111", linestyle="--", linewidth=1.0, alpha=0.85)
-            ax.scatter([best_epoch], [best_val], color="#111111", s=28, zorder=5)
-            ax.annotate(
-                f"best val: epoch {int(round(best_epoch))}\nloss={best_val:.4f}",
-                xy=(best_epoch, best_val),
-                xytext=(6, 8),
-                textcoords="offset points",
-                ha="left",
-                va="bottom",
-                fontsize=15,
-                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.75, edgecolor="#999999"),
-            )
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
-    ax.grid(alpha=0.25)
-    ax.legend(loc="best", fontsize=15)
-    fig.tight_layout()
-    _save_figure_png(fig, output_base)
-    plt.close(fig)
-    return True
 
 
 def _generate_f1_figures(*, results_dir: Path, step_dirs: dict, cfg_f1: dict, args) -> None:
@@ -271,14 +261,6 @@ def _generate_f1_figures(*, results_dir: Path, step_dirs: dict, cfg_f1: dict, ar
         _plot_f1_embedding_summary(meta_df, step_dirs["figures_dir"])
         save_csv(meta_df, step_dirs["figures_dir"] / "figure_f1_embedding_summary.csv", index=False)
 
-    _plot_alignment_loss_curve(
-        results_dir / "step1_alignment" / "alignment_loss_curve.csv",
-        step_dirs["figures_dir"] / "figure_f1_alignment_loss_frozen",
-    )
-    _plot_alignment_loss_curve(
-        results_dir / "step1_alignment_e2e" / "alignment_loss_curve.csv",
-        step_dirs["figures_dir"] / "figure_f1_alignment_loss_e2e",
-    )
 
 
 def _load_module(module_name: str, path: Path):

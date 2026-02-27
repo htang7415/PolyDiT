@@ -594,7 +594,13 @@ def _plot_f3_metrics_by_split(metrics_df: pd.DataFrame, figures_dir: Path) -> No
 
             if row_idx == 0 and col_idx == 0:
                 ax.legend(loc="best", fontsize=15)
+            # Row label: property name on left-most column
+            if col_idx == 0:
+                ax.set_title(f"{prop} — {metric_label}", fontsize=13)
+            else:
+                ax.set_title(metric_label, fontsize=13)
 
+    fig.suptitle("F3: Property Head Metrics by Split (train / val / test)", fontsize=16, fontweight="bold")
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f3_metrics_by_split")
     plt.close(fig)
@@ -643,6 +649,7 @@ def _plot_f3_generalization_heatmaps(metrics_df: pd.DataFrame, figures_dir: Path
         spec["ax"].text(-0.12, 1.04, label, transform=spec["ax"].transAxes,
                         fontsize=14, fontweight="bold", va="bottom", ha="left")
 
+    fig.suptitle("F3: Generalization Analysis — Test R², Gap, RMSE Ratio", fontsize=16, fontweight="bold")
     _save_figure_png(fig, figures_dir / "figure_f3_generalization_heatmaps")
     plt.close(fig)
 
@@ -718,6 +725,7 @@ def _plot_f3_test_head_leaderboard(metrics_df: pd.DataFrame, figures_dir: Path) 
                     }
                 )
 
+    fig.suptitle("F3: Test-Set Property Head Leaderboard (best view per property)", fontsize=16, fontweight="bold")
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f3_test_head_leaderboard")
     plt.close(fig)
@@ -1037,6 +1045,126 @@ def _plot_f3_hpo_progress(model_dir: Path, figures_dir: Path) -> None:
     plt.close(fig)
 
 
+def _plot_f3_cross_view_summary(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
+    """Comprehensive cross-view summary figure (2×2):
+    (A) Test R² per property per view — grouped bars (best view visible at a glance).
+    (B) Test RMSE per property per view — grouped bars.
+    (C) View ranking heatmap (rank 1 = best R² for that property).
+    (D) Mean test R² across all properties per view — overall ranking bar.
+    """
+    if plt is None or metrics_df.empty:
+        return
+    test_df = metrics_df[metrics_df["split"] == "test"].copy()
+    if test_df.empty:
+        return
+
+    properties = sorted(test_df["property"].astype(str).unique().tolist())
+    reps = _ordered_representations(test_df["representation"].astype(str).unique().tolist())
+    if not properties or not reps:
+        return
+
+    # Build (property × rep) matrices for R² and RMSE
+    r2_mat = np.full((len(properties), len(reps)), np.nan, dtype=np.float32)
+    rmse_mat = np.full((len(properties), len(reps)), np.nan, dtype=np.float32)
+    for pi, prop in enumerate(properties):
+        for ri, rep in enumerate(reps):
+            sub = test_df[(test_df["property"] == prop) & (test_df["representation"] == rep)]
+            if sub.empty:
+                continue
+            r2_val = pd.to_numeric(sub["r2"], errors="coerce").mean()
+            rmse_val = pd.to_numeric(sub["rmse"], errors="coerce").mean()
+            if np.isfinite(r2_val):
+                r2_mat[pi, ri] = float(r2_val)
+            if np.isfinite(rmse_val):
+                rmse_mat[pi, ri] = float(rmse_val)
+
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+    ax0, ax1, ax2, ax3 = axes.reshape(-1)
+    palette = [_representation_color(r) for r in reps]
+    x = np.arange(len(properties), dtype=np.float32)
+    n_reps = len(reps)
+    width = min(0.7 / max(n_reps, 1), 0.18)
+    offsets = np.linspace(-0.35 + width / 2, 0.35 - width / 2, n_reps)
+
+    # (A) Test R² grouped bars
+    for ri, (rep, color) in enumerate(zip(reps, palette)):
+        vals = r2_mat[:, ri]
+        bars = ax0.bar(x + offsets[ri], vals, width=width, color=color, alpha=0.88, label=rep)
+    ax0.set_xticks(x)
+    ax0.set_xticklabels(properties, rotation=30, ha="right")
+    ax0.set_ylabel("Test R²")
+    ax0.set_title("(A) Test R² per property per view")
+    ax0.grid(axis="y", alpha=0.25)
+    ax0.legend(loc="lower right", fontsize=11)
+    finite_r2 = r2_mat[np.isfinite(r2_mat)]
+    if finite_r2.size:
+        low_r2 = min(-0.05, float(np.min(finite_r2)) - 0.05)
+        ax0.set_ylim(low_r2, 1.05)
+
+    # (B) Test RMSE grouped bars
+    for ri, (rep, color) in enumerate(zip(reps, palette)):
+        vals = rmse_mat[:, ri]
+        ax1.bar(x + offsets[ri], vals, width=width, color=color, alpha=0.88, label=rep)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(properties, rotation=30, ha="right")
+    ax1.set_ylabel("Test RMSE")
+    ax1.set_title("(B) Test RMSE per property per view")
+    ax1.grid(axis="y", alpha=0.25)
+    ax1.legend(loc="upper right", fontsize=11)
+
+    # (C) View ranking heatmap (rank by descending R²)
+    rank_mat = np.full_like(r2_mat, np.nan)
+    for pi in range(len(properties)):
+        row = r2_mat[pi]
+        finite_idx = np.where(np.isfinite(row))[0]
+        if finite_idx.size:
+            sorted_idx = finite_idx[np.argsort(-row[finite_idx])]
+            for rank, ri in enumerate(sorted_idx, start=1):
+                rank_mat[pi, ri] = float(rank)
+    masked_rank = np.ma.masked_invalid(rank_mat)
+    im_c = ax2.imshow(masked_rank, cmap="RdYlGn_r", vmin=1, vmax=max(n_reps, 2), aspect="auto")
+    ax2.set_xticks(np.arange(n_reps))
+    ax2.set_xticklabels(reps, rotation=35, ha="right", fontsize=11)
+    ax2.set_yticks(np.arange(len(properties)))
+    ax2.set_yticklabels(properties, fontsize=11)
+    for pi in range(len(properties)):
+        for ri in range(n_reps):
+            val = rank_mat[pi, ri]
+            if np.isfinite(val):
+                r2v = r2_mat[pi, ri]
+                r2_str = f"\n({r2v:.2f})" if np.isfinite(r2v) else ""
+                ax2.text(ri, pi, f"#{int(val)}{r2_str}", ha="center", va="center", fontsize=9)
+    fig.colorbar(im_c, ax=ax2, fraction=0.046, pad=0.04, label="Rank (1=best R²)")
+    ax2.set_title("(C) Per-property view ranking (lower rank = better R²)")
+
+    # (D) Mean test R² across all properties per view — overall ranking
+    mean_r2 = np.nanmean(r2_mat, axis=0)
+    std_r2 = np.nanstd(r2_mat, axis=0)
+    sort_idx = np.argsort(-mean_r2)
+    sorted_reps = [reps[i] for i in sort_idx]
+    sorted_means = mean_r2[sort_idx]
+    sorted_stds = std_r2[sort_idx]
+    sorted_colors = [palette[i] for i in sort_idx]
+    y_pos = np.arange(len(sorted_reps), dtype=np.float32)
+    bars_d = ax3.barh(y_pos, sorted_means, xerr=sorted_stds,
+                      color=sorted_colors, alpha=0.9, capsize=4, error_kw={"linewidth": 1.4})
+    ax3.set_yticks(y_pos)
+    ax3.set_yticklabels(sorted_reps)
+    ax3.invert_yaxis()
+    ax3.set_xlabel("Mean test R² (± std across properties)")
+    ax3.set_title("(D) Overall view ranking by mean test R²")
+    ax3.grid(axis="x", alpha=0.25)
+    for i, (bar, val, std) in enumerate(zip(bars_d, sorted_means, sorted_stds)):
+        if np.isfinite(val):
+            ax3.text(float(val) + float(std) + 0.005, bar.get_y() + bar.get_height() / 2.0,
+                     f"{val:.3f}±{std:.3f}", va="center", ha="left", fontsize=12)
+
+    fig.suptitle("F3: Cross-View Property Prediction Summary", fontsize=18, fontweight="bold")
+    fig.tight_layout()
+    _save_figure_png(fig, figures_dir / "figure_f3_cross_view_summary")
+    plt.close(fig)
+
+
 def _generate_f3_figures(
     *,
     metrics_df: pd.DataFrame,
@@ -1060,6 +1188,7 @@ def _generate_f3_figures(
     _plot_f3_fusion_gain(metrics_df, figures_dir)
     _plot_f3_head_coverage(model_dir, figures_dir)
     _plot_f3_hpo_progress(model_dir, figures_dir)
+    _plot_f3_cross_view_summary(metrics_df, figures_dir)
 
 
 def _resolve_property_columns(df: pd.DataFrame, property_name: str) -> tuple[str, str]:

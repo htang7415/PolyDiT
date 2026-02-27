@@ -150,78 +150,188 @@ def _plot_f6_objective_diagnostics(
     normalized_term_weights: Dict[str, float],
     figures_dir: Path,
 ) -> None:
+    """6-panel objective diagnostics (2×3):
+    (A) Objective score distribution (all vs top-k).
+    (B) Property score vs OOD-prop trade-off scatter.
+    (C) OOD-prop vs OOD-gen scatter (dual OOD signal for top-k candidates).
+    (D) Objective term weights bar chart.
+    (E) Cumulative property hits by objective rank.
+    (F) Top-k candidate summary table.
+    """
     if plt is None or valid_df.empty:
         return
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-    ax0, ax1, ax2, ax3 = axes.reshape(-1)
+    fig, axes = plt.subplots(2, 3, figsize=(21, 11))
+    ax0, ax1, ax2, ax3, ax4, ax5 = axes.reshape(-1)
+    mode = str(target_mode).strip().lower()
 
-    # A) objective distribution.
+    # (A) Objective score distribution.
     obj_all = pd.to_numeric(valid_df.get("conservative_objective", pd.Series(dtype=float)), errors="coerce").dropna()
-    obj_top = pd.to_numeric(top_df.get("conservative_objective", pd.Series(dtype=float)), errors="coerce").dropna()
+    obj_top = pd.to_numeric(top_df.get("conservative_objective", pd.Series(dtype=float)), errors="coerce").dropna() if not top_df.empty else pd.Series(dtype=float)
     if len(obj_all):
-        ax0.hist(obj_all.to_numpy(dtype=np.float32), bins=40, color="#4E79A7", alpha=0.65, label="All scored")
+        ax0.hist(obj_all.to_numpy(dtype=np.float32), bins=40, color="#4E79A7", alpha=0.65,
+                 label=f"All scored (n={len(obj_all):,})")
     if len(obj_top):
-        ax0.hist(obj_top.to_numpy(dtype=np.float32), bins=25, color="#E15759", alpha=0.75, label="Top-k")
+        ax0.hist(obj_top.to_numpy(dtype=np.float32), bins=25, color="#E15759", alpha=0.8,
+                 label=f"Top-k (n={len(obj_top):,})")
     ax0.set_xlabel("Objective (lower is better)")
     ax0.set_ylabel("Count")
+    ax0.set_title("(A) Objective score distribution")
     ax0.grid(alpha=0.25)
-    ax0.legend(loc="best", fontsize=15)
+    ax0.legend()
 
-    # B) property-vs-OOD trade-off.
-    mode = str(target_mode).strip().lower()
+    # (B) Property score vs OOD-prop trade-off scatter.
+    _ood_col_f6 = "ood_prop" if "ood_prop" in valid_df.columns else "d2_distance"
     if mode in {"ge", "le"} and "target_excess" in valid_df.columns:
-        x = pd.to_numeric(valid_df.get("d2_distance", pd.Series(dtype=float)), errors="coerce")
-        y = pd.to_numeric(valid_df.get("target_excess", pd.Series(dtype=float)), errors="coerce")
-        x_label = "D2 distance"
-        y_label = "Target excess (>=0 is hit)"
+        x_b = pd.to_numeric(valid_df.get(_ood_col_f6, pd.Series(dtype=float)), errors="coerce")
+        y_b = pd.to_numeric(valid_df.get("target_excess", pd.Series(dtype=float)), errors="coerce")
+        x_label_b = "OOD-prop (cosine dist to D2)" if _ood_col_f6 == "ood_prop" else "D2 distance"
+        y_label_b = "Target excess (≥0 = property hit)"
     else:
-        x = pd.to_numeric(valid_df.get("d2_distance_objective", pd.Series(dtype=float)), errors="coerce")
-        y = pd.to_numeric(valid_df.get("property_error_objective", pd.Series(dtype=float)), errors="coerce")
-        x_label = "OOD objective term"
-        y_label = "Property objective term"
-    c = pd.to_numeric(valid_df.get("conservative_objective", pd.Series(dtype=float)), errors="coerce")
-    mask = x.notna() & y.notna() & c.notna()
-    if mask.any():
-        sc = ax1.scatter(x[mask], y[mask], c=c[mask], cmap="viridis", s=18, alpha=0.7)
-        ax1.set_xlabel(x_label)
-        ax1.set_ylabel(y_label)
+        x_b = pd.to_numeric(valid_df.get("d2_distance_objective", pd.Series(dtype=float)), errors="coerce")
+        y_b = pd.to_numeric(valid_df.get("property_error_objective", pd.Series(dtype=float)), errors="coerce")
+        x_label_b = "OOD objective term"
+        y_label_b = "Property objective term"
+    c_b = pd.to_numeric(valid_df.get("conservative_objective", pd.Series(dtype=float)), errors="coerce")
+    mask_b = x_b.notna() & y_b.notna() & c_b.notna()
+    if mask_b.any():
+        sc_b = ax1.scatter(x_b[mask_b], y_b[mask_b], c=c_b[mask_b], cmap="viridis",
+                           s=18, alpha=0.65)
+        if mode in {"ge", "le"}:
+            ax1.axhline(0.0, color="#333333", linestyle="--", linewidth=1.0, label="Property boundary")
+        ax1.set_xlabel(x_label_b)
+        ax1.set_ylabel(y_label_b)
+        ax1.set_title("(B) Property vs OOD trade-off")
         ax1.grid(alpha=0.25)
-        fig.colorbar(sc, ax=ax1, fraction=0.046, pad=0.04, label="Conservative objective")
+        fig.colorbar(sc_b, ax=ax1, fraction=0.046, pad=0.04, label="Objective score")
     else:
         ax1.text(0.5, 0.5, "No finite objective points", ha="center", va="center")
         ax1.set_axis_off()
 
-    # C) objective term weights.
-    weight_items = [(k, float(v)) for k, v in normalized_term_weights.items() if np.isfinite(float(v))]
-    if weight_items:
-        labels = [k for k, _ in weight_items]
-        values = np.asarray([v for _, v in weight_items], dtype=np.float32)
-        bars = ax2.bar(labels, values, color="#59A14F", alpha=0.85)
-        ax2.set_ylim(0, max(1.0, float(np.max(values) + 0.05)))
-        ax2.set_ylabel("Weight")
-        ax2.grid(axis="y", alpha=0.25)
-        ax2.tick_params(axis="x", rotation=30)
-        for bar, val in zip(bars, values):
-            ax2.text(bar.get_x() + bar.get_width() / 2.0, float(val), f"{float(val):.2f}", ha="center", va="bottom", fontsize=15)
+    # (C) OOD-prop vs OOD-gen scatter for candidates.
+    _ood_gen_col = "ood_gen" if "ood_gen" in valid_df.columns else None
+    _ood_prop_col = "ood_prop" if "ood_prop" in valid_df.columns else "d2_distance"
+    if _ood_gen_col and _ood_prop_col in valid_df.columns:
+        x_c = pd.to_numeric(valid_df[_ood_prop_col], errors="coerce")
+        y_c = pd.to_numeric(valid_df[_ood_gen_col], errors="coerce")
+        mask_c = x_c.notna() & y_c.notna()
+        if mask_c.any():
+            hit_c = valid_df.get("property_hit", pd.Series([False] * len(valid_df))).astype(bool)
+            non_hit_c = valid_df[mask_c & ~hit_c]
+            hit_c_df = valid_df[mask_c & hit_c]
+            if not non_hit_c.empty:
+                ax2.scatter(non_hit_c[_ood_prop_col], non_hit_c[_ood_gen_col],
+                            s=10, alpha=0.25, color="#9ECAE1", label="Non-hit")
+            if not hit_c_df.empty:
+                ax2.scatter(hit_c_df[_ood_prop_col], hit_c_df[_ood_gen_col],
+                            s=35, alpha=0.9, color="#D94801", label="Property hit", zorder=5)
+            # Highlight top-k if available
+            if not top_df.empty:
+                tx = pd.to_numeric(top_df.get(_ood_prop_col, pd.Series(dtype=float)), errors="coerce").dropna()
+                ty = pd.to_numeric(top_df.get(_ood_gen_col, pd.Series(dtype=float)), errors="coerce")
+                tm = tx.index.intersection(ty.dropna().index)
+                if len(tm):
+                    ax2.scatter(top_df.loc[tm, _ood_prop_col], top_df.loc[tm, _ood_gen_col],
+                                s=60, alpha=1.0, color="#2CA02C", marker="*", label="Top-k", zorder=6)
+            ax2.set_xlabel("OOD-prop (cosine dist to D2, property relevance)")
+            ax2.set_ylabel("OOD-gen (cosine dist to D1, generative reliability)")
+            ax2.set_title("(C) Dual OOD signals: OOD-prop vs OOD-gen")
+            ax2.grid(alpha=0.25)
+            ax2.legend(fontsize=11)
+        else:
+            ax2.text(0.5, 0.5, "No finite OOD data", ha="center", va="center")
+            ax2.set_axis_off()
     else:
-        ax2.text(0.5, 0.5, "No active objective terms", ha="center", va="center")
+        ax2.text(0.5, 0.5, "ood_gen column not available\n(only available with multi-view setup)",
+                 ha="center", va="center", style="italic")
         ax2.set_axis_off()
 
-    # D) cumulative hits by objective rank.
+    # (D) Objective term weights bar chart.
+    weight_items = [(k, float(v)) for k, v in normalized_term_weights.items() if np.isfinite(float(v))]
+    if weight_items:
+        wlabels = [k for k, _ in weight_items]
+        wvalues = np.asarray([v for _, v in weight_items], dtype=np.float32)
+        bar_colors_d = ["#4E79A7" if v > 0 else "#E15759" for v in wvalues]
+        bars_d = ax3.bar(wlabels, wvalues, color=bar_colors_d, alpha=0.85)
+        ax3.set_ylim(0, max(1.0, float(np.max(wvalues) + 0.08)))
+        ax3.set_ylabel("Normalized weight")
+        ax3.set_title("(D) Objective term weights")
+        ax3.grid(axis="y", alpha=0.25)
+        ax3.tick_params(axis="x", rotation=35)
+        for bar, val in zip(bars_d, wvalues):
+            ax3.text(bar.get_x() + bar.get_width() / 2.0, float(val),
+                     f"{float(val):.2f}", ha="center", va="bottom", fontsize=12)
+    else:
+        ax3.text(0.5, 0.5, "No active objective terms", ha="center", va="center")
+        ax3.set_axis_off()
+
+    # (E) Cumulative property hits by objective rank.
     if "property_hit" in valid_df.columns and "conservative_rank" in valid_df.columns:
         ranked = valid_df.sort_values("conservative_rank").copy()
         hits = ranked["property_hit"].astype(bool).to_numpy(dtype=np.int64)
         cum_hits = np.cumsum(hits)
         x_rank = np.arange(1, len(cum_hits) + 1, dtype=np.int64)
-        ax3.plot(x_rank, cum_hits, color="#4E79A7", linewidth=2.0)
-        ax3.set_xlabel("Objective rank")
-        ax3.set_ylabel("Cumulative hits")
-        ax3.grid(alpha=0.25)
+        total_hits = int(hits.sum())
+        ax4.plot(x_rank, cum_hits, color="#4E79A7", linewidth=2.0, label=f"Total hits: {total_hits}")
+        # Mark top-k boundary
+        if not top_df.empty:
+            n_top = len(top_df)
+            if n_top <= len(cum_hits):
+                ax4.axvline(n_top, color="#E15759", linestyle="--", linewidth=1.2,
+                            label=f"Top-k boundary (k={n_top})")
+                top_hits = int(cum_hits[n_top - 1]) if n_top <= len(cum_hits) else 0
+                ax4.scatter([n_top], [top_hits], color="#E15759", s=60, zorder=5)
+        ax4.set_xlabel("Objective rank")
+        ax4.set_ylabel("Cumulative property hits")
+        ax4.set_title("(E) Hit accumulation by objective rank")
+        ax4.grid(alpha=0.25)
+        ax4.legend()
     else:
-        ax3.text(0.5, 0.5, "Missing rank/hit columns", ha="center", va="center")
-        ax3.set_axis_off()
+        ax4.text(0.5, 0.5, "Missing conservative_rank/property_hit columns",
+                 ha="center", va="center")
+        ax4.set_axis_off()
 
+    # (F) Top-k candidate summary table.
+    show_cols_f = []
+    for col, hdr in [("conservative_rank", "Rank"), ("smiles", "SMILES"),
+                     ("prediction", "Pred"), ("target_excess", "Excess"),
+                     ("ood_prop", "OOD-prop"), ("ood_gen", "OOD-gen"),
+                     ("conservative_objective", "Obj"), ("property_hit", "Hit")]:
+        if col in top_df.columns:
+            show_cols_f.append((col, hdr))
+    show_n_f = min(12, len(top_df))
+    ax5.set_axis_off()
+    if show_cols_f and show_n_f:
+        table_sub = top_df.head(show_n_f)
+        col_labels_f = [h for _, h in show_cols_f]
+        cell_rows_f = []
+        for _, row in table_sub.iterrows():
+            rv = []
+            for col, _ in show_cols_f:
+                val = row.get(col, "")
+                if col == "smiles":
+                    s = str(val)
+                    rv.append(s[:28] + "…" if len(s) > 28 else s)
+                elif col == "property_hit":
+                    rv.append("✓" if bool(val) else "✗")
+                elif isinstance(val, (float, np.floating)):
+                    rv.append(f"{float(val):.3f}" if np.isfinite(float(val)) else "")
+                else:
+                    rv.append(str(val))
+            cell_rows_f.append(rv)
+        tbl_f = ax5.table(cellText=cell_rows_f, colLabels=col_labels_f,
+                          loc="center", cellLoc="center")
+        tbl_f.auto_set_font_size(False)
+        tbl_f.set_fontsize(8)
+        tbl_f.scale(1.0, 1.25)
+        for ci in range(len(col_labels_f)):
+            tbl_f[(0, ci)].set_facecolor("#4E79A7")
+            tbl_f[(0, ci)].set_text_props(color="white", fontweight="bold")
+        ax5.set_title(f"(F) Top-{show_n_f} candidates by objective")
+    else:
+        ax5.text(0.5, 0.5, "No top-k candidates", ha="center", va="center")
+
+    fig.suptitle(f"F6 OOD-Aware Inverse Objective: {property_name}", fontsize=16, fontweight="bold")
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / f"figure_f6_ood_objective_diagnostics_{property_name}")
     plt.close(fig)
@@ -447,6 +557,7 @@ def _save_augmented_ood_metrics(
     model_size: str,
     generated_d2_distance: np.ndarray,
     ood_k: int,
+    ood_gen: Optional[np.ndarray] = None,
 ) -> None:
     finite = np.asarray(generated_d2_distance, dtype=np.float32).reshape(-1)
     finite = finite[np.isfinite(finite)]
@@ -457,12 +568,21 @@ def _save_augmented_ood_metrics(
     gen_mean = float(np.mean(finite))
     frac_near = float(np.mean(finite <= d1_to_d2_mean)) if np.isfinite(d1_to_d2_mean) else np.nan
 
+    ood_gen_mean = np.nan
+    if ood_gen is not None:
+        ood_gen_arr = np.asarray(ood_gen, dtype=np.float32).reshape(-1)
+        ood_gen_finite = ood_gen_arr[np.isfinite(ood_gen_arr)]
+        if ood_gen_finite.size > 0:
+            ood_gen_mean = float(np.mean(ood_gen_finite))
+
     row = {
         "method": "Multi_View_Foundation",
         "representation": representation,
         "model_size": model_size,
         "d1_to_d2_mean_dist": round(float(d1_to_d2_mean), 4) if np.isfinite(d1_to_d2_mean) else np.nan,
-        "generated_to_d2_mean_dist": round(gen_mean, 4),
+        "ood_prop_mean": round(gen_mean, 4),
+        "ood_gen_mean": round(ood_gen_mean, 4) if np.isfinite(ood_gen_mean) else np.nan,
+        "generated_to_d2_mean_dist": round(gen_mean, 4),  # backward-compat alias
         "frac_generated_near_d2": round(frac_near, 4) if np.isfinite(frac_near) else np.nan,
     }
     out_path = results_dir / "step4_ood" / "metrics" / "metrics_ood.csv"
@@ -693,21 +813,80 @@ def _compute_d2_distance_single_view(
     return d2_full
 
 
-def _compute_d2_distance_column(
+def _compute_d1_distance_single_view(
+    *,
+    config: dict,
+    results_dir: Path,
+    smiles_list: list[str],
+    encoder_view: str,
+    ood_k: int,
+) -> np.ndarray:
+    """Compute cosine distance from candidates to D1 (backbone training set) for a single view."""
+    if not smiles_list:
+        return np.zeros((0,), dtype=np.float32)
+
+    step5 = _load_step5_module()
+    encoder_key = step5.VIEW_SPECS[encoder_view]["encoder_key"]
+    encoder_cfg = config.get(encoder_key, {})
+    device = encoder_cfg.get("device", "auto")
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    assets = step5._load_view_assets(config=config, view=encoder_view, device=device)
+    embeddings, kept_indices = step5._embed_candidates(
+        view=encoder_view,
+        smiles_list=smiles_list,
+        assets=assets,
+        device=device,
+    )
+
+    d1_full = np.full((len(smiles_list),), np.nan, dtype=np.float32)
+    if embeddings.size == 0 or not kept_indices:
+        return d1_full
+
+    d1_embeddings = step5._load_d1_embeddings(results_dir, encoder_view)
+    distances = knn_distances(embeddings, d1_embeddings, k=int(ood_k))
+    mean_dist = distances.mean(axis=1).astype(np.float32, copy=False)
+    for local_i, global_i in enumerate(kept_indices):
+        d1_full[int(global_i)] = mean_dist[local_i]
+    return d1_full
+
+
+def _compute_ood_distance_columns(
     *,
     config: dict,
     results_dir: Path,
     smiles_list: list[str],
     ood_views: list[str],
     ood_k: int,
-) -> tuple[np.ndarray, dict[str, np.ndarray], list[str]]:
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray], list[str]]:
+    """Compute both ood_prop (D2) and ood_gen (D1) distances for all OOD views.
+
+    Returns:
+        (ood_prop_agg, ood_gen_agg, d2_per_view, d1_per_view, used_views)
+
+        - ood_prop_agg: mean cosine dist to D2, shape (n,), range [0, 1]
+        - ood_gen_agg:  mean cosine dist to D1, shape (n,), range [0, 1]; all-nan if unavailable
+        - d2_per_view:  per-view D2 distance arrays
+        - d1_per_view:  per-view D1 distance arrays
+        - used_views:   views for which D2 embeddings were successfully loaded
+    """
     n = len(smiles_list)
     if n == 0:
-        return np.zeros((0,), dtype=np.float32), {}, []
+        return (
+            np.zeros((0,), dtype=np.float32),
+            np.zeros((0,), dtype=np.float32),
+            {},
+            {},
+            [],
+        )
 
-    per_view: dict[str, np.ndarray] = {}
+    d2_per_view: dict[str, np.ndarray] = {}
+    d1_per_view: dict[str, np.ndarray] = {}
     used_views: list[str] = []
+
     for view in ood_views:
+        # D2 distance (ood_prop) — required for view to count as used
         try:
             d2_vec = _compute_d2_distance_single_view(
                 config=config,
@@ -717,10 +896,23 @@ def _compute_d2_distance_column(
                 ood_k=ood_k,
             )
         except FileNotFoundError as exc:
-            print(f"[F6] Warning: skipping OOD view '{view}' ({exc})")
+            print(f"[F6] Warning: skipping OOD view '{view}' for D2 ({exc})")
             continue
-        per_view[view] = np.asarray(d2_vec, dtype=np.float32).reshape(-1)
+        d2_per_view[view] = np.asarray(d2_vec, dtype=np.float32).reshape(-1)
         used_views.append(view)
+
+        # D1 distance (ood_gen) — optional, skip gracefully
+        try:
+            d1_vec = _compute_d1_distance_single_view(
+                config=config,
+                results_dir=results_dir,
+                smiles_list=smiles_list,
+                encoder_view=view,
+                ood_k=ood_k,
+            )
+            d1_per_view[view] = np.asarray(d1_vec, dtype=np.float32).reshape(-1)
+        except FileNotFoundError:
+            pass
 
     if not used_views:
         raise FileNotFoundError(
@@ -728,12 +920,50 @@ def _compute_d2_distance_column(
             "Ensure F1 generated D2 embeddings for at least one enabled view."
         )
 
-    stack = np.column_stack([per_view[v] for v in used_views]).astype(np.float32, copy=False)
-    valid_counts = np.sum(np.isfinite(stack), axis=1)
+    # Aggregate D2 across views
+    d2_stack = np.column_stack([d2_per_view[v] for v in used_views]).astype(np.float32, copy=False)
+    d2_valid_counts = np.sum(np.isfinite(d2_stack), axis=1)
     with np.errstate(invalid="ignore"):
-        agg = np.nanmean(stack, axis=1).astype(np.float32, copy=False)
-    agg[valid_counts == 0] = np.nan
-    return agg, per_view, used_views
+        ood_prop_agg = np.nanmean(d2_stack, axis=1).astype(np.float32, copy=False)
+    ood_prop_agg[d2_valid_counts == 0] = np.nan
+
+    # Aggregate D1 across views (may be empty)
+    if d1_per_view:
+        d1_views_present = [v for v in used_views if v in d1_per_view]
+        if d1_views_present:
+            d1_stack = np.column_stack([d1_per_view[v] for v in d1_views_present]).astype(np.float32, copy=False)
+            d1_valid_counts = np.sum(np.isfinite(d1_stack), axis=1)
+            with np.errstate(invalid="ignore"):
+                ood_gen_agg = np.nanmean(d1_stack, axis=1).astype(np.float32, copy=False)
+            ood_gen_agg[d1_valid_counts == 0] = np.nan
+        else:
+            ood_gen_agg = np.full((n,), np.nan, dtype=np.float32)
+    else:
+        ood_gen_agg = np.full((n,), np.nan, dtype=np.float32)
+
+    return ood_prop_agg, ood_gen_agg, d2_per_view, d1_per_view, used_views
+
+
+def _compute_d2_distance_column(
+    *,
+    config: dict,
+    results_dir: Path,
+    smiles_list: list[str],
+    ood_views: list[str],
+    ood_k: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray], list[str]]:
+    """Backward-compat thin wrapper around _compute_ood_distance_columns.
+
+    Returns: (ood_prop_agg, d2_per_view, used_views)
+    """
+    ood_prop_agg, _ood_gen_agg, d2_per_view, _d1_per_view, used_views = _compute_ood_distance_columns(
+        config=config,
+        results_dir=results_dir,
+        smiles_list=smiles_list,
+        ood_views=ood_views,
+        ood_k=ood_k,
+    )
+    return ood_prop_agg, d2_per_view, used_views
 
 
 def main(args):
@@ -913,58 +1143,82 @@ def main(args):
 
     d2_source = "existing"
     ood_views_used = []
-    has_d2 = "d2_distance" in df.columns
-    if has_d2:
+    has_d2 = "d2_distance" in df.columns or "ood_prop" in df.columns
+    if "ood_prop" in df.columns:
+        df["ood_prop"] = pd.to_numeric(df["ood_prop"], errors="coerce")
+    if "ood_gen" in df.columns:
+        df["ood_gen"] = pd.to_numeric(df["ood_gen"], errors="coerce")
+    if "d2_distance" in df.columns:
         df["d2_distance"] = pd.to_numeric(df["d2_distance"], errors="coerce")
-        for view in ood_views:
-            col = f"d2_distance_{view}"
+    for view in ood_views:
+        for prefix in ("ood_prop", "ood_gen", "d2_distance"):
+            col = f"{prefix}_{view}"
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # Determine whether we need to (re)compute OOD distances
+    _ood_prop_col_existing = "ood_prop" if "ood_prop" in df.columns else ("d2_distance" if "d2_distance" in df.columns else None)
     needs_compute = force_recompute
     if not needs_compute and compute_if_missing:
-        needs_compute = (not has_d2) or bool(df["d2_distance"].isna().any())
+        if _ood_prop_col_existing is None:
+            needs_compute = True
+        else:
+            needs_compute = bool(df[_ood_prop_col_existing].isna().any())
         if (not needs_compute) and len(ood_views) > 1:
-            present_cols = [f"d2_distance_{v}" for v in ood_views if f"d2_distance_{v}" in df.columns]
+            present_cols = [f"ood_prop_{v}" for v in ood_views if f"ood_prop_{v}" in df.columns]
             if len(present_cols) < len(ood_views):
                 needs_compute = True
 
     if needs_compute:
         d2_source = "recomputed_multiview" if len(ood_views) > 1 else "recomputed"
         smiles_list = df["smiles"].astype(str).tolist()
-        d2_values, d2_per_view, used_views = _compute_d2_distance_column(
+        ood_prop_values, ood_gen_values, d2_per_view, d1_per_view, used_views = _compute_ood_distance_columns(
             config=config,
             results_dir=results_dir,
             smiles_list=smiles_list,
             ood_views=ood_views,
             ood_k=ood_k,
         )
-        df["d2_distance"] = d2_values
+        df["ood_prop"] = ood_prop_values
+        df["d2_distance"] = ood_prop_values  # backward-compat alias
+        if not np.all(np.isnan(ood_gen_values)):
+            df["ood_gen"] = ood_gen_values
         for view_name, values in d2_per_view.items():
-            df[f"d2_distance_{view_name}"] = values
+            df[f"ood_prop_{view_name}"] = values
+            df[f"d2_distance_{view_name}"] = values  # backward-compat
+        for view_name, values in d1_per_view.items():
+            df[f"ood_gen_{view_name}"] = values
         ood_views_used = list(used_views)
     elif not has_d2:
         raise ValueError(
-            "d2_distance column is missing and compute_d2_distance_if_missing is disabled. "
-            "Enable compute or provide d2_distance in candidate_scores.csv."
+            "ood_prop/d2_distance column is missing and compute_d2_distance_if_missing is disabled. "
+            "Enable compute or provide ood_prop/d2_distance in candidate_scores.csv."
         )
     else:
-        ood_views_used = [v for v in ood_views if f"d2_distance_{v}" in df.columns]
+        ood_views_used = [v for v in ood_views if f"ood_prop_{v}" in df.columns or f"d2_distance_{v}" in df.columns]
         if not ood_views_used:
             ood_views_used = [encoder_view]
+        # Ensure ood_prop column exists (may come from d2_distance in old files)
+        if "ood_prop" not in df.columns and "d2_distance" in df.columns:
+            df["ood_prop"] = df["d2_distance"]
+
+    # Ensure d2_distance alias always exists
+    if "ood_prop" in df.columns and "d2_distance" not in df.columns:
+        df["d2_distance"] = df["ood_prop"]
 
     valid_mask = (
         df["prediction"].notna()
-        & pd.to_numeric(df["d2_distance"], errors="coerce").notna()
+        & pd.to_numeric(df["ood_prop"] if "ood_prop" in df.columns else df["d2_distance"], errors="coerce").notna()
     )
 
     valid_df = df.loc[valid_mask].copy()
     dropped = int((~valid_mask).sum())
     if valid_df.empty:
-        raise RuntimeError("No valid candidates remain after filtering for prediction and d2_distance.")
+        raise RuntimeError("No valid candidates remain after filtering for prediction and ood_prop/d2_distance.")
 
     pred = valid_df["prediction"].to_numpy(dtype=np.float32)
-    d2 = valid_df["d2_distance"].to_numpy(dtype=np.float32)
+    _ood_prop_col = "ood_prop" if "ood_prop" in valid_df.columns else "d2_distance"
+    d2 = valid_df[_ood_prop_col].to_numpy(dtype=np.float32)
     pred_unc = pd.to_numeric(valid_df.get("prediction_uncertainty", pd.Series(dtype=float)), errors="coerce").to_numpy(dtype=np.float32)
     if pred_unc.size:
         pred_unc = np.nan_to_num(pred_unc, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1191,7 +1445,11 @@ def main(args):
         "top_k_mean_abs_error": round(float(top_df["target_violation"].mean()) if len(top_df) else 0.0, 6),
         "top_k_mean_target_excess": round(float(top_df["target_excess"].mean()) if len(top_df) else 0.0, 6),
         "top_k_mean_target_violation": round(float(top_df["target_violation"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_d2_distance": round(float(top_df["d2_distance"].mean()) if len(top_df) else 0.0, 6),
+        "top_k_mean_ood_prop": round(float(top_df["ood_prop"].mean()) if len(top_df) and "ood_prop" in top_df.columns else 0.0, 6),
+        "top_k_mean_ood_gen": round(float(top_df["ood_gen"].mean()) if len(top_df) and "ood_gen" in top_df.columns and top_df["ood_gen"].notna().any() else float("nan"), 6),
+        "top_k_mean_d2_distance": round(float(top_df["d2_distance"].mean()) if len(top_df) and "d2_distance" in top_df.columns else 0.0, 6),
+        "mean_ood_prop": round(float(valid_df["ood_prop"].mean()) if "ood_prop" in valid_df.columns and valid_df["ood_prop"].notna().any() else float("nan"), 6),
+        "mean_ood_gen": round(float(valid_df["ood_gen"].mean()) if "ood_gen" in valid_df.columns and valid_df["ood_gen"].notna().any() else float("nan"), 6),
         "top_k_mean_constraint_violation": round(float(top_df["constraint_violation_total"].mean()) if len(top_df) else 0.0, 6),
         "top_k_mean_descriptor_violation": round(float(top_df["descriptor_violation_total"].mean()) if len(top_df) else 0.0, 6),
         "top_k_mean_objective": round(float(top_df["ood_aware_objective"].mean()) if len(top_df) else 0.0, 6),
@@ -1252,34 +1510,36 @@ def main(args):
         ],
         index=False,
     )
+    _run_meta_dict = {
+        "encoder_view": encoder_view,
+        "property": property_name,
+        "target_value": float(target),
+        "target_mode": target_mode,
+        "epsilon": float(epsilon),
+        "top_k": int(k),
+        "normalization": normalization,
+        "prediction_column": target_pred_col,
+        "prediction_uncertainty_column": target_unc_col or "",
+        "prediction_n_models_column": target_n_models_col or "",
+        "objective_property_weight": float(normalized_term_weights.get("property", 0.0)),
+        "objective_ood_weight": float(normalized_term_weights.get("ood", 0.0)),
+        "objective_uncertainty_weight": float(normalized_term_weights.get("uncertainty", 0.0)),
+        "objective_constraint_weight": float(normalized_term_weights.get("constraint", 0.0)),
+        "objective_sa_weight": float(normalized_term_weights.get("sa", 0.0)),
+        "objective_descriptor_weight": float(normalized_term_weights.get("descriptor", 0.0)),
+        "constraint_properties": active_constraint_props,
+        "descriptor_constraints": active_descriptor_constraints,
+        "ood_views_requested": ood_views,
+        "ood_views_used": ood_views_used,
+        "ood_view_aggregation": "mean",
+        "ood_k": int(ood_k),
+        "mean_ood_prop": metrics_row.get("mean_ood_prop"),
+        "mean_ood_gen": metrics_row.get("mean_ood_gen"),
+        "candidate_scores_path": str(candidate_scores_path),
+        "d2_distance_source": d2_source,
+    }
     save_json(
-        {
-            "encoder_view": encoder_view,
-            "property": property_name,
-            "target_value": float(target),
-            "target_mode": target_mode,
-            "epsilon": float(epsilon),
-            "top_k": int(k),
-            "normalization": normalization,
-            "prediction_column": target_pred_col,
-            "prediction_uncertainty_column": target_unc_col or "",
-            "prediction_n_models_column": target_n_models_col or "",
-            "objective_property_weight": float(normalized_term_weights.get("property", 0.0)),
-            "objective_ood_weight": float(normalized_term_weights.get("ood", 0.0)),
-            "objective_uncertainty_weight": float(normalized_term_weights.get("uncertainty", 0.0)),
-            "objective_constraint_weight": float(normalized_term_weights.get("constraint", 0.0)),
-            "objective_sa_weight": float(normalized_term_weights.get("sa", 0.0)),
-            "objective_descriptor_weight": float(normalized_term_weights.get("descriptor", 0.0)),
-            "constraint_properties": active_constraint_props,
-            "descriptor_constraints": active_descriptor_constraints,
-            "ood_views_requested": ood_views,
-            "ood_views_used": ood_views_used,
-            "ood_view_aggregation": "mean",
-            "ood_k": int(ood_k),
-    
-            "candidate_scores_path": str(candidate_scores_path),
-            "d2_distance_source": d2_source,
-        },
+        _run_meta_dict,
         property_step_dirs["files_dir"] / "run_meta.json",
         legacy_paths=[
             step_dirs["files_dir"] / "run_meta.json",
@@ -1287,33 +1547,7 @@ def main(args):
         ],
     )
     save_json(
-        {
-            "encoder_view": encoder_view,
-            "property": property_name,
-            "target_value": float(target),
-            "target_mode": target_mode,
-            "epsilon": float(epsilon),
-            "top_k": int(k),
-            "normalization": normalization,
-            "prediction_column": target_pred_col,
-            "prediction_uncertainty_column": target_unc_col or "",
-            "prediction_n_models_column": target_n_models_col or "",
-            "objective_property_weight": float(normalized_term_weights.get("property", 0.0)),
-            "objective_ood_weight": float(normalized_term_weights.get("ood", 0.0)),
-            "objective_uncertainty_weight": float(normalized_term_weights.get("uncertainty", 0.0)),
-            "objective_constraint_weight": float(normalized_term_weights.get("constraint", 0.0)),
-            "objective_sa_weight": float(normalized_term_weights.get("sa", 0.0)),
-            "objective_descriptor_weight": float(normalized_term_weights.get("descriptor", 0.0)),
-            "constraint_properties": active_constraint_props,
-            "descriptor_constraints": active_descriptor_constraints,
-            "ood_views_requested": ood_views,
-            "ood_views_used": ood_views_used,
-            "ood_view_aggregation": "mean",
-            "ood_k": int(ood_k),
-    
-            "candidate_scores_path": str(candidate_scores_path),
-            "d2_distance_source": d2_source,
-        },
+        _run_meta_dict,
         property_step_dirs["files_dir"] / f"run_meta_{property_name}.json",
         legacy_paths=[
             step_dirs["files_dir"] / f"run_meta_{property_name}.json",
@@ -1321,12 +1555,20 @@ def main(args):
         ],
     )
 
+    _ood_gen_for_metrics = (
+        pd.to_numeric(df["ood_gen"], errors="coerce").to_numpy(dtype=np.float32)
+        if "ood_gen" in df.columns
+        else None
+    )
     _save_augmented_ood_metrics(
         results_dir=results_dir,
         representation=representation,
         model_size=str(model_size),
-        generated_d2_distance=pd.to_numeric(df.get("d2_distance", pd.Series(dtype=float)), errors="coerce").to_numpy(dtype=np.float32),
+        generated_d2_distance=pd.to_numeric(
+            df.get("ood_prop", df.get("d2_distance", pd.Series(dtype=float))), errors="coerce"
+        ).to_numpy(dtype=np.float32),
         ood_k=int(ood_k),
+        ood_gen=_ood_gen_for_metrics,
     )
 
     generate_figures = args.generate_figures

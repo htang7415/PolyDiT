@@ -243,6 +243,77 @@ def _plot_f2_cosine_sim_bars(metrics_df: pd.DataFrame, figures_dir: Path) -> Non
     plt.close(fig)
 
 
+def _plot_f2_recall_bars(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
+    """Grouped bar chart of recall@k per source-view per dataset, one panel per dataset.
+
+    For each dataset, shows how well each view retrieves across all target views (mean recall@k).
+    This makes cross-view retrieval strength immediately comparable.
+    """
+    if plt is None or metrics_df.empty:
+        return
+    df = metrics_df.copy()
+    parsed = df["view_pair"].astype(str).map(_parse_view_pair)
+    df = df.assign(_parsed=parsed)
+    df = df[df["_parsed"].notna()].copy()
+    if df.empty:
+        return
+    df[["src_dataset", "src_view", "tgt_dataset", "tgt_view"]] = pd.DataFrame(df["_parsed"].tolist(), index=df.index)
+    df = df[df["src_dataset"] == df["tgt_dataset"]].copy()
+    if df.empty:
+        return
+
+    recall_cols = sorted(
+        [c for c in df.columns if str(c).startswith("recall_at_")],
+        key=lambda s: int(str(s).split("_")[-1]) if str(s).split("_")[-1].isdigit() else 0,
+    )
+    if not recall_cols:
+        return
+
+    k_labels = [str(c).replace("recall_at_", "Recall@") for c in recall_cols]
+    datasets = sorted(df["src_dataset"].astype(str).unique().tolist())
+    if not datasets:
+        return
+
+    palette = ["#4E79A7", "#F28E2B", "#59A14F", "#E15759", "#B07AA1", "#76B7B2"]
+    n_datasets = len(datasets)
+    n_k = len(recall_cols)
+
+    fig, axes = plt.subplots(1, n_datasets, figsize=(max(8, 5 * n_datasets), 5.5), squeeze=False)
+    for col_idx, dataset in enumerate(datasets):
+        ax = axes[0, col_idx]
+        sub = df[df["src_dataset"] == dataset]
+        src_views = _ordered_views(sub["src_view"].astype(str).unique().tolist())
+        if not src_views:
+            ax.set_axis_off()
+            continue
+        x = np.arange(len(src_views), dtype=np.float32)
+        width = 0.7 / max(n_k, 1)
+        offsets = np.linspace(-0.35 + width / 2, 0.35 - width / 2, n_k)
+        for k_idx, (recall_col, k_label) in enumerate(zip(recall_cols, k_labels)):
+            means = []
+            for sv in src_views:
+                vals = pd.to_numeric(sub[sub["src_view"] == sv][recall_col], errors="coerce").dropna()
+                means.append(float(vals.mean()) if len(vals) else 0.0)
+            color = palette[k_idx % len(palette)]
+            bars = ax.bar(x + offsets[k_idx], means, width=width, color=color, alpha=0.88, label=k_label)
+            for bar, val in zip(bars, means):
+                if val > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2.0, float(val) + 0.008,
+                            f"{val:.2f}", ha="center", va="bottom", fontsize=9, rotation=90)
+        ax.set_xticks(x)
+        ax.set_xticklabels(src_views, rotation=35, ha="right")
+        ax.set_ylim(0.0, 1.05)
+        ax.set_ylabel("Mean recall (avg over target views)")
+        ax.set_title(f"Dataset: {dataset}")
+        ax.grid(axis="y", alpha=0.25)
+        ax.legend(loc="upper right")
+
+    fig.suptitle("F2: Retrieval Recall@k per Source View", fontsize=16, fontweight="bold")
+    fig.tight_layout()
+    _save_figure_png(fig, figures_dir / "figure_f2_recall_bars")
+    plt.close(fig)
+
+
 def _load_view_embeddings(results_dir: Path, view: str, dataset: str):
     emb_path = results_dir / f"embeddings_{view}_{dataset}.npy"
     if not emb_path.exists() and view == "smiles":
@@ -332,6 +403,7 @@ def main(args):
     if generate_figures:
         _plot_f2_retrieval_heatmaps(metrics_df, step_dirs["figures_dir"])
         _plot_f2_cosine_sim_bars(metrics_df, step_dirs["figures_dir"])
+        _plot_f2_recall_bars(metrics_df, step_dirs["figures_dir"])
 
     print(f"Saved metrics_alignment.csv to {results_dir}")
 

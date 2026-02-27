@@ -225,8 +225,8 @@ def _plot_f5_diagnostics(
     df = scored_df.copy()
     mode = str(target_mode).strip().lower()
     accepted_mask = pd.to_numeric(df.get("accepted", pd.Series([0] * len(df), index=df.index)), errors="coerce").fillna(0).to_numpy(dtype=np.float32) > 0
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-    ax0, ax1, ax2, ax3 = axes.reshape(-1)
+    fig, axes = plt.subplots(2, 3, figsize=(21, 11))
+    ax0, ax1, ax2, ax3, ax4, ax5 = axes.reshape(-1)
 
     # A) score distribution.
     if mode in {"ge", "le"}:
@@ -259,8 +259,10 @@ def _plot_f5_diagnostics(
     ax0.legend(loc="best", fontsize=15)
 
     # B) prediction vs OOD distance.
-    if {"prediction", "d2_distance"}.issubset(set(df.columns)):
-        scatter_df = df.dropna(subset=["prediction", "d2_distance"]).copy()
+    ood_col = "ood_prop" if "ood_prop" in df.columns else "d2_distance"
+    ood_axis_label = "OOD prop (cosine dist to D2)" if ood_col == "ood_prop" else "D2 distance"
+    if {"prediction", ood_col}.issubset(set(df.columns)):
+        scatter_df = df.dropna(subset=["prediction", ood_col]).copy()
         if not scatter_df.empty:
             if mode in {"ge", "le"}:
                 if "target_excess" in scatter_df.columns:
@@ -279,7 +281,7 @@ def _plot_f5_diagnostics(
                 y_vals = y_vals.loc[mask]
                 if not scatter_df.empty:
                     sc = ax1.scatter(
-                        scatter_df["d2_distance"],
+                        scatter_df[ood_col],
                         y_vals,
                         c=y_vals,
                         cmap="RdYlGn",
@@ -287,7 +289,7 @@ def _plot_f5_diagnostics(
                         alpha=0.82,
                     )
                     ax1.axhline(0.0, color="#222222", linestyle="--", linewidth=1.0)
-                    ax1.set_xlabel("D2 distance")
+                    ax1.set_xlabel(ood_axis_label)
                     ax1.set_ylabel("Target excess (≥0 = hit)")
                     ax1.grid(alpha=0.25)
                     fig.colorbar(sc, ax=ax1, fraction=0.046, pad=0.04, label="Target excess")
@@ -299,11 +301,11 @@ def _plot_f5_diagnostics(
                 base = scatter_df[~hit_vals]
                 hit = scatter_df[hit_vals]
                 if not base.empty:
-                    ax1.scatter(base["d2_distance"], base["prediction"], s=16, alpha=0.35, color="#9ECAE1", label="Non-hit")
+                    ax1.scatter(base[ood_col], base["prediction"], s=16, alpha=0.35, color="#9ECAE1", label="Non-hit")
                 if not hit.empty:
-                    ax1.scatter(hit["d2_distance"], hit["prediction"], s=24, alpha=0.9, color="#D94801", label="Hit")
+                    ax1.scatter(hit[ood_col], hit["prediction"], s=24, alpha=0.9, color="#D94801", label="Hit")
                 ax1.axhline(float(target_value), color="#222222", linestyle="--", linewidth=1.0)
-                ax1.set_xlabel("D2 distance")
+                ax1.set_xlabel(ood_axis_label)
                 ax1.set_ylabel(f"Predicted {property_name}")
                 ax1.grid(alpha=0.25)
                 ax1.legend(loc="best", fontsize=15)
@@ -311,7 +313,7 @@ def _plot_f5_diagnostics(
             ax1.text(0.5, 0.5, "No finite points", ha="center", va="center")
             ax1.set_axis_off()
     else:
-        ax1.text(0.5, 0.5, "No d2_distance column", ha="center", va="center")
+        ax1.text(0.5, 0.5, f"No {ood_col} column", ha="center", va="center")
         ax1.set_axis_off()
 
     # C) Sampling funnel: generated → structural valid → scored → accepted (property hit).
@@ -386,6 +388,60 @@ def _plot_f5_diagnostics(
         ax3.text(0.5, 0.5, "No scored rows", ha="center", va="center")
         ax3.set_axis_off()
 
+    # E) OOD-gen vs OOD-prop scatter: reveals generative vs property-relevance trade-off.
+    if "ood_prop" in df.columns and "ood_gen" in df.columns:
+        ood_prop_vals = pd.to_numeric(df["ood_prop"], errors="coerce")
+        ood_gen_vals = pd.to_numeric(df["ood_gen"], errors="coerce")
+        mask_e = ood_prop_vals.notna() & ood_gen_vals.notna()
+        if mask_e.any():
+            hit_col_e = df.get("property_hit", pd.Series([False] * len(df))).astype(bool)
+            non_hit = df[mask_e & ~hit_col_e]
+            hit = df[mask_e & hit_col_e]
+            if not non_hit.empty:
+                ax4.scatter(non_hit["ood_prop"], non_hit["ood_gen"],
+                            s=12, alpha=0.3, color="#9ECAE1", label="Non-hit")
+            if not hit.empty:
+                ax4.scatter(hit["ood_prop"], hit["ood_gen"],
+                            s=28, alpha=0.85, color="#D94801", label="Property hit", zorder=5)
+            ax4.set_xlabel("OOD-prop (cosine dist to D2, property relevance)")
+            ax4.set_ylabel("OOD-gen (cosine dist to D1, generative reliability)")
+            ax4.set_title("(E) OOD-prop vs OOD-gen signal")
+            ax4.grid(alpha=0.25)
+            ax4.legend()
+            # Annotate best-region quadrant
+            xlim = ax4.get_xlim()
+            ylim = ax4.get_ylim()
+            ax4.text(xlim[0] + 0.02 * (xlim[1] - xlim[0]), ylim[1] - 0.02 * (ylim[1] - ylim[0]),
+                     "Low OOD-prop\nLow OOD-gen\n(best region)", fontsize=9, va="top",
+                     color="#2A9D8F", style="italic")
+        else:
+            ax4.text(0.5, 0.5, "No finite ood_prop/ood_gen data", ha="center", va="center")
+            ax4.set_axis_off()
+    else:
+        ax4.text(0.5, 0.5, "ood_prop/ood_gen columns\nnot available", ha="center", va="center")
+        ax4.set_axis_off()
+
+    # F) Prediction uncertainty distribution (ensemble std).
+    if "prediction_std" in df.columns:
+        std_vals = pd.to_numeric(df["prediction_std"], errors="coerce").dropna()
+        std_acc = pd.to_numeric(df.loc[accepted_mask, "prediction_std"], errors="coerce").dropna() if accepted_mask.any() else pd.Series(dtype=float)
+        if std_vals.size:
+            ax5.hist(std_vals.to_numpy(dtype=np.float32), bins=40, color="#B07AA1",
+                     alpha=0.65, label=f"All scored (n={std_vals.size:,})")
+        if std_acc.size:
+            ax5.hist(std_acc.to_numpy(dtype=np.float32), bins=25, color="#F28E2B",
+                     alpha=0.8, label=f"Accepted (n={std_acc.size:,})")
+        ax5.set_xlabel(f"Prediction std (ensemble uncertainty for {property_name})")
+        ax5.set_ylabel("Count")
+        ax5.set_title("(F) Predictive uncertainty distribution")
+        ax5.grid(alpha=0.25)
+        ax5.legend()
+    else:
+        ax5.text(0.5, 0.5, "prediction_std not available\n(requires property_model_mode='all')",
+                 ha="center", va="center", style="italic")
+        ax5.set_axis_off()
+
+    fig.suptitle(f"F5 Inverse Design Diagnostics: {property_name}", fontsize=16, fontweight="bold")
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / f"figure_f5_inverse_diagnostics_{property_name}")
     plt.close(fig)
@@ -484,6 +540,8 @@ def _build_f5_accepted_polymer_report(
     report["prediction"] = pd.to_numeric(report.get("prediction"), errors="coerce")
     report["target_excess"] = pd.to_numeric(report.get("target_excess"), errors="coerce")
     report["target_violation"] = pd.to_numeric(report.get("target_violation"), errors="coerce")
+    report["ood_prop"] = pd.to_numeric(report.get("ood_prop"), errors="coerce")
+    report["ood_gen"] = pd.to_numeric(report.get("ood_gen"), errors="coerce")
     report["d2_distance"] = pd.to_numeric(report.get("d2_distance"), errors="coerce")
     report["sa_score"] = pd.to_numeric(report.get("sa_score"), errors="coerce")
     report["prediction_std"] = pd.to_numeric(report.get("prediction_std"), errors="coerce")
@@ -501,7 +559,9 @@ def _build_f5_accepted_polymer_report(
         rank_score = -violation.fillna(np.nan)
 
     report["_rank_primary"] = primary
-    report["_rank_secondary"] = report["d2_distance"].fillna(np.inf)
+    # Prefer ood_prop for secondary ranking (cosine dist to D2); fall back to d2_distance
+    _ood_col_rank = "ood_prop" if "ood_prop" in report.columns else "d2_distance"
+    report["_rank_secondary"] = report[_ood_col_rank].fillna(np.inf)
     report["_rank_tertiary"] = report["prediction_std"].fillna(np.inf)
     report["_rank_score"] = rank_score
     report = report.sort_values(
@@ -538,6 +598,8 @@ def _build_f5_accepted_polymer_report(
     mean_excess = float(report["target_excess"].mean()) if report["target_excess"].notna().any() else np.nan
     mean_violation = float(report["target_violation"].mean()) if report["target_violation"].notna().any() else np.nan
     mean_d2 = float(report["d2_distance"].mean()) if report["d2_distance"].notna().any() else np.nan
+    mean_ood_prop = float(report["ood_prop"].mean()) if "ood_prop" in report.columns and report["ood_prop"].notna().any() else np.nan
+    mean_ood_gen = float(report["ood_gen"].mean()) if "ood_gen" in report.columns and report["ood_gen"].notna().any() else np.nan
     mean_sa = float(report["sa_score"].mean()) if report["sa_score"].notna().any() else np.nan
     unique_ratio = float(report["canonical_smiles"].nunique() / max(len(report), 1))
     novelty_ratio = float(pd.to_numeric(report.get("is_novel"), errors="coerce").fillna(0).mean()) if "is_novel" in report.columns else np.nan
@@ -554,6 +616,8 @@ def _build_f5_accepted_polymer_report(
         "mean_target_excess": round(mean_excess, 6) if np.isfinite(mean_excess) else np.nan,
         "mean_target_violation": round(mean_violation, 6) if np.isfinite(mean_violation) else np.nan,
         "mean_d2_distance": round(mean_d2, 6) if np.isfinite(mean_d2) else np.nan,
+        "mean_ood_prop": round(mean_ood_prop, 6) if np.isfinite(mean_ood_prop) else np.nan,
+        "mean_ood_gen": round(mean_ood_gen, 6) if np.isfinite(mean_ood_gen) else np.nan,
         "mean_sa_score": round(mean_sa, 6) if np.isfinite(mean_sa) else np.nan,
         "unique_ratio_canonical": round(unique_ratio, 4),
         "novelty_ratio": round(novelty_ratio, 4) if np.isfinite(novelty_ratio) else np.nan,
@@ -569,6 +633,8 @@ def _build_f5_accepted_polymer_report(
         "prediction_std",
         "target_excess",
         "target_violation",
+        "ood_prop",
+        "ood_gen",
         "d2_distance",
         "sa_score",
         "star_count",
@@ -625,11 +691,13 @@ def _plot_f5_accepted_polymer_overview(
     ax0.grid(axis="x", alpha=0.25)
 
     # B) Prediction vs OOD distance scatter.
-    scatter_df = report_df.dropna(subset=["prediction", "d2_distance"]).copy()
+    ood_col = "ood_prop" if "ood_prop" in report_df.columns else "d2_distance"
+    ood_xlabel = "OOD prop (cosine dist to D2, lower is better)" if ood_col == "ood_prop" else "D2 distance (lower is better)"
+    scatter_df = report_df.dropna(subset=["prediction", ood_col]).copy()
     if not scatter_df.empty:
         color_vals = pd.to_numeric(scatter_df.get("target_excess"), errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
         sc = ax1.scatter(
-            scatter_df["d2_distance"].to_numpy(dtype=np.float32),
+            scatter_df[ood_col].to_numpy(dtype=np.float32),
             scatter_df["prediction"].to_numpy(dtype=np.float32),
             c=color_vals,
             cmap="RdYlGn",
@@ -641,18 +709,20 @@ def _plot_f5_accepted_polymer_overview(
         ax1.axhline(float(target_value), color="#111111", linestyle="--", linewidth=1.0, label="Target")
         if mode == "window":
             ax1.axhspan(float(target_value) - float(epsilon), float(target_value) + float(epsilon), color="#2A9D8F", alpha=0.12)
-        ax1.set_xlabel("D2 distance (lower is better)")
+        ax1.set_xlabel(ood_xlabel)
         ax1.set_ylabel(f"Predicted {property_name}")
         ax1.set_title("Accepted candidates: property vs OOD", fontsize=14, fontweight="bold")
         ax1.grid(alpha=0.25)
         ax1.legend(loc="best", fontsize=11)
         fig.colorbar(sc, ax=ax1, fraction=0.046, pad=0.04, label="Target excess")
     else:
-        ax1.text(0.5, 0.5, "No finite prediction/d2 points", ha="center", va="center")
+        ax1.text(0.5, 0.5, f"No finite prediction/{ood_col} points", ha="center", va="center")
         ax1.set_axis_off()
 
     # C) Descriptor profile boxplots.
     descriptor_cols = [
+        ("ood_prop", "OOD prop"),
+        ("ood_gen", "OOD gen"),
         ("d2_distance", "D2"),
         ("sa_score", "SA"),
         ("aromatic_ring_count", "Aro rings"),
@@ -690,7 +760,9 @@ def _plot_f5_accepted_polymer_overview(
         cols.append(("prediction", "Pred"))
     if "target_excess" in table_df.columns:
         cols.append(("target_excess", "Excess"))
-    if "d2_distance" in table_df.columns:
+    if "ood_prop" in table_df.columns:
+        cols.append(("ood_prop", "OODprop"))
+    elif "d2_distance" in table_df.columns:
         cols.append(("d2_distance", "D2"))
     if "sa_score" in table_df.columns:
         cols.append(("sa_score", "SA"))
@@ -749,9 +821,9 @@ def _plot_f5_accepted_polymer_gallery(
             continue
         rank_val = row.get("rank", "")
         pred_val = pd.to_numeric(pd.Series([row.get("prediction")]), errors="coerce").iloc[0]
-        d2_val = pd.to_numeric(pd.Series([row.get("d2_distance")]), errors="coerce").iloc[0]
+        ood_val = pd.to_numeric(pd.Series([row.get("ood_prop", row.get("d2_distance"))]), errors="coerce").iloc[0]
         rank_text = str(int(rank_val)) if pd.notna(rank_val) else "?"
-        legend = f"#{rank_text} | pred={pred_val:.2f} | d2={d2_val:.2f}" if np.isfinite(pred_val) and np.isfinite(d2_val) else f"#{rank_text}"
+        legend = f"#{rank_text} | pred={pred_val:.2f} | ood={ood_val:.3f}" if np.isfinite(pred_val) and np.isfinite(ood_val) else f"#{rank_text}"
         mols.append(mol)
         legends.append(legend)
 
@@ -1320,13 +1392,44 @@ def _load_d2_embeddings(results_dir: Path, view: str) -> np.ndarray:
     direct_path = results_dir / f"embeddings_{view}_d2.npy"
     if direct_path.exists():
         return np.load(direct_path)
+    step1_path = results_dir / "step1_alignment_embeddings" / "files" / f"embeddings_{view}_d2.npy"
+    if step1_path.exists():
+        return np.load(step1_path)
     if view == "smiles":
         legacy_path = results_dir / "embeddings_d2.npy"
         if legacy_path.exists():
             return np.load(legacy_path)
     raise FileNotFoundError(
         f"D2 embeddings not found for view={view}. Expected {direct_path} "
-        f"(or legacy embeddings_d2.npy for smiles). Run F1 with this view enabled first."
+        f"(or step1 path {step1_path}, or legacy embeddings_d2.npy for smiles). "
+        "Run F1 with this view enabled first."
+    )
+
+
+def _load_d1_embeddings(results_dir: Path, view: str) -> np.ndarray:
+    """Load D1 (backbone training set) embeddings for the given view.
+
+    Searches in order:
+      1. results_dir/embeddings_{view}_d1.npy
+      2. results_dir/step1_alignment_embeddings/files/embeddings_{view}_d1.npy
+      3. Legacy results_dir/embeddings_d1.npy (smiles view only)
+
+    Raises FileNotFoundError if none exist.
+    """
+    direct_path = results_dir / f"embeddings_{view}_d1.npy"
+    if direct_path.exists():
+        return np.load(direct_path)
+    step1_path = results_dir / "step1_alignment_embeddings" / "files" / f"embeddings_{view}_d1.npy"
+    if step1_path.exists():
+        return np.load(step1_path)
+    if view == "smiles":
+        legacy_path = results_dir / "embeddings_d1.npy"
+        if legacy_path.exists():
+            return np.load(legacy_path)
+    raise FileNotFoundError(
+        f"D1 embeddings not found for view={view}. Expected {direct_path} "
+        f"(or step1 path {step1_path}, or legacy embeddings_d1.npy for smiles). "
+        "Run F1 with this view enabled first."
     )
 
 
@@ -2623,22 +2726,32 @@ def main(args):
     uniqueness = len(set(structurally_valid_smiles)) / n_valid if n_valid else 0.0
     novelty = sum(1 for s in structurally_valid_smiles if s not in training_set) / n_valid if n_valid else 0.0
 
-    d2_distance_scores = None
+    ood_prop_scores = None
+    ood_gen_scores = None
     rerank_metrics = {
         "rerank_applied": False,
     }
 
-    if args.rerank_strategy == "d2_distance" and scored_embeddings is not None and len(scored_smiles):
+    if args.rerank_strategy in {"ood_prop", "d2_distance"} and scored_embeddings is not None and len(scored_smiles):
         d2_embeddings = _load_d2_embeddings(results_dir, encoder_view)
         distances = knn_distances(scored_embeddings, d2_embeddings, k=args.ood_k)
-        d2_distance_scores = distances.mean(axis=1)
-        order = np.argsort(d2_distance_scores)
+        ood_prop_scores = distances.mean(axis=1)
+
+        # Also compute ood_gen (distance to D1 = backbone training set); graceful fallback
+        try:
+            d1_embeddings = _load_d1_embeddings(results_dir, encoder_view)
+            d1_distances = knn_distances(scored_embeddings, d1_embeddings, k=args.ood_k)
+            ood_gen_scores = d1_distances.mean(axis=1)
+        except FileNotFoundError:
+            ood_gen_scores = None
+
+        order = np.argsort(ood_prop_scores)
         top_k = min(int(args.rerank_top_k), len(order))
         if top_k > 0:
             top_hits = hits[order[:top_k]]
             rerank_metrics = {
                 "rerank_applied": True,
-                "rerank_strategy": "d2_distance",
+                "rerank_strategy": args.rerank_strategy,
                 "rerank_top_k": top_k,
                 "rerank_hits": int(top_hits.sum()),
                 "rerank_success_rate": round(float(top_hits.sum()) / top_k, 4),
@@ -2704,9 +2817,13 @@ def main(args):
     files_dir = property_step_dirs["files_dir"]
     legacy_files_dir = step_dirs["files_dir"]
 
-    if d2_distance_scores is not None and len(scored_df) == len(d2_distance_scores):
+    if ood_prop_scores is not None and len(scored_df) == len(ood_prop_scores):
         scored_df = scored_df.copy()
-        scored_df["d2_distance"] = d2_distance_scores
+        scored_df["ood_prop"] = ood_prop_scores
+        if ood_gen_scores is not None and len(scored_df) == len(ood_gen_scores):
+            scored_df["ood_gen"] = ood_gen_scores
+        # Backward-compat alias
+        scored_df["d2_distance"] = ood_prop_scores
     if "property" not in scored_df.columns:
         scored_df = scored_df.copy()
     scored_df["property"] = args.property
@@ -2905,7 +3022,7 @@ if __name__ == "__main__":
     parser.add_argument("--property_model_mode", type=str, default=None, choices=["single", "all"])
     parser.add_argument("--committee_properties", type=str, default=None, help="Comma list for committee property exports; defaults to property.files.")
     parser.add_argument("--property_model_path", type=str, default=None)
-    parser.add_argument("--rerank_strategy", type=str, default="d2_distance")
+    parser.add_argument("--rerank_strategy", type=str, default="ood_prop", choices=["ood_prop", "d2_distance", "none"])
     parser.add_argument("--rerank_top_k", type=int, default=100)
     parser.add_argument("--ood_k", type=int, default=5)
     parser.add_argument("--generate_figures", dest="generate_figures", action="store_true")

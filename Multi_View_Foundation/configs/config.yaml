@@ -65,6 +65,7 @@ ood:
   nn_k: 50
   use_faiss: true
   generate_figures: true
+  distance_metric: "cosine"
 
 # F3 property-head args
 property:
@@ -122,10 +123,11 @@ foundation_inverse:
   per_view_quota_relax_after_batches: 12
   property_model_mode: "single"     # single: use one MLP (encoder_view's); all: ensemble all view MLPs (committee)
   property_model_path: ""           # explicit MLP path; auto-resolved from step3 results if empty (single mode only)
-  rerank_strategy: "d2_distance"
+  rerank_strategy: "ood_prop"
   rerank_top_k: 100
   generate_figures: true
   ood_k: 5
+  # ood_prop = cosine dist to D2 (property MLP training set); ood_gen = cosine dist to D1 (backbone training set)
   encoder_view: "smiles"           # backbone used to embed candidates for property scoring and D2 OOD distance
 
 # F6 OOD-aware inverse args
@@ -160,6 +162,7 @@ ood_aware_inverse:
   constraint_weights: {}        # optional per-property multipliers, e.g. {Tm: 2.0}
   normalization: "minmax"       # minmax|rank|none
   ood_k: 5
+  ood_gen_weight: 0.0  # informational only by default; set >0 to penalize generative OOD
   compute_d2_distance_if_missing: true
   generate_figures: true
 
