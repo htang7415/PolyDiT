@@ -8,6 +8,7 @@ import math
 import time
 from pathlib import Path
 from functools import partial
+from datetime import timedelta
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -48,7 +49,16 @@ def init_distributed():
         return False, 0, 1, 0, None
     if not dist.is_initialized():
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend, init_method="env://")
+        timeout_raw = os.environ.get("DDP_TIMEOUT_SECONDS", "1800")
+        try:
+            timeout_seconds = max(60, int(timeout_raw))
+        except ValueError:
+            timeout_seconds = 1800
+        dist.init_process_group(
+            backend=backend,
+            init_method="env://",
+            timeout=timedelta(seconds=timeout_seconds),
+        )
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if torch.cuda.is_available():
@@ -72,6 +82,8 @@ def main(args):
     device = dist_device if distributed else ('cuda' if torch.cuda.is_available() else 'cpu')
     if is_main_process:
         print(f"Using device: {device}")
+        if distributed:
+            print(f"DDP timeout seconds: {os.environ.get('DDP_TIMEOUT_SECONDS', '1800')}")
         if cuda_alloc_conf:
             print(f"CUDA allocator config: PYTORCH_CUDA_ALLOC_CONF={cuda_alloc_conf}")
 
@@ -288,6 +300,26 @@ def main(args):
     )
     pin_memory = opt_config.get('pin_memory', True)
     prefetch_factor = opt_config.get('prefetch_factor', 2)
+    workers_override_raw = os.environ.get("STEP1_NUM_WORKERS_OVERRIDE")
+    if workers_override_raw is not None and workers_override_raw != "":
+        num_workers = int(workers_override_raw)
+        if is_main_process:
+            print(f"Applied STEP1_NUM_WORKERS_OVERRIDE={num_workers}")
+    prefetch_override_raw = os.environ.get("STEP1_PREFETCH_FACTOR_OVERRIDE")
+    if prefetch_override_raw is not None and prefetch_override_raw != "":
+        prefetch_factor = int(prefetch_override_raw)
+        if is_main_process:
+            print(f"Applied STEP1_PREFETCH_FACTOR_OVERRIDE={prefetch_factor}")
+    persistent_override_raw = os.environ.get("STEP1_PERSISTENT_WORKERS_OVERRIDE")
+    if persistent_override_raw is not None and persistent_override_raw != "":
+        step1_persistent_workers = persistent_override_raw.strip().lower() in {"1", "true", "yes", "y"}
+        if is_main_process:
+            print(
+                "Applied STEP1_PERSISTENT_WORKERS_OVERRIDE="
+                f"{persistent_override_raw} -> {step1_persistent_workers}"
+            )
+    if prefetch_factor <= 0:
+        raise ValueError("DataLoader prefetch_factor must be > 0.")
     dynamic_padding = bool(opt_config.get('dynamic_padding', False))
     length_bucket_sampler = bool(opt_config.get('length_bucket_sampler', False))
     bucket_size_multiplier = int(opt_config.get('bucket_size_multiplier', 50))

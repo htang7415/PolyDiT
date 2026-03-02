@@ -264,12 +264,13 @@ def maybe_apply_cuda_oom_env(config: Dict[str, Any]) -> Optional[str]:
     """Set a fragmentation-friendly CUDA allocator config unless already defined."""
     optimization = config.get("optimization", {})
     guard_cfg = optimization.get("gpu_oom_guard", {})
+    default_alloc_conf = "max_split_size_mb:128,garbage_collection_threshold:0.8"
     if isinstance(guard_cfg, dict) and not bool(guard_cfg.get("enabled", True)):
         return None
     alloc_conf = (
-        guard_cfg.get("cuda_alloc_conf", "expandable_segments:True,max_split_size_mb:128")
+        guard_cfg.get("cuda_alloc_conf", default_alloc_conf)
         if isinstance(guard_cfg, dict)
-        else "expandable_segments:True,max_split_size_mb:128"
+        else default_alloc_conf
     )
     if not alloc_conf:
         return None
@@ -585,8 +586,10 @@ def recommend_step1_optimization(
         if isinstance(preset_optimizer, dict) and preset_optimizer:
             rec_opt["optimizer"] = copy.deepcopy(preset_optimizer)
 
+    # Do not auto-force compile under DDP: some model/control-flow patterns can
+    # trigger TorchDynamo/Inductor backend failures at runtime.
     if world > 1 and gpu.get("is_hopper", False):
-        rec_opt["compile_in_ddp"] = True
+        rec_opt["compile_in_ddp"] = bool(optimization.get("compile_in_ddp", False))
 
     if gpu.get("is_hopper", False) and gpu.get("supports_fp8", False):
         rec_opt["fp8_phase2_eval"] = {

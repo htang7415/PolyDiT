@@ -199,14 +199,12 @@ class DiscreteMaskingDiffusion(nn.Module):
         if attention_mask is not None:
             valid_mask = valid_mask * attention_mask.float()
 
-        # Compute mean loss over valid positions
+        # Compute mean loss over valid positions (compile-safe: no Tensor.item()).
         valid_count = valid_mask.sum()
-        if valid_count.item() == 0:
-            # Keep graph connected for backward() while returning a true zero loss.
-            return logits.sum() * 0.0
-        loss = (loss_all * valid_mask).sum() / valid_count
-
-        return loss
+        loss_sum = (loss_all * valid_mask).sum()
+        safe_loss = loss_sum / valid_count.clamp_min(1.0)
+        zero_loss = logits.sum() * 0.0  # Keep graph connected for backward().
+        return torch.where(valid_count > 0, safe_loss, zero_loss)
 
     def sample_step(
         self,
