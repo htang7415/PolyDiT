@@ -8,6 +8,7 @@ import math
 import time
 from functools import partial
 from pathlib import Path
+from datetime import timedelta
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -49,7 +50,16 @@ def init_distributed():
         return False, 0, 1, 0, None
     if not dist.is_initialized():
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend, init_method="env://")
+        timeout_raw = os.environ.get("DDP_TIMEOUT_SECONDS", "1800")
+        try:
+            timeout_seconds = max(60, int(timeout_raw))
+        except ValueError:
+            timeout_seconds = 1800
+        dist.init_process_group(
+            backend=backend,
+            init_method="env://",
+            timeout=timedelta(seconds=timeout_seconds),
+        )
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if torch.cuda.is_available():
@@ -73,6 +83,8 @@ def main(args):
     device = dist_device if distributed else ('cuda' if torch.cuda.is_available() else 'cpu')
     if is_main_process:
         print(f"Using device: {device}")
+        if distributed:
+            print(f"DDP timeout seconds: {os.environ.get('DDP_TIMEOUT_SECONDS', '1800')}")
         if cuda_alloc_conf:
             print(f"CUDA allocator config: PYTORCH_CUDA_ALLOC_CONF={cuda_alloc_conf}")
 
@@ -292,6 +304,48 @@ def main(args):
     step1_persistent_workers = bool(
         opt_config.get('step1_persistent_workers', opt_config.get('persistent_workers', False))
     )
+    workers_override = os.environ.get("STEP1_NUM_WORKERS_OVERRIDE")
+    workers_override_applied = False
+    if workers_override not in (None, ""):
+        try:
+            num_workers = max(0, int(workers_override))
+            workers_override_applied = True
+            if is_main_process:
+                print(f"Applying STEP1_NUM_WORKERS_OVERRIDE={num_workers}")
+        except ValueError:
+            if is_main_process:
+                print(
+                    f"WARNING: Ignoring invalid STEP1_NUM_WORKERS_OVERRIDE={workers_override!r}"
+                )
+    prefetch_override = os.environ.get("STEP1_PREFETCH_FACTOR_OVERRIDE")
+    if prefetch_override not in (None, ""):
+        try:
+            prefetch_factor = max(1, int(prefetch_override))
+            if is_main_process:
+                print(f"Applying STEP1_PREFETCH_FACTOR_OVERRIDE={prefetch_factor}")
+        except ValueError:
+            if is_main_process:
+                print(
+                    f"WARNING: Ignoring invalid STEP1_PREFETCH_FACTOR_OVERRIDE={prefetch_override!r}"
+                )
+    persistent_override = os.environ.get("STEP1_PERSISTENT_WORKERS_OVERRIDE")
+    if persistent_override not in (None, ""):
+        token = persistent_override.strip().lower()
+        if token in {"1", "true", "yes", "on"}:
+            step1_persistent_workers = True
+        elif token in {"0", "false", "no", "off"}:
+            step1_persistent_workers = False
+        else:
+            if is_main_process:
+                print(
+                    "WARNING: Ignoring invalid STEP1_PERSISTENT_WORKERS_OVERRIDE="
+                    f"{persistent_override!r}"
+                )
+        if is_main_process and token in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            print(
+                "Applying STEP1_PERSISTENT_WORKERS_OVERRIDE="
+                f"{int(step1_persistent_workers)}"
+            )
 
     # Bound DataLoader workers to per-rank CPU budget to avoid oversubscription.
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1") or 1)
@@ -303,12 +357,17 @@ def main(args):
         per_rank_cpu_budget = max(1, host_cpus // max(1, local_world_size))
     per_rank_worker_cap = max(1, per_rank_cpu_budget - 2)
     if num_workers <= 0:
-        num_workers = per_rank_worker_cap
-        if is_main_process:
-            print(
-                "Auto-selected DataLoader workers per rank: "
-                f"{num_workers} (cpu_budget={per_rank_cpu_budget}, local_world_size={local_world_size})"
-            )
+        if workers_override_applied:
+            num_workers = 0
+            if is_main_process:
+                print("Using num_workers=0 from STEP1_NUM_WORKERS_OVERRIDE.")
+        else:
+            num_workers = per_rank_worker_cap
+            if is_main_process:
+                print(
+                    "Auto-selected DataLoader workers per rank: "
+                    f"{num_workers} (cpu_budget={per_rank_cpu_budget}, local_world_size={local_world_size})"
+                )
     elif num_workers > per_rank_worker_cap:
         if is_main_process:
             print(
