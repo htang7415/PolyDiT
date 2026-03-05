@@ -189,6 +189,15 @@ paper_results:
   output_dir: "paper_package"    # relative path resolves under results_dir
   include_large_csv: true        # include candidate_scores / full OOD score tables
   include_figures: true
+  max_panels_per_figure: 4       # subfigures per composite figure: (a), (b), ...
+  figure_fontsize: 16            # force all generated F8 text labels to font size 16
+  figure_dpi: 600                # save all generated F8 figures at 600 dpi (png)
+  method_dirs:                   # baseline method folders used for Step0-Step2 asset collection
+    - "Bi_Diffusion_SMILES"
+    - "Bi_Diffusion_SMILES_BPE"
+    - "Bi_Diffusion_SELFIES"
+    - "Bi_Diffusion_Group_SELFIES"
+    - "Bi_Diffusion_graph"
 
 # F1 backbone encoder args (used by F1/F5/F6)
 smiles_encoder:
