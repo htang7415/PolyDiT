@@ -67,9 +67,9 @@ METHOD_PLOT_COLORS = {
 MANUSCRIPT_CAPTIONS = [
     "Figure 1. Generation quality of five bidirectional diffusion models across molecular representation types. (a) Valid polymer fraction for each representation at the best-performing model size. (b) Unique fraction among valid generated polymers, reflecting generation diversity. (c) Validity-uniqueness trade-off colored by novelty.",
     "Figure 2. Cross-view molecular alignment in the multi-view foundation model. (a) Recall@1 heatmap: fraction of queries for which the correct paired molecule ranks first under cosine similarity. (b) Recall@10 heatmap: fraction of correct pairs recovered within the top-10 retrieved candidates.",
-    "Figure 3. Property prediction with multi-view foundation embeddings. (a) Test-set R^2 for Tg, Tm, Td, and Eg across embedding types including multi-view mean fusion. (b) Gain in R^2 from multi-view mean fusion over the best single-view embedding.",
-    "Figure 4. Out-of-distribution (OOD) shift analysis using foundation embeddings. (a) Mean distance between training-set (D1) and target-domain (D2) polymer embeddings across molecular views. (b) Fraction of diffusion-generated polymers falling within the D2 embedding neighborhood.",
-    "Figure 5. Multi-view foundation model-guided inverse polymer design. (a) Inverse design success rate per property (Tg, Tm, Td, Eg) for each representation. (b) Absolute improvement in success rate from OOD-aware foundation reranking relative to baseline generation.",
+    "Figure 3. Property prediction with multi-view foundation embeddings across model scales. (a) Test-set R^2 versus model size for Tg, Tm, Td, and Eg, comparing the best baseline representation and the best MVF/fusion representation at each size. (b) Fusion gain in R^2 across model sizes.",
+    "Figure 4. Out-of-distribution (OOD) shift analysis across model scales. (a) Mean distance between training-set (D1) and target-domain (D2) polymer embeddings as a function of model size for baseline and MVF. (b) Fraction of generated polymers within the D2 neighborhood across model sizes.",
+    "Figure 5. Multi-view foundation model-guided inverse polymer design across model scales. (a) Inverse-design success rate versus model size for Tg, Tm, Td, and Eg, comparing baseline and MVF reranking. (b) Absolute success-rate improvement from MVF reranking across model sizes.",
     "Figure 6. Chemistry and physics analysis of inversely designed polymers. (a) Normalized descriptor shifts of accepted candidates relative to the D1 reference set for key physicochemical features and each target property. (b) Motif enrichment ratios for discriminative polymer substructures in accepted candidates compared to the reference distribution.",
 ]
 
@@ -188,13 +188,14 @@ def _copy_first(
 
 def _collect_glob_unique(source_dirs: Iterable[Path], patterns: Iterable[str]) -> list[Path]:
     collected: list[Path] = []
-    seen_names: set[str] = set()
+    seen_paths: set[str] = set()
     for directory in source_dirs:
         for pattern in patterns:
             for path in sorted(directory.glob(pattern)):
-                if path.name in seen_names:
+                key = str(path.resolve())
+                if key in seen_paths:
                     continue
-                seen_names.add(path.name)
+                seen_paths.add(key)
                 collected.append(path)
     return collected
 
@@ -263,6 +264,30 @@ def _f1_embedding_summary(results_dir: Path) -> pd.DataFrame:
         df["view"] = df["view"].astype(str)
         df = df.sort_values("view").reset_index(drop=True)
     return df
+
+
+def _f1_embedding_summary_multi(results_dirs: Sequence[Path]) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for res_dir in _unique_paths(list(results_dirs)):
+        df = _f1_embedding_summary(res_dir)
+        if df.empty:
+            continue
+        out = df.copy()
+        inferred = _normalize_model_size(_infer_model_size_from_results_dir(res_dir))
+        if "model_size" in out.columns:
+            out["model_size"] = out["model_size"].apply(_normalize_model_size)
+            out.loc[out["model_size"].isin(["", "unknown", "nan", "none"]), "model_size"] = inferred
+        else:
+            out["model_size"] = inferred
+        out["source_results_dir"] = res_dir.name
+        frames.append(out)
+    if not frames:
+        return pd.DataFrame()
+    merged = pd.concat(frames, ignore_index=True)
+    sort_cols = [c for c in ["model_size", "view", "source_results_dir"] if c in merged.columns]
+    if sort_cols:
+        merged = merged.sort_values(sort_cols).reset_index(drop=True)
+    return merged
 
 
 def _configured_properties(config: dict) -> list[str]:
@@ -336,6 +361,64 @@ def _iter_method_results_dirs(method_root: Path) -> list[Path]:
         seen.add(key)
         unique.append(p)
     return unique
+
+
+def _normalize_model_size(value: object) -> str:
+    text = str(value).strip().lower()
+    if not text or text in {"nan", "none", "null"}:
+        return "unknown"
+    for size in MODEL_SIZE_ORDER:
+        if size == "unknown":
+            continue
+        if text == size:
+            return size
+    for size in MODEL_SIZE_ORDER:
+        if size == "unknown":
+            continue
+        if re.search(rf"(^|[_-]){size}($|[_-])", text):
+            return size
+    return text
+
+
+def _unique_paths(paths: Sequence[Path]) -> list[Path]:
+    out: list[Path] = []
+    seen: set[str] = set()
+    for p in paths:
+        if not p.exists() or not p.is_dir():
+            continue
+        key = str(p.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _discover_mvf_results_dirs(primary_results_dir: Path) -> list[Path]:
+    candidates: list[Path] = [primary_results_dir]
+    for p in sorted(BASE_DIR.glob("results*")):
+        if not p.is_dir():
+            continue
+        name = p.name.lower()
+        if "paper_package" in name:
+            continue
+        candidates.append(p)
+
+    dirs = _unique_paths(candidates)
+    if not dirs:
+        return [primary_results_dir]
+
+    def _rank(path: Path) -> tuple[int, float, str]:
+        size = _normalize_model_size(_infer_model_size_from_results_dir(path))
+        size_rank = MODEL_SIZE_ORDER.index(size) if size in MODEL_SIZE_ORDER else len(MODEL_SIZE_ORDER)
+        try:
+            mtime = -float(path.stat().st_mtime)
+        except Exception:
+            mtime = 0.0
+        return (size_rank, mtime, path.name)
+
+    dirs.sort(key=_rank)
+    return dirs
 
 
 def _copy_base_method_csvs(
@@ -444,7 +527,7 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 def _collect_source_panels(
     *,
-    results_dir: Path,
+    results_dirs: Sequence[Path],
     output_dir: Path,
     method_dirs: Sequence[str],
 ) -> dict[str, list[Path]]:
@@ -486,14 +569,15 @@ def _collect_source_panels(
         for png in sorted(aggregate_root.glob("aggregate*/figures/*.png")):
             add("base_step12", png)
 
-    for png in sorted(results_dir.rglob("*.png")):
-        if _is_relative_to(png, output_dir):
-            continue
-        parts_lower = {part.lower() for part in png.parts}
-        if any(part.startswith("paper_package") for part in parts_lower):
-            continue
-        bucket = _theme_bucket_for_mvf_figure(png)
-        add(bucket, png)
+    for mvf_results_dir in _unique_paths(list(results_dirs)):
+        for png in sorted(mvf_results_dir.rglob("*.png")):
+            if _is_relative_to(png, output_dir):
+                continue
+            parts_lower = {part.lower() for part in png.parts}
+            if any(part.startswith("paper_package") for part in parts_lower):
+                continue
+            bucket = _theme_bucket_for_mvf_figure(png)
+            add(bucket, png)
 
     return themed
 
@@ -855,6 +939,26 @@ def _load_mvf_csv(results_dir: Path, step_subdir: str, filename: str) -> pd.Data
         except Exception:
             continue
     return pd.DataFrame()
+
+
+def _load_mvf_csv_multi(results_dirs: Sequence[Path], step_subdir: str, filename: str) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for res_dir in _unique_paths(list(results_dirs)):
+        df = _load_mvf_csv(res_dir, step_subdir, filename)
+        if df is None or df.empty:
+            continue
+        tagged = df.copy()
+        inferred = _normalize_model_size(_infer_model_size_from_results_dir(res_dir))
+        if "model_size" in tagged.columns:
+            tagged["model_size"] = tagged["model_size"].apply(_normalize_model_size)
+            tagged.loc[tagged["model_size"].isin(["", "unknown", "nan", "none"]), "model_size"] = inferred
+        else:
+            tagged["model_size"] = inferred
+        tagged["source_results_dir"] = res_dir.name
+        frames.append(tagged)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def _repr_label(value: object) -> str:
@@ -1518,78 +1622,155 @@ def _fig3_property_prediction(
         r2_col = _first_existing_col(df, ["r2", "R2", "test_r2"])
         prop_col = _first_existing_col(df, ["property", "Property"])
         rep_col = _first_existing_col(df, ["representation", "view", "method"])
+        size_col = _first_existing_col(df, ["model_size"])
         if r2_col is None or prop_col is None or rep_col is None:
             continue
         df["r2"] = pd.to_numeric(df[r2_col], errors="coerce")
         df["property"] = df[prop_col].astype(str).str.strip()
         df["representation_label"] = df[rep_col].astype(str).map(_repr_label)
+        if size_col is not None:
+            df["model_size"] = df[size_col].apply(_normalize_model_size)
+        else:
+            df["model_size"] = "unknown"
         df["source_name"] = src_name
-        frames.append(df[["property", "representation_label", "r2", "source_name"]])
+        frames.append(df[["property", "representation_label", "model_size", "r2", "source_name"]])
 
     if not frames:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
     data = pd.concat(frames, ignore_index=True)
-    data = data.dropna(subset=["property", "representation_label", "r2"])
+    data = data.dropna(subset=["property", "representation_label", "model_size", "r2"])
     if data.empty:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+
+    size_order = [s for s in MODEL_SIZE_ORDER if s in set(data["model_size"].astype(str))]
+    for s in sorted(set(data["model_size"].astype(str))):
+        if s not in size_order:
+            size_order.append(s)
+    if not size_order:
+        size_order = ["unknown"]
 
     prop_order = [p for p in ["Tg", "Tm", "Td", "Eg"] if p in set(data["property"])]
     for p in sorted(set(data["property"])):
         if p not in prop_order:
             prop_order.append(p)
 
-    rep_priority = ["SMILES", "SMILES-BPE", "SELFIES", "Group-SELFIES", "Graph", "MVF Mean"]
-    reps_present = sorted(set(data["representation_label"]))
-    rep_order = [r for r in rep_priority if r in reps_present] + [r for r in reps_present if r not in rep_priority]
-    if len(rep_order) > 7:
-        top_reps = (
-            data.groupby("representation_label", as_index=False)["r2"].mean(numeric_only=True)
-            .sort_values("r2", ascending=False)["representation_label"].head(7).tolist()
-        )
-        rep_order = [r for r in rep_order if r in top_reps]
-
-    agg = data.groupby(["property", "representation_label"], as_index=False)["r2"].mean(numeric_only=True)
+    agg = data.groupby(["property", "model_size", "representation_label", "source_name"], as_index=False)["r2"].mean(numeric_only=True)
     if agg.empty:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
+    fusion_tokens = ("mvf", "multiview", "multi view", "fusion", "mean")
+    comp_rows: list[dict[str, object]] = []
+    for prop in prop_order:
+        for size in size_order:
+            block = agg[(agg["property"] == prop) & (agg["model_size"] == size)]
+            if block.empty:
+                continue
+            baseline_vals = block.loc[block["source_name"] == "baseline", "r2"]
+            mvf_block = block.loc[block["source_name"] == "mvf"].copy()
+            mvf_fusion_vals = mvf_block.loc[
+                mvf_block["representation_label"].astype(str).str.lower().apply(
+                    lambda t: any(tok in t for tok in fusion_tokens)
+                ),
+                "r2",
+            ]
+            baseline_best = float(baseline_vals.max()) if not baseline_vals.dropna().empty else np.nan
+            if mvf_fusion_vals.dropna().empty:
+                mvf_best = float(mvf_block["r2"].max()) if not mvf_block["r2"].dropna().empty else np.nan
+            else:
+                mvf_best = float(mvf_fusion_vals.max())
+            gain = mvf_best - baseline_best if np.isfinite(mvf_best) and np.isfinite(baseline_best) else np.nan
+            comp_rows.append(
+                {
+                    "property": prop,
+                    "model_size": size,
+                    "baseline_best_r2": baseline_best,
+                    "mvf_best_r2": mvf_best,
+                    "fusion_gain": gain,
+                }
+            )
+
+    comp = pd.DataFrame(comp_rows)
+    if comp.empty:
+        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+
+    size_to_x = {s: i for i, s in enumerate(size_order)}
     fig, axes = plt.subplots(1, 2, figsize=(15.8, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
 
-    x = np.arange(len(prop_order))
-    width = 0.8 / max(len(rep_order), 1)
-    for i, rep in enumerate(rep_order):
-        vals = []
-        for prop in prop_order:
-            row = agg[(agg["property"] == prop) & (agg["representation_label"] == rep)]
-            vals.append(float(row["r2"].iloc[0]) if not row.empty else np.nan)
-        ax0.bar(x + i * width - 0.4 + width / 2.0, vals, width=width, label=rep, edgecolor="#1F2937", linewidth=0.5)
-    ax0.set_xticks(x)
-    ax0.set_xticklabels(prop_order)
+    cmap = plt.get_cmap("tab10")
+    for idx, prop in enumerate(prop_order):
+        sub = comp[comp["property"] == prop].copy()
+        if sub.empty:
+            continue
+        sub["x"] = sub["model_size"].map(size_to_x)
+        sub = sub.dropna(subset=["x"]).sort_values("x")
+        if sub.empty:
+            continue
+        color = cmap(idx % 10)
+        x_vals = sub["x"].to_numpy(dtype=float)
+        ax0.plot(
+            x_vals,
+            sub["baseline_best_r2"].to_numpy(dtype=float),
+            linestyle="--",
+            marker="o",
+            linewidth=2.0,
+            markersize=6.5,
+            color=color,
+            alpha=0.65,
+            label=f"{prop} baseline",
+        )
+        ax0.plot(
+            x_vals,
+            sub["mvf_best_r2"].to_numpy(dtype=float),
+            linestyle="-",
+            marker="s",
+            linewidth=2.2,
+            markersize=6.5,
+            color=color,
+            alpha=0.95,
+            label=f"{prop} MVF",
+        )
+
+    ax0.set_xticks(np.arange(len(size_order)))
+    ax0.set_xticklabels([s.upper() for s in size_order])
+    ax0.set_xlabel("Model Size")
     ax0.set_ylabel("Test R^2")
     ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
     ax0.legend(loc="best", frameon=False)
     _panel_mark(ax0, "(a)", font_size)
 
-    fusion_tokens = ("mvf", "multiview", "multi view", "fusion", "mean")
-    gains = []
-    for prop in prop_order:
-        block = agg[agg["property"] == prop].copy()
-        if block.empty:
+    gain_by_size = comp.groupby("model_size", as_index=False)["fusion_gain"].mean(numeric_only=True)
+    gain_by_size["x"] = gain_by_size["model_size"].map(size_to_x)
+    gain_by_size = gain_by_size.dropna(subset=["x"]).sort_values("x")
+    ax1.bar(
+        gain_by_size["x"].to_numpy(dtype=float),
+        gain_by_size["fusion_gain"].to_numpy(dtype=float),
+        color="#59A14F",
+        edgecolor="#1F2937",
+        linewidth=0.7,
+    )
+    for idx, prop in enumerate(prop_order):
+        sub = comp[comp["property"] == prop].copy()
+        if sub.empty:
             continue
-        block["is_fusion"] = block["representation_label"].astype(str).str.lower().apply(
-            lambda t: any(tok in t for tok in fusion_tokens)
+        sub["x"] = sub["model_size"].map(size_to_x)
+        sub = sub.dropna(subset=["x", "fusion_gain"])
+        if sub.empty:
+            continue
+        ax1.plot(
+            sub["x"].to_numpy(dtype=float),
+            sub["fusion_gain"].to_numpy(dtype=float),
+            linestyle="",
+            marker="o",
+            markersize=4.8,
+            color=cmap(idx % 10),
+            alpha=0.8,
         )
-        fusion = block.loc[block["is_fusion"], "r2"]
-        single = block.loc[~block["is_fusion"], "r2"]
-        if fusion.empty or single.empty:
-            gains.append(np.nan)
-        else:
-            gains.append(float(fusion.max() - single.max()))
-    ax1.bar(np.arange(len(prop_order)), gains, color="#59A14F", edgecolor="#1F2937", linewidth=0.7)
     ax1.axhline(0.0, color="#111827", linewidth=1.0, alpha=0.75)
-    ax1.set_xticks(np.arange(len(prop_order)))
-    ax1.set_xticklabels(prop_order)
+    ax1.set_xticks(np.arange(len(size_order)))
+    ax1.set_xticklabels([s.upper() for s in size_order])
+    ax1.set_xlabel("Model Size")
     ax1.set_ylabel("Fusion Gain in R^2")
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
     _panel_mark(ax1, "(b)", font_size)
@@ -1618,17 +1799,13 @@ def _fig4_ood_analysis(
         df = src_df.copy()
         dist_col = _first_existing_col(df, ["d1_to_d2_mean_dist", "d1_d2_mean_dist"])
         frac_col = _first_existing_col(df, ["frac_generated_near_d2", "fraction_generated_near_d2"])
-        label_col = _first_existing_col(df, ["representation", "view", "method"])
         if dist_col is None and frac_col is None:
             continue
-        if label_col is None:
-            label_col = _first_existing_col(df, ["method_dir"])
-        if label_col is None:
-            df["series_label"] = source.upper()
+        size_col = _first_existing_col(df, ["model_size"])
+        if size_col is not None:
+            df["model_size"] = df[size_col].apply(_normalize_model_size)
         else:
-            df["series_label"] = df[label_col].astype(str).map(_repr_label)
-            if source == "mvf":
-                df["series_label"] = "MVF " + df["series_label"].astype(str)
+            df["model_size"] = "unknown"
         if dist_col is not None:
             df["dist"] = pd.to_numeric(df[dist_col], errors="coerce")
         else:
@@ -1637,35 +1814,89 @@ def _fig4_ood_analysis(
             df["frac"] = pd.to_numeric(df[frac_col], errors="coerce")
         else:
             df["frac"] = np.nan
-        frames.append(df[["series_label", "dist", "frac"]])
+        df["source_name"] = source
+        frames.append(df[["source_name", "model_size", "dist", "frac"]])
 
     if not frames:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
     data = pd.concat(frames, ignore_index=True)
-    data = data.groupby("series_label", as_index=False)[["dist", "frac"]].mean(numeric_only=True)
-    data = data.dropna(subset=["dist", "frac"], how="all")
+    data = data.groupby(["source_name", "model_size"], as_index=False)[["dist", "frac"]].mean(numeric_only=True)
+    data = data.dropna(subset=["model_size", "dist", "frac"], how="all")
     if data.empty:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
-    data = data.sort_values("dist", ascending=False, na_position="last").reset_index(drop=True)
-    x = np.arange(len(data))
+    size_order = [s for s in MODEL_SIZE_ORDER if s in set(data["model_size"].astype(str))]
+    for s in sorted(set(data["model_size"].astype(str))):
+        if s not in size_order:
+            size_order.append(s)
+    if not size_order:
+        size_order = ["unknown"]
+    size_to_x = {s: i for i, s in enumerate(size_order)}
 
     fig, axes = plt.subplots(1, 2, figsize=(15.4, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
-    ax0.bar(x, data["dist"].to_numpy(dtype=float), color="#4E79A7", edgecolor="#1F2937", linewidth=0.7)
-    ax0.set_xticks(x)
-    ax0.set_xticklabels(data["series_label"].tolist(), rotation=30, ha="right")
+    for source, color, marker, style in [
+        ("baseline", "#4E79A7", "o", "--"),
+        ("mvf", "#F28E2B", "s", "-"),
+    ]:
+        sub = data[data["source_name"] == source].copy()
+        if sub.empty:
+            continue
+        sub["x"] = sub["model_size"].map(size_to_x)
+        sub = sub.dropna(subset=["x"]).sort_values("x")
+        if sub.empty:
+            continue
+        label = "Baseline" if source == "baseline" else "MVF"
+        ax0.plot(
+            sub["x"].to_numpy(dtype=float),
+            sub["dist"].to_numpy(dtype=float),
+            linestyle=style,
+            marker=marker,
+            linewidth=2.2,
+            markersize=7.2,
+            color=color,
+            label=label,
+        )
+    ax0.set_xticks(np.arange(len(size_order)))
+    ax0.set_xticklabels([s.upper() for s in size_order])
+    ax0.set_xlabel("Model Size")
     ax0.set_ylabel("D1-D2 Mean Distance")
     ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+    ax0.legend(loc="best", frameon=False)
     _panel_mark(ax0, "(a)", font_size)
 
-    ax1.bar(x, data["frac"].to_numpy(dtype=float), color="#F28E2B", edgecolor="#1F2937", linewidth=0.7)
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(data["series_label"].tolist(), rotation=30, ha="right")
+    for source, color, marker, style in [
+        ("baseline", "#4E79A7", "o", "--"),
+        ("mvf", "#F28E2B", "s", "-"),
+    ]:
+        sub = data[data["source_name"] == source].copy()
+        if sub.empty:
+            continue
+        sub["x"] = sub["model_size"].map(size_to_x)
+        sub = sub.dropna(subset=["x"]).sort_values("x")
+        if sub.empty:
+            continue
+        label = "Baseline" if source == "baseline" else "MVF"
+        ax1.plot(
+            sub["x"].to_numpy(dtype=float),
+            sub["frac"].to_numpy(dtype=float),
+            linestyle=style,
+            marker=marker,
+            linewidth=2.2,
+            markersize=7.2,
+            color=color,
+            label=label,
+        )
+    ax1.set_xticks(np.arange(len(size_order)))
+    ax1.set_xticklabels([s.upper() for s in size_order])
+    ax1.set_xlabel("Model Size")
     ax1.set_ylabel("Fraction Near D2")
-    ax1.set_ylim(0.0, max(1.0, float(np.nanmax(pd.to_numeric(data["frac"], errors="coerce").fillna(0.0)) * 1.1)))
+    max_frac = pd.to_numeric(data["frac"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    ymax = float(max_frac.max() * 1.1) if not max_frac.empty else 1.0
+    ax1.set_ylim(0.0, max(1.0, ymax))
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+    ax1.legend(loc="best", frameon=False)
     _panel_mark(ax1, "(b)", font_size)
 
     fig.tight_layout()
@@ -1692,18 +1923,15 @@ def _fig5_inverse_design(
         df = src_df.copy()
         prop_col = _first_existing_col(df, ["property", "Property"])
         succ_col = _first_existing_col(df, ["success_rate"])
+        size_col = _first_existing_col(df, ["model_size"])
         if prop_col is None or succ_col is None:
             continue
-        label_col = _first_existing_col(df, ["representation", "method", "method_dir"])
-        if label_col is None:
-            method_label = "MVF" if source == "mvf" else "Baseline"
-            df["method_label"] = method_label
-        else:
-            df["method_label"] = df[label_col].astype(str).map(_repr_label)
-            if source == "mvf":
-                df["method_label"] = "MVF " + df["method_label"].astype(str)
         df["property"] = df[prop_col].astype(str).str.strip()
         df["success_rate"] = pd.to_numeric(df[succ_col], errors="coerce")
+        if size_col is not None:
+            df["model_size"] = df[size_col].apply(_normalize_model_size)
+        else:
+            df["model_size"] = "unknown"
         rerank_col = _first_existing_col(df, ["rerank_success_rate"])
         if rerank_col is not None:
             df["rerank_success_rate"] = pd.to_numeric(df[rerank_col], errors="coerce")
@@ -1715,57 +1943,140 @@ def _fig5_inverse_design(
         else:
             df["rerank_applied"] = False
         df["source_name"] = source
-        frames.append(df[["property", "method_label", "success_rate", "rerank_success_rate", "rerank_applied", "source_name"]])
+        frames.append(df[["property", "model_size", "success_rate", "rerank_success_rate", "rerank_applied", "source_name"]])
 
     if not frames:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
     data = pd.concat(frames, ignore_index=True)
-    data = data.dropna(subset=["property"])
+    data = data.dropna(subset=["property", "model_size"])
     if data.empty:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+
+    size_order = [s for s in MODEL_SIZE_ORDER if s in set(data["model_size"].astype(str))]
+    for s in sorted(set(data["model_size"].astype(str))):
+        if s not in size_order:
+            size_order.append(s)
+    if not size_order:
+        size_order = ["unknown"]
+    size_to_x = {s: i for i, s in enumerate(size_order)}
 
     prop_order = [p for p in ["Tg", "Tm", "Td", "Eg"] if p in set(data["property"])]
     for p in sorted(set(data["property"])):
         if p not in prop_order:
             prop_order.append(p)
-    method_order = list(dict.fromkeys(data["method_label"].astype(str).tolist()))
 
-    agg_a = data.groupby(["property", "method_label"], as_index=False)["success_rate"].mean(numeric_only=True)
+    rows: list[dict[str, object]] = []
+    for prop in prop_order:
+        for size in size_order:
+            baseline_vals = data[
+                (data["property"] == prop)
+                & (data["model_size"] == size)
+                & (data["source_name"] == "baseline")
+            ]["success_rate"]
+            mvf_block = data[
+                (data["property"] == prop)
+                & (data["model_size"] == size)
+                & (data["source_name"] == "mvf")
+            ]
+            if baseline_vals.dropna().empty and mvf_block.empty:
+                continue
+            mvf_plain = mvf_block["success_rate"]
+            mvf_rerank = mvf_block.loc[mvf_block["rerank_success_rate"].notna(), "rerank_success_rate"]
+            base_mean = float(baseline_vals.mean()) if not baseline_vals.dropna().empty else np.nan
+            mvf_mean = float(mvf_plain.mean()) if not mvf_plain.dropna().empty else np.nan
+            mvf_rerank_mean = float(mvf_rerank.mean()) if not mvf_rerank.dropna().empty else mvf_mean
+            gain = mvf_rerank_mean - base_mean if np.isfinite(mvf_rerank_mean) and np.isfinite(base_mean) else np.nan
+            rows.append(
+                {
+                    "property": prop,
+                    "model_size": size,
+                    "baseline_success": base_mean,
+                    "mvf_success": mvf_mean,
+                    "mvf_rerank_success": mvf_rerank_mean,
+                    "rerank_gain": gain,
+                }
+            )
+
+    comp = pd.DataFrame(rows)
+    if comp.empty:
+        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
     fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.3), squeeze=False)
     ax0, ax1 = axes[0]
 
-    x = np.arange(len(prop_order))
-    width = 0.8 / max(len(method_order), 1)
-    for i, method in enumerate(method_order):
-        vals = []
-        for prop in prop_order:
-            row = agg_a[(agg_a["property"] == prop) & (agg_a["method_label"] == method)]
-            vals.append(float(row["success_rate"].iloc[0]) if not row.empty else np.nan)
-        ax0.bar(x + i * width - 0.4 + width / 2.0, vals, width=width, label=method, edgecolor="#1F2937", linewidth=0.5)
-    ax0.set_xticks(x)
-    ax0.set_xticklabels(prop_order)
+    cmap = plt.get_cmap("tab10")
+    for idx, prop in enumerate(prop_order):
+        sub = comp[comp["property"] == prop].copy()
+        if sub.empty:
+            continue
+        sub["x"] = sub["model_size"].map(size_to_x)
+        sub = sub.dropna(subset=["x"]).sort_values("x")
+        if sub.empty:
+            continue
+        color = cmap(idx % 10)
+        x_vals = sub["x"].to_numpy(dtype=float)
+        ax0.plot(
+            x_vals,
+            sub["baseline_success"].to_numpy(dtype=float),
+            linestyle="--",
+            marker="o",
+            linewidth=2.0,
+            markersize=6.3,
+            color=color,
+            alpha=0.65,
+            label=f"{prop} baseline",
+        )
+        ax0.plot(
+            x_vals,
+            sub["mvf_rerank_success"].to_numpy(dtype=float),
+            linestyle="-",
+            marker="s",
+            linewidth=2.2,
+            markersize=6.3,
+            color=color,
+            alpha=0.95,
+            label=f"{prop} MVF rerank",
+        )
+    ax0.set_xticks(np.arange(len(size_order)))
+    ax0.set_xticklabels([s.upper() for s in size_order])
+    ax0.set_xlabel("Model Size")
     ax0.set_ylabel("Success Rate")
     ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
     ax0.legend(loc="best", frameon=False)
     _panel_mark(ax0, "(a)", font_size)
 
-    deltas = []
-    for prop in prop_order:
-        baseline_vals = data[(data["property"] == prop) & (data["source_name"] == "baseline")]["success_rate"]
-        mvf_block = data[(data["property"] == prop) & (data["source_name"] == "mvf")]
-        rerank_vals = mvf_block.loc[mvf_block["rerank_success_rate"].notna(), "rerank_success_rate"]
-        if rerank_vals.empty:
-            rerank_vals = mvf_block["success_rate"]
-        if baseline_vals.dropna().empty or rerank_vals.dropna().empty:
-            deltas.append(np.nan)
-        else:
-            deltas.append(float(rerank_vals.mean() - baseline_vals.mean()))
-    ax1.bar(np.arange(len(prop_order)), deltas, color="#59A14F", edgecolor="#1F2937", linewidth=0.7)
+    gain_by_size = comp.groupby("model_size", as_index=False)["rerank_gain"].mean(numeric_only=True)
+    gain_by_size["x"] = gain_by_size["model_size"].map(size_to_x)
+    gain_by_size = gain_by_size.dropna(subset=["x"]).sort_values("x")
+    ax1.bar(
+        gain_by_size["x"].to_numpy(dtype=float),
+        gain_by_size["rerank_gain"].to_numpy(dtype=float),
+        color="#59A14F",
+        edgecolor="#1F2937",
+        linewidth=0.7,
+    )
+    for idx, prop in enumerate(prop_order):
+        sub = comp[comp["property"] == prop].copy()
+        if sub.empty:
+            continue
+        sub["x"] = sub["model_size"].map(size_to_x)
+        sub = sub.dropna(subset=["x", "rerank_gain"])
+        if sub.empty:
+            continue
+        ax1.plot(
+            sub["x"].to_numpy(dtype=float),
+            sub["rerank_gain"].to_numpy(dtype=float),
+            linestyle="",
+            marker="o",
+            markersize=4.8,
+            color=cmap(idx % 10),
+            alpha=0.8,
+        )
     ax1.axhline(0.0, color="#111827", linewidth=1.0, alpha=0.75)
-    ax1.set_xticks(np.arange(len(prop_order)))
-    ax1.set_xticklabels(prop_order)
+    ax1.set_xticks(np.arange(len(size_order)))
+    ax1.set_xticklabels([s.upper() for s in size_order])
+    ax1.set_xlabel("Model Size")
     ax1.set_ylabel("MVF Rerank Improvement")
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
     _panel_mark(ax1, "(b)", font_size)
@@ -1950,6 +2261,7 @@ def main(args):
     else:
         results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
+    mvf_results_dirs = _discover_mvf_results_dirs(results_dir)
 
     cfg_output = str(paper_cfg.get("output_dir", "")).strip()
     if args.output_dir:
@@ -2024,8 +2336,8 @@ def main(args):
             output_dir=output_dir,
         )
 
-    # F1 summary table from embedding meta.
-    f1_df = _f1_embedding_summary(results_dir)
+    # F1 summary table from embedding meta across all detected MVF model-size runs.
+    f1_df = _f1_embedding_summary_multi(mvf_results_dirs)
     f1_table_path = tables_main_dir / "table_f1_embedding_summary.csv"
     if not f1_df.empty:
         f1_df.to_csv(f1_table_path, index=False)
@@ -2059,119 +2371,107 @@ def main(args):
     )
 
     step_metric_map = [
-        (
-            "F2",
-            "retrieval",
-            [
-                results_dir / "step2_retrieval" / "metrics" / "metrics_alignment.csv",
-                results_dir / "metrics_alignment.csv",
-                results_dir / "step2_retrieval" / "metrics_alignment.csv",
-            ],
-            "table_f2_retrieval.csv",
-        ),
-        (
-            "F3",
-            "property_heads",
-            [
-                results_dir / "step3_property" / "metrics" / "metrics_property.csv",
-                results_dir / "metrics_property.csv",
-                results_dir / "step3_property" / "metrics_property.csv",
-            ],
-            "table_f3_property_heads.csv",
-        ),
-        (
-            "F4",
-            "ood_analysis",
-            [
-                results_dir / "step4_ood" / "metrics" / "metrics_ood.csv",
-                results_dir / "metrics_ood.csv",
-                results_dir / "step4_ood" / "metrics_ood.csv",
-            ],
-            "table_f4_ood_analysis.csv",
-        ),
-        (
-            "F5",
-            "foundation_inverse",
-            [
-                results_dir / "step5_foundation_inverse" / "metrics" / "metrics_inverse.csv",
-                results_dir / "metrics_inverse.csv",
-                results_dir / "step5_foundation_inverse" / "metrics_inverse.csv",
-            ],
-            "table_f5_inverse_design.csv",
-        ),
+        ("F2", "retrieval", "step2_retrieval", "metrics_alignment.csv", "table_f2_retrieval.csv"),
+        ("F3", "property_heads", "step3_property", "metrics_property.csv", "table_f3_property_heads.csv"),
+        ("F4", "ood_analysis", "step4_ood", "metrics_ood.csv", "table_f4_ood_analysis.csv"),
+        ("F5", "foundation_inverse", "step5_foundation_inverse", "metrics_inverse.csv", "table_f5_inverse_design.csv"),
         (
             "F6",
             "ood_aware_inverse",
-            [
-                results_dir / "step6_ood_aware_inverse" / "metrics" / "metrics_inverse_ood_objective.csv",
-                results_dir / "metrics_inverse_ood_objective.csv",
-                results_dir / "step6_ood_aware_inverse" / "metrics_inverse_ood_objective.csv",
-            ],
+            "step6_ood_aware_inverse",
+            "metrics_inverse_ood_objective.csv",
             "table_f6_ood_aware_objective.csv",
         ),
         (
             "F7",
             "chem_physics_analysis",
-            [
-                results_dir / "step7_chem_physics_analysis" / "metrics" / "metrics_chem_physics.csv",
-                results_dir / "metrics_chem_physics.csv",
-                results_dir / "step7_chem_physics_analysis" / "metrics_chem_physics.csv",
-            ],
+            "step7_chem_physics_analysis",
+            "metrics_chem_physics.csv",
             "table_f7_chem_physics.csv",
         ),
     ]
 
     step_metric_sources: dict[str, Optional[Path]] = {}
-    for step_id, step_name, candidates, out_name in step_metric_map:
+    for step_id, step_name, step_subdir, filename, out_name in step_metric_map:
         main_dst = tables_main_dir / out_name
-        src = _copy_first(
-            candidates,
-            main_dst,
-            category="table_main",
-            copied=copied,
-            missing=missing,
-            results_dir=results_dir,
-            output_dir=output_dir,
-            missing_label=out_name,
-        )
-        step_metric_sources[step_id] = src
-        if src is not None:
-            _copy_file(
-                src,
-                manuscript_results_dir / out_name,
-                category="table_main",
-                copied=copied,
-                results_dir=results_dir,
-                output_dir=output_dir,
+        df_step = _load_mvf_csv_multi(mvf_results_dirs, step_subdir, filename)
+        if df_step.empty:
+            missing.append({"category": "table_main", "name": out_name})
+            step_metric_sources[step_id] = None
+            step_rows.append(
+                {
+                    "step_id": step_id,
+                    "step_name": step_name,
+                    "status": "missing",
+                    "source_metric": "",
+                    "paper_table": _safe_rel(main_dst, output_dir),
+                }
             )
+            continue
+
+        main_dst.parent.mkdir(parents=True, exist_ok=True)
+        df_step.to_csv(main_dst, index=False)
+        copied.append(
+            {
+                "category": "table_main",
+                "source": f"generated_from_{step_subdir}/{filename}_across_sizes",
+                "destination": _safe_rel(main_dst, output_dir),
+            }
+        )
+        step_metric_sources[step_id] = main_dst
+
+        manuscript_dst = manuscript_results_dir / out_name
+        manuscript_dst.parent.mkdir(parents=True, exist_ok=True)
+        df_step.to_csv(manuscript_dst, index=False)
+        copied.append(
+            {
+                "category": "table_main",
+                "source": f"generated_from_{step_subdir}/{filename}_across_sizes",
+                "destination": _safe_rel(manuscript_dst, output_dir),
+            }
+        )
+
         step_rows.append(
             {
                 "step_id": step_id,
                 "step_name": step_name,
-                "status": "completed" if src is not None else "missing",
-                "source_metric": _safe_rel(src, results_dir) if src is not None else "",
+                "status": "completed",
+                "source_metric": f"{step_subdir}/{filename} across {len(mvf_results_dirs)} runs",
                 "paper_table": _safe_rel(main_dst, output_dir),
             }
         )
 
-    step5_dirs = _existing_dirs(
-        [
-            results_dir / "step5_foundation_inverse" / "files",
-            results_dir / "step5_foundation_inverse",
-        ]
-    )
-    step6_dirs = _existing_dirs(
-        [
-            results_dir / "step6_ood_aware_inverse" / "files",
-            results_dir / "step6_ood_aware_inverse",
-        ]
-    )
-    step7_files_dirs = _existing_dirs(
-        [
-            results_dir / "step7_chem_physics_analysis" / "files",
-            results_dir / "step7_chem_physics_analysis",
-        ]
-    )
+    step5_dirs: list[Path] = []
+    step6_dirs: list[Path] = []
+    step7_files_dirs: list[Path] = []
+    for mvf_dir in mvf_results_dirs:
+        step5_dirs.extend(
+            _existing_dirs(
+                [
+                    mvf_dir / "step5_foundation_inverse" / "files",
+                    mvf_dir / "step5_foundation_inverse",
+                ]
+            )
+        )
+        step6_dirs.extend(
+            _existing_dirs(
+                [
+                    mvf_dir / "step6_ood_aware_inverse" / "files",
+                    mvf_dir / "step6_ood_aware_inverse",
+                ]
+            )
+        )
+        step7_files_dirs.extend(
+            _existing_dirs(
+                [
+                    mvf_dir / "step7_chem_physics_analysis" / "files",
+                    mvf_dir / "step7_chem_physics_analysis",
+                ]
+            )
+        )
+    step5_dirs = _unique_paths(step5_dirs)
+    step6_dirs = _unique_paths(step6_dirs)
+    step7_files_dirs = _unique_paths(step7_files_dirs)
 
     properties = _discover_properties(config, step5_dirs, step6_dirs, step_metric_sources.get("F7"))
 
@@ -2181,8 +2481,14 @@ def main(args):
         f5_patterns = ["candidate_scores*.csv", "accepted_candidates*.csv"]
         f6_patterns = ["ood_objective_scores*.csv", "ood_objective_topk*.csv"]
 
+    def _size_tag_for(path: Path) -> str:
+        for mvf_dir in mvf_results_dirs:
+            if _is_relative_to(path, mvf_dir):
+                return _normalize_model_size(_infer_model_size_from_results_dir(mvf_dir))
+        return "unknown"
+
     for src in _collect_glob_unique(step5_dirs, f5_patterns):
-        rel_dst = Path(src.name)
+        rel_dst = Path(f"{_size_tag_for(src)}__{src.name}")
         _copy_file(
             src,
             tables_supp_dir / rel_dst,
@@ -2201,7 +2507,7 @@ def main(args):
         )
 
     for src in _collect_glob_unique(step6_dirs, f6_patterns):
-        rel_dst = Path(src.name)
+        rel_dst = Path(f"{_size_tag_for(src)}__{src.name}")
         _copy_file(
             src,
             tables_supp_dir / rel_dst,
@@ -2229,7 +2535,7 @@ def main(args):
             "property_input_files.csv",
         ],
     ):
-        rel_dst = Path(src.name)
+        rel_dst = Path(f"{_size_tag_for(src)}__{src.name}")
         _copy_file(
             src,
             tables_supp_dir / rel_dst,
@@ -2295,26 +2601,45 @@ def main(args):
     si_caption_lines: list[str] = []
 
     if include_figures:
-        step_figure_roots = _existing_dirs(
-            [
-                results_dir / "step1_alignment_embeddings",
-                results_dir / "step2_retrieval",
-                results_dir / "step3_property",
-                results_dir / "step4_ood",
-                results_dir / "step5_foundation_inverse",
-                results_dir / "step6_ood_aware_inverse",
-                results_dir / "step7_chem_physics_analysis",
-            ]
-        )
+        step_figure_roots: list[Path] = []
+        for mvf_dir in mvf_results_dirs:
+            step_figure_roots.extend(
+                _existing_dirs(
+                    [
+                        mvf_dir / "step1_alignment_embeddings",
+                        mvf_dir / "step2_retrieval",
+                        mvf_dir / "step3_property",
+                        mvf_dir / "step4_ood",
+                        mvf_dir / "step5_foundation_inverse",
+                        mvf_dir / "step6_ood_aware_inverse",
+                        mvf_dir / "step7_chem_physics_analysis",
+                    ]
+                )
+            )
+        step_figure_roots = _unique_paths(step_figure_roots)
+
+        def _mvf_source_tag(path: Path) -> str:
+            for mvf_dir in mvf_results_dirs:
+                if _is_relative_to(path, mvf_dir):
+                    size = _normalize_model_size(_infer_model_size_from_results_dir(mvf_dir))
+                    return f"{size}_{mvf_dir.name}"
+            return "mvf_unknown"
 
         seen_mvf_fig_names: set[str] = set()
         for root in step_figure_roots:
             for src in sorted(root.rglob("figure_f*.png")):
                 if _is_relative_to(src, output_dir):
                     continue
-                name = src.name
+                base_name = src.name
+                name = base_name
                 if name in seen_mvf_fig_names:
-                    name = f"{src.parent.parent.name}_{name}"
+                    name = f"{_mvf_source_tag(src)}_{base_name}"
+                dupe_idx = 2
+                while name in seen_mvf_fig_names:
+                    stem = Path(base_name).stem
+                    suffix = Path(base_name).suffix
+                    name = f"{_mvf_source_tag(src)}_{stem}_{dupe_idx}{suffix}"
+                    dupe_idx += 1
                 seen_mvf_fig_names.add(name)
                 _copy_file(
                     src,
@@ -2351,7 +2676,7 @@ def main(args):
                 )
 
             themed_panels = _collect_source_panels(
-                results_dir=results_dir,
+                results_dirs=mvf_results_dirs,
                 output_dir=output_dir,
                 method_dirs=method_dirs,
             )
@@ -2373,12 +2698,12 @@ def main(args):
             df_agg_ood = _load_aggregate_csv(repo_results_root, "metrics_ood.csv")
             df_agg_inverse = _load_aggregate_csv(repo_results_root, "metrics_inverse.csv")
 
-            df_mvf_alignment = _load_mvf_csv(results_dir, "step2_retrieval", "metrics_alignment.csv")
-            df_mvf_property = _load_mvf_csv(results_dir, "step3_property", "metrics_property.csv")
-            df_mvf_ood = _load_mvf_csv(results_dir, "step4_ood", "metrics_ood.csv")
-            df_mvf_inverse = _load_mvf_csv(results_dir, "step5_foundation_inverse", "metrics_inverse.csv")
-            df_mvf_desc = _load_mvf_csv(results_dir, "step7_chem_physics_analysis", "descriptor_shifts.csv")
-            df_mvf_motif = _load_mvf_csv(results_dir, "step7_chem_physics_analysis", "motif_enrichment.csv")
+            df_mvf_alignment = _load_mvf_csv_multi(mvf_results_dirs, "step2_retrieval", "metrics_alignment.csv")
+            df_mvf_property = _load_mvf_csv_multi(mvf_results_dirs, "step3_property", "metrics_property.csv")
+            df_mvf_ood = _load_mvf_csv_multi(mvf_results_dirs, "step4_ood", "metrics_ood.csv")
+            df_mvf_inverse = _load_mvf_csv_multi(mvf_results_dirs, "step5_foundation_inverse", "metrics_inverse.csv")
+            df_mvf_desc = _load_mvf_csv_multi(mvf_results_dirs, "step7_chem_physics_analysis", "descriptor_shifts.csv")
+            df_mvf_motif = _load_mvf_csv_multi(mvf_results_dirs, "step7_chem_physics_analysis", "motif_enrichment.csv")
 
             manuscript_specs = [
                 {
@@ -2586,9 +2911,10 @@ def main(args):
         step5_dirs + step6_dirs + step7_files_dirs,
         ["run_meta*.json"],
     ):
+        dst_name = f"{_size_tag_for(src)}__{src.name}"
         _copy_file(
             src,
-            run_meta_dir / src.name,
+            run_meta_dir / dst_name,
             category="manifest",
             copied=copied,
             results_dir=results_dir,
@@ -2598,6 +2924,7 @@ def main(args):
     manifest_payload = {
         "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "results_dir": str(results_dir),
+        "mvf_results_dirs": [str(p) for p in mvf_results_dirs],
         "paper_package_dir": str(output_dir),
         "config_path": str(_resolve_path(args.config)),
         "properties_detected": properties,
