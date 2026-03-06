@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib.util
+import inspect
 import json
 import sys
 import time
@@ -246,9 +247,23 @@ def _get_step5():
     return sys.modules["b4_step5"]
 
 
-def _load_property_model(model_path: str | Path):
-    """Load a step3 MLP property model."""
-    return _get_step5()._load_property_model(_resolve(model_path))
+def _load_property_model(model_path: str | Path, device: str = "cpu"):
+    """Load a step3 MLP property model.
+
+    Supports both Step5 loader signatures:
+    - _load_property_model(path)
+    - _load_property_model(path, device)
+    """
+    step5 = _get_step5()
+    loader = step5._load_property_model
+    resolved = _resolve(model_path)
+    try:
+        params = inspect.signature(loader).parameters
+        if len(params) >= 2:
+            return loader(resolved, device)
+    except Exception:
+        pass
+    return loader(resolved)
 
 
 def _score_smiles(smiles_list: List[str], model, encoder_assets: dict, device: str) -> np.ndarray:

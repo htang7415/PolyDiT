@@ -836,7 +836,20 @@ def _compose_multi_panel_figure(
     ncols = 2 if n > 1 else 1
     nrows = max(1, int(math.ceil(max(n, 1) / ncols)))
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(7.2 * ncols, 5.0 * nrows))
+    panel_aspects: list[float] = []
+    for panel_path in panels:
+        try:
+            img = plt.imread(panel_path)
+            h, w = img.shape[0], img.shape[1]
+            if h > 0 and w > 0:
+                panel_aspects.append(float(w) / float(h))
+        except Exception:
+            continue
+    median_aspect = float(np.median(np.asarray(panel_aspects, dtype=float))) if panel_aspects else 1.44
+    cell_h = 5.0
+    cell_w = max(5.2, min(8.2, cell_h * median_aspect))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(cell_w * ncols, cell_h * nrows))
     if hasattr(axes, "ravel"):
         ax_list = list(axes.ravel())
     else:
@@ -853,6 +866,7 @@ def _compose_multi_panel_figure(
         try:
             img = plt.imread(panel_path)
             ax.imshow(img)
+            ax.set_aspect("equal")
         except Exception:
             ax.text(
                 0.5,
@@ -1086,8 +1100,6 @@ def _load_aggregate_csv(repo_results_root: Path, stem: str) -> pd.DataFrame:
     # If all are empty, fall back to the newest readable one.
     newest_nonempty: Optional[pd.DataFrame] = None
     newest_any: Optional[pd.DataFrame] = None
-    newest_any_path: Optional[Path] = None
-
     for agg_dir in _aggregate_dirs_sorted(repo_results_root):
         path = agg_dir / stem
         if not path.exists():
@@ -1104,7 +1116,6 @@ def _load_aggregate_csv(repo_results_root: Path, stem: str) -> pd.DataFrame:
 
         if newest_any is None:
             newest_any = tagged
-            newest_any_path = path
         if not tagged.empty:
             newest_nonempty = tagged
             return newest_nonempty
@@ -1768,7 +1779,24 @@ def _fig1_baseline_generation(
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
     best_idx = agg.groupby("representation_label")["validity"].idxmax()
-    best = agg.loc[best_idx].copy().sort_values("validity", ascending=False).reset_index(drop=True)
+    best_idx = pd.to_numeric(best_idx, errors="coerce").dropna().astype(int)
+    if best_idx.empty:
+        return _render_fallback_panels(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+        ), caption
+    best = agg.loc[best_idx].copy()
+    best = best.dropna(subset=["validity"], how="any")
+    if best.empty:
+        return _render_fallback_panels(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+        ), caption
+    best = best.sort_values("validity", ascending=False).reset_index(drop=True)
     scatter_df = agg.copy()
 
     fig, axes = plt.subplots(1, 3, figsize=(19.2, 6.2), squeeze=False)
@@ -1857,8 +1885,10 @@ def _fig2_mvf_alignment(
     fig, axes = plt.subplots(1, 2, figsize=(14.2, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
     mats = [p1.to_numpy(dtype=float), p10.to_numpy(dtype=float)]
+    cmap = plt.get_cmap("YlGnBu").copy()
+    cmap.set_bad(color="#D1D5DB")
     for ax, mat, panel_tag in [(ax0, mats[0], "(a)"), (ax1, mats[1], "(b)")]:
-        im = ax.imshow(np.ma.masked_invalid(mat), cmap="YlGnBu", vmin=0.0, vmax=1.0, aspect="auto")
+        im = ax.imshow(np.ma.masked_invalid(mat), cmap=cmap, vmin=0.0, vmax=1.0, aspect="auto")
         ax.set_xticks(np.arange(len(views)))
         ax.set_yticks(np.arange(len(views)))
         ax.set_xticklabels(views, rotation=35, ha="right")
@@ -2016,7 +2046,18 @@ def _fig3_property_prediction(
     ax0.set_xlabel("Model Size")
     ax0.set_ylabel("Test R^2")
     ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
-    ax0.legend(loc="best", frameon=False)
+    handles0, labels0 = ax0.get_legend_handles_labels()
+    if handles0:
+        max_props = 6
+        max_entries = max_props * 2
+        ax0.legend(
+            handles0[:max_entries],
+            labels0[:max_entries],
+            loc="best",
+            ncol=2,
+            frameon=False,
+            fontsize=max(8, font_size - 4),
+        )
     _panel_mark(ax0, "(a)", font_size)
 
     gain_by_size = comp.groupby("model_size", as_index=False)["fusion_gain"].mean(numeric_only=True)
@@ -2319,7 +2360,18 @@ def _fig5_inverse_design(
     ax0.set_xlabel("Model Size")
     ax0.set_ylabel("Success Rate")
     ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
-    ax0.legend(loc="best", frameon=False)
+    handles0, labels0 = ax0.get_legend_handles_labels()
+    if handles0:
+        max_props = 6
+        max_entries = max_props * 2
+        ax0.legend(
+            handles0[:max_entries],
+            labels0[:max_entries],
+            loc="best",
+            ncol=2,
+            frameon=False,
+            fontsize=max(8, font_size - 4),
+        )
     _panel_mark(ax0, "(a)", font_size)
 
     gain_by_size = comp.groupby("model_size", as_index=False)["rerank_gain"].mean(numeric_only=True)
@@ -2464,25 +2516,40 @@ def _fig6_chem_physics(
         m["value"] = pd.to_numeric(m["value"], errors="coerce")
         m = m.dropna(subset=["motif", "value"])
         if not m.empty:
-            if motif_val_col != "log2_enrichment_topk_vs_ref":
-                m["score"] = np.log2(np.clip(m["value"].to_numpy(dtype=float), a_min=1e-8, a_max=None))
-            else:
+            if motif_val_col == "log2_enrichment_topk_vs_ref":
                 m["score"] = m["value"].to_numpy(dtype=float)
-            top = (
+                y_label = "Log2 Enrichment"
+            elif motif_val_col == "delta_freq_topk_vs_ref":
+                m["score"] = m["value"].to_numpy(dtype=float)
+                y_label = "Delta Frequency (Top-k - Ref)"
+            else:
+                m["score"] = np.log2(np.clip(m["value"].to_numpy(dtype=float), a_min=1e-8, a_max=None))
+                y_label = "Log2 Enrichment"
+            motif_mean = (
                 m.groupby("motif", as_index=False)["score"].mean(numeric_only=True)
-                .sort_values("score", ascending=False)
+            )
+            top = (
+                motif_mean.assign(abs_score=lambda x: np.abs(pd.to_numeric(x["score"], errors="coerce")))
+                .sort_values("abs_score", ascending=False)
                 .head(10)
+                .sort_values("score", ascending=False)
+            )
+            bar_colors = np.where(
+                pd.to_numeric(top["score"], errors="coerce").to_numpy(dtype=float) >= 0.0,
+                "#E15759",
+                "#4E79A7",
             )
             ax1.bar(
                 np.arange(len(top)),
                 top["score"].to_numpy(dtype=float),
-                color="#E15759",
+                color=bar_colors,
                 edgecolor="#1F2937",
                 linewidth=0.7,
             )
             ax1.set_xticks(np.arange(len(top)))
             ax1.set_xticklabels(top["motif"].tolist(), rotation=35, ha="right")
-            ax1.set_ylabel("Log2 Enrichment")
+            ax1.set_ylabel(y_label)
+            ax1.axhline(0.0, color="#111111", linewidth=1.0, linestyle="--")
             ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
         else:
             has_motif = False

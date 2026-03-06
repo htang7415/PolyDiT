@@ -716,12 +716,20 @@ def _nearest_neighbor_explanations(
         top_desc_row = top_desc_map.get(top_smiles)
         ref_desc_row = ref_desc_map.get(best_ref_smiles)
         delta_aromatic = np.nan
+        delta_ring = np.nan
         delta_rotatable = np.nan
+        delta_fraction_csp3 = np.nan
         delta_mw = np.nan
+        delta_tpsa = np.nan
+        delta_logp = np.nan
         if top_desc_row is not None and ref_desc_row is not None:
             delta_aromatic = float(top_desc_row.get("aromatic_ring_count", np.nan) - ref_desc_row.get("aromatic_ring_count", np.nan))
+            delta_ring = float(top_desc_row.get("ring_count", np.nan) - ref_desc_row.get("ring_count", np.nan))
             delta_rotatable = float(top_desc_row.get("rotatable_bonds", np.nan) - ref_desc_row.get("rotatable_bonds", np.nan))
+            delta_fraction_csp3 = float(top_desc_row.get("fraction_csp3", np.nan) - ref_desc_row.get("fraction_csp3", np.nan))
             delta_mw = float(top_desc_row.get("mol_wt", np.nan) - ref_desc_row.get("mol_wt", np.nan))
+            delta_tpsa = float(top_desc_row.get("tpsa", np.nan) - ref_desc_row.get("tpsa", np.nan))
+            delta_logp = float(top_desc_row.get("logp", np.nan) - ref_desc_row.get("logp", np.nan))
 
         rows.append(
             {
@@ -733,8 +741,12 @@ def _nearest_neighbor_explanations(
                 "nearest_reference_value": best_ref_value,
                 "nearest_tanimoto": best_sim,
                 "delta_aromatic_ring_count": delta_aromatic,
+                "delta_ring_count": delta_ring,
                 "delta_rotatable_bonds": delta_rotatable,
+                "delta_fraction_csp3": delta_fraction_csp3,
                 "delta_mol_wt": delta_mw,
+                "delta_tpsa": delta_tpsa,
+                "delta_logp": delta_logp,
             }
         )
     return pd.DataFrame(rows)
