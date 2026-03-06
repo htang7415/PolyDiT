@@ -1920,8 +1920,6 @@ def main(args):
                 rows_by_property.setdefault(prop_name, []).append(row)
 
             model_path = prop_model_dir / f"{prop_name}_{view}_mlp.pt"
-            if view == "smiles":
-                model_path = prop_model_dir / f"{prop_name}_mlp.pt"
             _save_mlp_bundle_with_legacy(
                 model_path,
                 model_bundle,

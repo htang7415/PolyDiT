@@ -1511,9 +1511,13 @@ def _default_property_model_path(results_dir: Path, property_name: str, view: st
         model_dir = model_dir / prop / "files"
     else:
         model_dir = model_dir / "files"
-    if view == "smiles":
-        return model_dir / f"{property_name}_mlp.pt"
-    return model_dir / f"{property_name}_{view}_mlp.pt"
+    canonical = model_dir / f"{property_name}_{view}_mlp.pt"
+    if view != "smiles":
+        return canonical
+    legacy = model_dir / f"{property_name}_mlp.pt"
+    if canonical.exists() or not legacy.exists():
+        return canonical
+    return legacy
 
 
 def _discover_property_model_paths(results_dir: Path, property_name: str) -> Dict[str, Path]:
@@ -1525,16 +1529,17 @@ def _discover_property_model_paths(results_dir: Path, property_name: str) -> Dic
     discovered: Dict[str, Path] = {}
 
     for view in SUPPORTED_VIEWS:
+        filenames = [f"{property_name}_{view}_mlp.pt"]
         if view == "smiles":
-            filename = f"{property_name}_mlp.pt"
-        else:
-            filename = f"{property_name}_{view}_mlp.pt"
+            # Backward compatibility for older F3 runs.
+            filenames.append(f"{property_name}_mlp.pt")
         candidates = []
-        if prop_files_dir is not None:
-            candidates.append(prop_files_dir / filename)
-        if prop_step_dir is not None:
-            candidates.append(prop_step_dir / filename)
-        candidates.extend([files_dir / filename, model_dir / filename])
+        for filename in filenames:
+            if prop_files_dir is not None:
+                candidates.append(prop_files_dir / filename)
+            if prop_step_dir is not None:
+                candidates.append(prop_step_dir / filename)
+            candidates.extend([files_dir / filename, model_dir / filename])
         model_path = next((p for p in candidates if p.exists()), None)
         if model_path is not None:
             discovered[view] = model_path
