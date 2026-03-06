@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.evaluation.foundation_inverse import (
     compute_property_error,
     compute_property_hits,
+    normalize_scores,
 )
 from src.utils.config import load_config, save_config
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
@@ -603,26 +604,7 @@ def _save_augmented_ood_metrics(
 
 
 def _normalize_scores(values: np.ndarray, mode: str) -> np.ndarray:
-    x = np.asarray(values, dtype=np.float32).reshape(-1)
-    if x.size == 0:
-        return x
-    norm_mode = str(mode).strip().lower()
-    if norm_mode in {"none", ""}:
-        return x
-    if norm_mode == "rank":
-        order = np.argsort(x, kind="mergesort")
-        ranks = np.empty_like(order, dtype=np.float32)
-        ranks[order] = np.arange(x.size, dtype=np.float32)
-        denom = max(float(x.size - 1), 1.0)
-        return ranks / denom
-    if norm_mode != "minmax":
-        raise ValueError(f"Unsupported normalization={mode}. Use minmax|rank|none.")
-    x_min = float(np.min(x))
-    x_max = float(np.max(x))
-    span = x_max - x_min
-    if span <= 1e-12:
-        return np.zeros_like(x, dtype=np.float32)
-    return (x - x_min) / span
+    return normalize_scores(values, mode)
 
 
 def _compute_target_excess(predictions: np.ndarray, target_value: float, target_mode: str) -> np.ndarray:

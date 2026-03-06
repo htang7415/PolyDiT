@@ -3020,7 +3020,12 @@ def main(args):
             df_agg_inverse = _load_aggregate_csv(repo_results_root, "metrics_inverse.csv")
 
             df_mvf_alignment = _load_mvf_csv_multi(mvf_results_dirs, "step2_retrieval", "metrics_alignment.csv")
-            df_mvf_property = _load_mvf_csv_multi(mvf_results_dirs, "step3_property", "metrics_property.csv")
+            df_mvf_property = _load_mvf_csv_multi(
+                mvf_results_dirs,
+                "step3_property",
+                "metrics_property.csv",
+                include_property_scopes=True,
+            )
             df_mvf_ood = _load_mvf_csv_multi(mvf_results_dirs, "step4_ood", "metrics_ood.csv")
             df_mvf_inverse = _load_mvf_csv_multi(
                 mvf_results_dirs,

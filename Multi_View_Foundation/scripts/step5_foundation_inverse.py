@@ -24,6 +24,7 @@ from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies
 from shared.ood_metrics import knn_distances
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
+from src.utils.checkpoint_loading import load_backbone_checkpoint
 
 try:
     import joblib
@@ -1201,18 +1202,14 @@ def _load_sequence_backbone(
         pad_token_id=tokenizer.pad_token_id,
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
-    cleaned = {k.replace("_orig_mod.", "").replace("module.", ""): v for k, v in state_dict.items()}
-    backbone_state = {
-        key[len("backbone."):]: value
-        for key, value in cleaned.items()
-        if key.startswith("backbone.")
-    }
-    if not backbone_state:
-        backbone_state = cleaned
-
-    backbone.load_state_dict(backbone_state, strict=False)
+    load_backbone_checkpoint(
+        backbone=backbone,
+        checkpoint_path=checkpoint_path,
+        map_location=device,
+        strict=False,
+        prefix="backbone.",
+        label="sequence backbone",
+    )
     backbone.to(device)
     backbone.eval()
 
@@ -1321,18 +1318,14 @@ def _load_graph_backbone(encoder_cfg: dict, device: str):
         num_diffusion_steps=diffusion_steps,
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
-    cleaned = {k.replace("_orig_mod.", "").replace("module.", ""): v for k, v in state_dict.items()}
-    backbone_state = {
-        key[len("backbone."):]: value
-        for key, value in cleaned.items()
-        if key.startswith("backbone.")
-    }
-    if not backbone_state:
-        backbone_state = cleaned
-
-    backbone.load_state_dict(backbone_state, strict=False)
+    load_backbone_checkpoint(
+        backbone=backbone,
+        checkpoint_path=checkpoint_path,
+        map_location=device,
+        strict=False,
+        prefix="backbone.",
+        label="graph backbone",
+    )
     backbone.to(device)
     backbone.eval()
 

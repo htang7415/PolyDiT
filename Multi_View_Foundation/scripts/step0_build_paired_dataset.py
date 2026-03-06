@@ -57,7 +57,7 @@ def _to_int_or_none(value):
     return int(float(text))
 
 
-def _load_smiles(path: Path, max_rows=None) -> pd.Series:
+def _load_smiles(path: Path, max_rows=None):
     max_rows = _to_int_or_none(max_rows)
     header_df = pd.read_csv(path, nrows=0, compression="infer")
     columns = set(header_df.columns)
@@ -74,7 +74,10 @@ def _load_smiles(path: Path, max_rows=None) -> pd.Series:
     if max_rows is not None:
         read_kwargs["nrows"] = int(max_rows)
     df = pd.read_csv(path, **read_kwargs)
-    return df[smiles_col].astype(str)
+    raw = df[smiles_col]
+    cleaned = raw.where(raw.notna(), "").astype(str).str.strip()
+    invalid = cleaned.eq("") | cleaned.str.lower().isin({"nan", "none", "null"})
+    return cleaned[~invalid].reset_index(drop=True), int(len(cleaned)), int((~invalid).sum())
 
 
 def main(args):
@@ -91,8 +94,8 @@ def main(args):
     max_d1 = _to_int_or_none(config.get("data", {}).get("max_samples_d1"))
     max_d2 = _to_int_or_none(config.get("data", {}).get("max_samples_d2"))
 
-    d1_smiles = _load_smiles(d1_path, max_rows=max_d1)
-    d2_smiles = _load_smiles(d2_path, max_rows=max_d2)
+    d1_smiles, d1_total_raw, d1_total_valid = _load_smiles(d1_path, max_rows=max_d1)
+    d2_smiles, d2_total_raw, d2_total_valid = _load_smiles(d2_path, max_rows=max_d2)
 
     views_cfg = config.get("views", {})
     selfies_enabled = views_cfg.get("selfies", {}).get("enabled", False)
@@ -189,8 +192,20 @@ def main(args):
         index=False,
     )
 
-    stats_rows.insert(0, {"dataset": "d1", "view": "p_smiles", "total": int(len(d1_smiles)), "success": int(len(d1_smiles)), "failure": 0})
-    stats_rows.insert(1, {"dataset": "d2", "view": "p_smiles", "total": int(len(d2_smiles)), "success": int(len(d2_smiles)), "failure": 0})
+    stats_rows.insert(0, {
+        "dataset": "d1",
+        "view": "p_smiles",
+        "total": int(d1_total_raw),
+        "success": int(d1_total_valid),
+        "failure": int(d1_total_raw - d1_total_valid),
+    })
+    stats_rows.insert(1, {
+        "dataset": "d2",
+        "view": "p_smiles",
+        "total": int(d2_total_raw),
+        "success": int(d2_total_valid),
+        "failure": int(d2_total_raw - d2_total_valid),
+    })
     stats_df = pd.DataFrame(stats_rows)
     save_csv(
         stats_df,

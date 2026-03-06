@@ -124,16 +124,74 @@ def _draw_heatmap(fig, ax, matrix: np.ndarray, row_labels, col_labels, vmin=0.0,
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
 
+def _split_dataset_and_view(token: str):
+    raw = str(token).strip()
+    for view in sorted(VIEW_ORDER, key=len, reverse=True):
+        suffix = f"_{view}"
+        if raw.endswith(suffix):
+            dataset = raw[: -len(suffix)]
+            if dataset:
+                return dataset, view
+    return None
+
+
 def _parse_view_pair(text: str):
     raw = str(text)
     if "->" not in raw:
         return None
     left, right = raw.split("->", 1)
-    if "_" not in left or "_" not in right:
+    left_parts = _split_dataset_and_view(left)
+    right_parts = _split_dataset_and_view(right)
+    if left_parts is None or right_parts is None:
         return None
-    l_dataset, l_view = left.split("_", 1)
-    r_dataset, r_view = right.split("_", 1)
+    l_dataset, l_view = left_parts
+    r_dataset, r_view = right_parts
     return l_dataset, l_view, r_dataset, r_view
+
+
+def _align_embeddings_with_index(
+    *,
+    idx_df: pd.DataFrame,
+    embeddings: np.ndarray,
+    dataset: str,
+    view: str,
+):
+    subset = idx_df[idx_df["dataset"] == dataset].copy()
+    if subset.empty:
+        return None, None
+    if "row_index" not in subset.columns or "polymer_id" not in subset.columns:
+        raise ValueError(f"embedding_index_{view}.csv must contain row_index and polymer_id columns.")
+
+    row_idx = pd.to_numeric(subset["row_index"], errors="coerce")
+    if row_idx.isna().any():
+        raise ValueError(f"Non-numeric row_index detected for view={view} dataset={dataset}.")
+    subset["_row_index"] = row_idx.astype(np.int64)
+
+    if subset["_row_index"].duplicated().any():
+        raise ValueError(f"Duplicate row_index detected for view={view} dataset={dataset}.")
+    if int(np.min(subset["_row_index"])) < 0:
+        raise ValueError(f"Negative row_index detected for view={view} dataset={dataset}.")
+
+    n_emb = int(embeddings.shape[0])
+    n_idx = int(len(subset))
+    if n_idx != n_emb:
+        raise ValueError(
+            f"Embedding/index length mismatch for view={view} dataset={dataset}: "
+            f"index_rows={n_idx} embedding_rows={n_emb}."
+        )
+
+    subset = subset.sort_values("_row_index")
+    expected = np.arange(n_emb, dtype=np.int64)
+    observed = subset["_row_index"].to_numpy(dtype=np.int64)
+    if not np.array_equal(observed, expected):
+        raise ValueError(
+            f"row_index is not a 0..N-1 sequence for view={view} dataset={dataset}. "
+            "Refusing to evaluate with potentially misaligned IDs/embeddings."
+        )
+
+    ids = subset["polymer_id"].astype(str).tolist()
+    aligned = embeddings[observed]
+    return ids, aligned
 
 
 def _plot_f2_retrieval_heatmaps(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
@@ -354,13 +412,19 @@ def main(args):
             emb = _load_view_embeddings(results_dir, view, dataset)
             if emb is None:
                 continue
-            subset = idx_df[idx_df["dataset"] == dataset]
-            ids = subset.sort_values("row_index")["polymer_id"].astype(str).tolist()
+            ids, emb_aligned = _align_embeddings_with_index(
+                idx_df=idx_df,
+                embeddings=emb,
+                dataset=dataset,
+                view=view,
+            )
+            if ids is None or emb_aligned is None:
+                continue
             if max_eval_samples is not None and len(ids) > max_eval_samples:
                 ids = ids[:max_eval_samples]
-                emb = emb[:max_eval_samples]
-            view_data[view][dataset] = {"embeddings": emb, "ids": ids}
-            view_dims[view] = emb.shape[1]
+                emb_aligned = emb_aligned[:max_eval_samples]
+            view_data[view][dataset] = {"embeddings": emb_aligned, "ids": ids}
+            view_dims[view] = emb_aligned.shape[1]
 
     rows = []
     for dataset in ["d1", "d2"]:
@@ -378,10 +442,12 @@ def main(args):
                     src["ids"],
                     tgt["ids"],
                     ks,
+                    exclude_self=(src_view == tgt_view),
                 )
                 rows.append({
                     "view_pair": f"{dataset}_{src_view}->{dataset}_{tgt_view}",
                     "view_dropout_mode": "none",
+                    "self_excluded": int(src_view == tgt_view),
                     **metrics,
                 })
 

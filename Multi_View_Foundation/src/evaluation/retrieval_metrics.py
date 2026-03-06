@@ -21,6 +21,31 @@ def _topk_indices(scores: np.ndarray, k: int) -> np.ndarray:
     return part[row_indices, sorted_part]
 
 
+def _build_self_ref_indices(query_ids: List[str], ref_ids: List[str]) -> np.ndarray | None:
+    """Infer one-to-one query->reference self mapping by ID occurrence order."""
+    if len(query_ids) != len(ref_ids):
+        return None
+
+    ref_positions: Dict[str, List[int]] = {}
+    for idx, rid in enumerate(ref_ids):
+        ref_positions.setdefault(str(rid), []).append(idx)
+
+    query_seen: Dict[str, int] = {}
+    mapping: List[int] = []
+    for qid in query_ids:
+        qid_str = str(qid)
+        occ = query_seen.get(qid_str, 0)
+        query_seen[qid_str] = occ + 1
+        candidates = ref_positions.get(qid_str, [])
+        if occ >= len(candidates):
+            return None
+        mapping.append(int(candidates[occ]))
+
+    if len(set(mapping)) != len(mapping):
+        return None
+    return np.asarray(mapping, dtype=np.int64)
+
+
 def compute_recall_at_k(
     query_embeddings: np.ndarray,
     ref_embeddings: np.ndarray,
@@ -28,6 +53,7 @@ def compute_recall_at_k(
     ref_ids: Iterable[str],
     ks: List[int],
     batch_size: int = 512,
+    exclude_self: bool = False,
 ) -> Dict[str, float]:
     """Compute recall@K for retrieval with cosine similarity.
 
@@ -53,6 +79,7 @@ def compute_recall_at_k(
     ref_index: Dict[str, List[int]] = {}
     for idx, rid in enumerate(ref_ids):
         ref_index.setdefault(str(rid), []).append(idx)
+    self_ref_indices = _build_self_ref_indices(query_ids, ref_ids) if exclude_self else None
 
     query_embeddings = _normalize(query_embeddings.astype(np.float32))
     ref_embeddings = _normalize(ref_embeddings.astype(np.float32))
@@ -69,11 +96,17 @@ def compute_recall_at_k(
         batch_ids = query_ids[start:end]
 
         scores = batch_emb @ ref_embeddings.T
+        if self_ref_indices is not None:
+            local_rows = np.arange(end - start, dtype=np.int64)
+            scores[local_rows, self_ref_indices[start:end]] = -np.inf
         topk = _topk_indices(scores, max_k)
 
         for row, qid in enumerate(batch_ids):
             qid_str = str(qid)
             pos_indices = ref_index.get(qid_str)
+            if self_ref_indices is not None:
+                self_idx = int(self_ref_indices[start + row])
+                pos_indices = [idx for idx in pos_indices or [] if idx != self_idx]
             if not pos_indices:
                 continue
             matched_queries += 1
@@ -82,7 +115,16 @@ def compute_recall_at_k(
                     hits[k] += 1
             cosine_sims.append(float(scores[row, pos_indices].max()))
 
-    denom = matched_queries if matched_queries > 0 else 1
+    if matched_queries == 0:
+        return {
+            **{f"recall_at_{k}": np.nan for k in ks},
+            "mean_cosine_sim_matched": np.nan,
+            "matched_queries": 0,
+            "total_queries": total_queries,
+            "match_rate": 0.0,
+        }
+
+    denom = matched_queries
     return {
         **{f"recall_at_{k}": round(hits[k] / denom, 4) for k in ks},
         "mean_cosine_sim_matched": round(float(np.mean(cosine_sims)), 4) if cosine_sims else 0.0,

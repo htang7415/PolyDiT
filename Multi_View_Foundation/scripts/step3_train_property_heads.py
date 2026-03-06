@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """F3: Property heads on foundation embeddings (multi-view)."""
 
+from __future__ import annotations
+
 import argparse
 import os
 from pathlib import Path
@@ -43,6 +45,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
+from src.utils.checkpoint_loading import load_backbone_checkpoint
 
 
 REPRESENTATION_ORDER = [
@@ -191,19 +194,14 @@ def _load_sequence_backbone(
         pad_token_id=tokenizer.pad_token_id,
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
-    cleaned = {k.replace("_orig_mod.", "").replace("module.", ""): v for k, v in state_dict.items()}
-
-    backbone_state = {
-        key[len("backbone."):]: value
-        for key, value in cleaned.items()
-        if key.startswith("backbone.")
-    }
-    if not backbone_state:
-        backbone_state = cleaned
-
-    backbone.load_state_dict(backbone_state, strict=False)
+    load_backbone_checkpoint(
+        backbone=backbone,
+        checkpoint_path=checkpoint_path,
+        map_location=device,
+        strict=False,
+        prefix="backbone.",
+        label="sequence backbone",
+    )
     backbone.to(device)
     backbone.eval()
 
@@ -307,18 +305,14 @@ def _load_graph_backbone(encoder_cfg: dict, device: str):
         num_diffusion_steps=diffusion_steps,
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
-    cleaned = {k.replace("_orig_mod.", "").replace("module.", ""): v for k, v in state_dict.items()}
-    backbone_state = {
-        key[len("backbone."):]: value
-        for key, value in cleaned.items()
-        if key.startswith("backbone.")
-    }
-    if not backbone_state:
-        backbone_state = cleaned
-
-    backbone.load_state_dict(backbone_state, strict=False)
+    load_backbone_checkpoint(
+        backbone=backbone,
+        checkpoint_path=checkpoint_path,
+        map_location=device,
+        strict=False,
+        prefix="backbone.",
+        label="graph backbone",
+    )
     backbone.to(device)
     backbone.eval()
 

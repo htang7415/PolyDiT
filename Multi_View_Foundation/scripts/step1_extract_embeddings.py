@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json, save_numpy
+from src.utils.checkpoint_loading import load_backbone_checkpoint
 
 try:  # pragma: no cover
     import matplotlib
@@ -355,25 +356,14 @@ def _load_sequence_backbone(
         pad_token_id=tokenizer.pad_token_id,
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
-    cleaned = {k.replace("_orig_mod.", "").replace("module.", ""): v for k, v in state_dict.items()}
-
-    backbone_state = {
-        key[len("backbone."):]: value
-        for key, value in cleaned.items()
-        if key.startswith("backbone.")
-    }
-    if not backbone_state:
-        backbone_state = cleaned
-
-    incompatible = backbone.load_state_dict(backbone_state, strict=False)
-    if incompatible.missing_keys or incompatible.unexpected_keys:
-        print("Warning: mismatch when loading backbone weights.")
-        if incompatible.missing_keys:
-            print(f"  Missing keys: {len(incompatible.missing_keys)}")
-        if incompatible.unexpected_keys:
-            print(f"  Unexpected keys: {len(incompatible.unexpected_keys)}")
+    load_backbone_checkpoint(
+        backbone=backbone,
+        checkpoint_path=checkpoint_path,
+        map_location=device,
+        strict=False,
+        prefix="backbone.",
+        label="sequence backbone",
+    )
 
     backbone.to(device)
     backbone.eval()
@@ -515,24 +505,14 @@ def _load_graph_backbone(encoder_cfg: dict, device: str):
         num_diffusion_steps=diffusion_steps,
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
-    cleaned = {k.replace("_orig_mod.", "").replace("module.", ""): v for k, v in state_dict.items()}
-    backbone_state = {
-        key[len("backbone."):]: value
-        for key, value in cleaned.items()
-        if key.startswith("backbone.")
-    }
-    if not backbone_state:
-        backbone_state = cleaned
-
-    incompatible = backbone.load_state_dict(backbone_state, strict=False)
-    if incompatible.missing_keys or incompatible.unexpected_keys:
-        print("Warning: mismatch when loading graph backbone weights.")
-        if incompatible.missing_keys:
-            print(f"  Missing keys: {len(incompatible.missing_keys)}")
-        if incompatible.unexpected_keys:
-            print(f"  Unexpected keys: {len(incompatible.unexpected_keys)}")
+    load_backbone_checkpoint(
+        backbone=backbone,
+        checkpoint_path=checkpoint_path,
+        map_location=device,
+        strict=False,
+        prefix="backbone.",
+        label="graph backbone",
+    )
 
     backbone.to(device)
     backbone.eval()
@@ -659,19 +639,16 @@ def main(args):
             primary_smiles_view = candidate
             break
 
-    device = "auto"
-    for view in views:
-        encoder_cfg = config.get(f"{view}_encoder", config.get("smiles_encoder", {}))
-        device = encoder_cfg.get("device", device)
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    default_device = str(cfg_f1.get("device", "auto")).strip().lower() or "auto"
+    if default_device == "auto":
+        default_device = "cuda" if torch.cuda.is_available() else "cpu"
     require_cuda = os.environ.get("MVF_REQUIRE_CUDA", "0").strip().lower() in {"1", "true", "yes"}
-    if require_cuda and device != "cuda":
+    if require_cuda and default_device != "cuda":
         raise RuntimeError("MVF_REQUIRE_CUDA is set but CUDA is unavailable.")
-    if device == "cpu":
-        print("Warning: using CPU for embedding extraction; this can be very slow.")
+    if default_device == "cpu":
+        print("Warning: default device is CPU for embedding extraction; this can be very slow.")
     else:
-        print("Using CUDA for embedding extraction.")
+        print("Default device for embedding extraction: CUDA.")
 
     view_specs = {
         "smiles": {
@@ -727,6 +704,20 @@ def main(args):
         if not encoder_cfg or not encoder_cfg.get("method_dir"):
             print(f"Skipping {view}: encoder config missing.")
             continue
+        view_device = str(encoder_cfg.get("device", default_device)).strip().lower() or default_device
+        if view_device == "auto":
+            view_device = default_device
+        if view_device == "cuda" and not torch.cuda.is_available():
+            if require_cuda:
+                raise RuntimeError(
+                    f"MVF_REQUIRE_CUDA is set but CUDA is unavailable for view={view}."
+                )
+            print(f"Warning: CUDA requested for view={view} but unavailable; falling back to CPU.")
+            view_device = "cpu"
+        if require_cuda and view_device != "cuda":
+            raise RuntimeError(
+                f"MVF_REQUIRE_CUDA is set but view={view} resolved to device={view_device}."
+            )
         max_d1 = encoder_cfg.get("max_samples_d1") or data_cfg.get("max_samples_d1")
         max_d2 = encoder_cfg.get("max_samples_d2") or data_cfg.get("max_samples_d2")
 
@@ -741,11 +732,11 @@ def main(args):
         if max_d2:
             view_d2 = view_d2.head(int(max_d2))
 
-        print(f"\nEmbedding view: {view}")
+        print(f"\nEmbedding view: {view} (device={view_device})")
         if spec["type"] == "sequence":
             assets = _load_sequence_backbone(
                 encoder_cfg=encoder_cfg,
-                device=device,
+                device=view_device,
                 tokenizer_module=spec["tokenizer_module"],
                 tokenizer_class=spec["tokenizer_class"],
                 tokenizer_filename=spec["tokenizer_file"],
@@ -758,13 +749,29 @@ def main(args):
             d2_ids, d2_inputs = _prepare_inputs(view_d2, spec["input_col"])
 
             t0 = time.time()
-            d1_embeddings = _embed_sequence(d1_inputs, assets["tokenizer"], assets["backbone"], device, batch_size, pooling, timestep)
+            d1_embeddings = _embed_sequence(
+                d1_inputs,
+                assets["tokenizer"],
+                assets["backbone"],
+                view_device,
+                batch_size,
+                pooling,
+                timestep,
+            )
             d1_time = time.time() - t0
             t1 = time.time()
-            d2_embeddings = _embed_sequence(d2_inputs, assets["tokenizer"], assets["backbone"], device, batch_size, pooling, timestep)
+            d2_embeddings = _embed_sequence(
+                d2_inputs,
+                assets["tokenizer"],
+                assets["backbone"],
+                view_device,
+                batch_size,
+                pooling,
+                timestep,
+            )
             d2_time = time.time() - t1
         else:
-            assets = _load_graph_backbone(encoder_cfg=encoder_cfg, device=device)
+            assets = _load_graph_backbone(encoder_cfg=encoder_cfg, device=view_device)
             pooling = encoder_cfg.get("pooling", "mean")
             timestep = encoder_cfg.get("timestep", 1)
             batch_size = int(encoder_cfg.get("batch_size", 64))
@@ -773,10 +780,26 @@ def main(args):
             d2_ids, d2_inputs = _prepare_inputs(view_d2, spec["input_col"])
 
             t0 = time.time()
-            d1_embeddings, d1_valid = _embed_graph(d1_inputs, assets["tokenizer"], assets["backbone"], device, batch_size, pooling, timestep)
+            d1_embeddings, d1_valid = _embed_graph(
+                d1_inputs,
+                assets["tokenizer"],
+                assets["backbone"],
+                view_device,
+                batch_size,
+                pooling,
+                timestep,
+            )
             d1_time = time.time() - t0
             t1 = time.time()
-            d2_embeddings, d2_valid = _embed_graph(d2_inputs, assets["tokenizer"], assets["backbone"], device, batch_size, pooling, timestep)
+            d2_embeddings, d2_valid = _embed_graph(
+                d2_inputs,
+                assets["tokenizer"],
+                assets["backbone"],
+                view_device,
+                batch_size,
+                pooling,
+                timestep,
+            )
             d2_time = time.time() - t1
             d1_ids = [d1_ids[i] for i in d1_valid]
             d2_ids = [d2_ids[i] for i in d2_valid]
@@ -817,7 +840,7 @@ def main(args):
             "tokenizer_path": str(assets.get("tokenizer_path", "")),
             "pooling": pooling,
             "timestep": int(timestep),
-            "device": device,
+            "device": view_device,
             "d1_samples": int(d1_embeddings.shape[0]),
             "d2_samples": int(d2_embeddings.shape[0]),
             "embedding_dim": int(d1_embeddings.shape[1]) if d1_embeddings.size else int(d2_embeddings.shape[1]) if d2_embeddings.size else 0,

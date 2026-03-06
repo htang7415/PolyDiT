@@ -31,17 +31,44 @@ def compute_property_error(
     predictions: np.ndarray,
     target_value: float,
     target_mode: str = "window",
+    error_scale: Optional[float] = None,
+    min_scale: float = 1e-3,
 ) -> np.ndarray:
     """Compute non-negative normalized property violation/error.
 
     - window: absolute error |pred-target|
     - ge: shortfall max(0, target-pred)
     - le: exceedance max(0, pred-target)
-    All values are normalized by max(|target|, 1e-9).
+    Values are normalized by a robust scale:
+      max(user_scale, robust_prediction_scale, 0.1*|target|, min_scale).
+    This avoids unstable blow-ups when target is near zero.
     """
     preds = np.asarray(predictions, dtype=np.float32).reshape(-1)
     target = float(target_value)
-    denom = max(abs(target), 1e-9)
+
+    scale_candidates = [float(min_scale), abs(target) * 0.1]
+    if error_scale is not None:
+        try:
+            scale_candidates.append(abs(float(error_scale)))
+        except Exception:
+            pass
+
+    finite = preds[np.isfinite(preds)]
+    if finite.size > 1:
+        std = float(np.std(finite))
+        if std > 0:
+            scale_candidates.append(std)
+        q75, q25 = np.percentile(finite, [75.0, 25.0])
+        iqr = float(q75 - q25)
+        if iqr > 0:
+            # Consistent with sigma estimate for normal distributions.
+            scale_candidates.append(iqr / 1.349)
+        q95, q05 = np.percentile(finite, [95.0, 5.0])
+        span = float(q95 - q05)
+        if span > 0:
+            scale_candidates.append(span / 3.29)
+
+    denom = max(scale_candidates)
 
     mode = str(target_mode).strip().lower()
     if mode == "window":
@@ -52,10 +79,10 @@ def compute_property_error(
         err = np.maximum(0.0, preds - target)
     else:
         raise ValueError(f"Unsupported target_mode={target_mode}. Use window|ge|le.")
-    return (err / denom).astype(np.float32, copy=False)
+    return (err / max(denom, float(min_scale))).astype(np.float32, copy=False)
 
 
-def _normalize_scores(values: np.ndarray, mode: str) -> np.ndarray:
+def normalize_scores(values: np.ndarray, mode: str) -> np.ndarray:
     x = np.asarray(values, dtype=np.float32).reshape(-1)
     if x.size == 0:
         return x
@@ -64,7 +91,12 @@ def _normalize_scores(values: np.ndarray, mode: str) -> np.ndarray:
     if norm_mode in {"none", ""}:
         return x
 
+    if x.size <= 1:
+        return np.zeros_like(x, dtype=np.float32)
+
     if norm_mode == "rank":
+        if float(np.max(x) - np.min(x)) <= 1e-12:
+            return np.zeros_like(x, dtype=np.float32)
         order = np.argsort(x, kind="mergesort")
         ranks = np.empty_like(order, dtype=np.float32)
         ranks[order] = np.arange(x.size, dtype=np.float32)
@@ -80,6 +112,11 @@ def _normalize_scores(values: np.ndarray, mode: str) -> np.ndarray:
     if span <= 1e-12:
         return np.zeros_like(x, dtype=np.float32)
     return (x - x_min) / span
+
+
+def _normalize_scores(values: np.ndarray, mode: str) -> np.ndarray:
+    """Backward-compatible alias for existing imports."""
+    return normalize_scores(values, mode)
 
 
 def compute_ood_aware_objective(
@@ -113,8 +150,8 @@ def compute_ood_aware_objective(
     o_w /= total_w
 
     property_error = compute_property_error(preds, target_value=float(target_value), target_mode=target_mode)
-    property_error_norm = _normalize_scores(property_error, normalization)
-    d2_distance_norm = _normalize_scores(d2, normalization)
+    property_error_norm = normalize_scores(property_error, normalization)
+    d2_distance_norm = normalize_scores(d2, normalization)
     objective = p_w * property_error_norm + o_w * d2_distance_norm
 
     order = np.argsort(objective)
