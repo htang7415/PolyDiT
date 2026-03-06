@@ -1807,18 +1807,16 @@ def main(args):
         "graph": config.get("graph_encoder", {}),
     }
 
-    device = "auto"
-    for view in views:
-        device = encoder_cfgs.get(view, {}).get("device", device)
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    training_device = str(prop_cfg.get("device", "auto")).strip().lower() or "auto"
+    if training_device == "auto":
+        training_device = "cuda" if torch.cuda.is_available() else "cpu"
     require_cuda = os.environ.get("MVF_REQUIRE_CUDA", "0").strip().lower() in {"1", "true", "yes"}
-    if require_cuda and device != "cuda":
+    if require_cuda and training_device != "cuda":
         raise RuntimeError("MVF_REQUIRE_CUDA is set but CUDA is unavailable.")
-    if device == "cpu":
-        print("Warning: using CPU for property embedding; this can be very slow.")
+    if training_device == "cpu":
+        print("Warning: training device is CPU; F3 can be very slow.")
     else:
-        print("Using CUDA for property embedding.")
+        print("Using CUDA for F3 property-head training.")
 
     view_specs = {
         "smiles": {
@@ -1865,10 +1863,25 @@ def main(args):
         if not encoder_cfg or not encoder_cfg.get("method_dir"):
             print(f"Skipping view {view}: encoder config missing.")
             continue
+        view_device = str(encoder_cfg.get("device", training_device)).strip().lower() or training_device
+        if view_device == "auto":
+            view_device = training_device
+        if view_device == "cuda" and not torch.cuda.is_available():
+            if require_cuda:
+                raise RuntimeError(
+                    f"MVF_REQUIRE_CUDA is set but CUDA is unavailable for view={view}."
+                )
+            print(f"Warning: CUDA requested for view={view} but unavailable; falling back to CPU.")
+            view_device = "cpu"
+        if require_cuda and view_device != "cuda":
+            raise RuntimeError(
+                f"MVF_REQUIRE_CUDA is set but view={view} resolved to device={view_device}."
+            )
+
         if spec["type"] == "sequence":
             view_assets[view] = _load_sequence_backbone(
                 encoder_cfg=encoder_cfg,
-                device=device,
+                device=view_device,
                 tokenizer_module=spec["tokenizer_module"],
                 tokenizer_class=spec["tokenizer_class"],
                 tokenizer_filename=spec["tokenizer_file"],
@@ -1876,8 +1889,10 @@ def main(args):
         else:
             view_assets[view] = _load_graph_backbone(
                 encoder_cfg=encoder_cfg,
-                device=device,
+                device=view_device,
             )
+        view_assets[view]["device"] = view_device
+        print(f"Loaded view={view} on device={view_device}")
 
     if not view_assets:
         raise RuntimeError("No valid views configured for property prediction.")
@@ -1945,6 +1960,7 @@ def main(args):
         for view, assets in view_assets.items():
             cache = view_embedding_cache[view]
             invalid = view_invalid_cache[view]
+            view_device = str(assets.get("device", training_device))
 
             unique_missing = []
             seen = set()
@@ -1968,11 +1984,11 @@ def main(args):
                         else:
                             invalid.add(smi)
                     if seq_inputs:
-                        new_emb = _embed_sequence(seq_inputs, assets, device)
+                        new_emb = _embed_sequence(seq_inputs, assets, view_device)
                         for i, smi in enumerate(seq_smiles):
                             cache[smi] = new_emb[i]
                 elif view == "graph":
-                    new_emb, valid_indices = _embed_graph(unique_missing, assets, device)
+                    new_emb, valid_indices = _embed_graph(unique_missing, assets, view_device)
                     valid_set = set(valid_indices)
                     emb_row = 0
                     for i, smi in enumerate(unique_missing):
@@ -1982,7 +1998,7 @@ def main(args):
                         else:
                             invalid.add(smi)
                 else:
-                    new_emb = _embed_sequence(unique_missing, assets, device)
+                    new_emb = _embed_sequence(unique_missing, assets, view_device)
                     for i, smi in enumerate(unique_missing):
                         cache[smi] = new_emb[i]
 
@@ -2026,14 +2042,14 @@ def main(args):
                 train_y=targets[train_indices],
                 hyper_cfg=mlp_hpo_cfg,
                 seed=_stable_seed(seed, f"{prop_name}:{view}"),
-                device=device,
+                device=training_device,
                 force_enable=args.tune,
             )
             model = model_bundle["model"]
             scaler = model_bundle["scaler"]
             rep = "Group_SELFIES" if view == "group_selfies" else "Graph" if view == "graph" else view.upper()
 
-            train_preds = _predict_torch_model(model, scaler, embeddings[train_rows], device=device)
+            train_preds = _predict_torch_model(model, scaler, embeddings[train_rows], device=training_device)
             train_metrics = _compute_metrics(targets[train_indices], train_preds)
             rows.append(
                 {
@@ -2064,7 +2080,7 @@ def main(args):
             rows_by_property.setdefault(prop_name, []).append(rows[-1])
 
             if test_rows:
-                test_preds = _predict_torch_model(model, scaler, embeddings[test_rows], device=device)
+                test_preds = _predict_torch_model(model, scaler, embeddings[test_rows], device=training_device)
                 test_metrics = _compute_metrics(targets[test_indices], test_preds)
             else:
                 test_metrics = {"mae": 0.0, "rmse": 0.0, "r2": 0.0}
@@ -2163,13 +2179,13 @@ def main(args):
                         train_y=targets[train_indices],
                         hyper_cfg=mlp_hpo_cfg,
                         seed=_stable_seed(seed, f"{prop_name}:multiview_mean"),
-                        device=device,
+                        device=training_device,
                         force_enable=args.tune,
                     )
                     model = model_bundle["model"]
                     scaler = model_bundle["scaler"]
 
-                    train_preds = _predict_torch_model(model, scaler, fused[train_rows], device=device)
+                    train_preds = _predict_torch_model(model, scaler, fused[train_rows], device=training_device)
                     train_metrics = _compute_metrics(targets[train_indices], train_preds)
                     rows.append(
                         {
@@ -2200,7 +2216,7 @@ def main(args):
                     rows_by_property.setdefault(prop_name, []).append(rows[-1])
 
                     if test_rows:
-                        test_preds = _predict_torch_model(model, scaler, fused[test_rows], device=device)
+                        test_preds = _predict_torch_model(model, scaler, fused[test_rows], device=training_device)
                         test_metrics = _compute_metrics(targets[test_indices], test_preds)
                     else:
                         test_metrics = {"mae": 0.0, "rmse": 0.0, "r2": 0.0}
