@@ -69,7 +69,16 @@ ood:
 
 # F3 property-head args
 property:
-  files: ["Tg.csv", "Tm.csv", "Td.csv", "Eg.csv"]
+  files: [
+    "Tg.csv",
+    "Tm.csv",
+    "Td.csv",
+    "Eg.csv",
+    "cohesive_energy_density.csv",
+    "electron_affinity.csv",
+    "electron_injection_barrier.csv",
+    "ionization_energy.csv",
+  ]
   max_samples: null
   train_ratio: 0.8
   val_ratio: 0.1
@@ -101,6 +110,28 @@ foundation_inverse:
     Tm: 300.0
     Td: 450.0
     Eg: 6.0
+    cohesive_energy_density: 126.66
+    electron_affinity: 3.10
+    electron_injection_barrier: 1.82
+    ionization_energy: 5.64
+  target_modes:
+    Tg: ge
+    Tm: ge
+    Td: ge
+    Eg: ge
+    cohesive_energy_density: ge
+    electron_affinity: ge
+    electron_injection_barrier: le
+    ionization_energy: le
+  epsilons:
+    Tg: 0.0
+    Tm: 0.0
+    Td: 0.0
+    Eg: 0.0
+    cohesive_energy_density: 0.0
+    electron_affinity: 0.0
+    electron_injection_barrier: 0.0
+    ionization_energy: 0.0
   target_mode: "ge"  # window: |pred-target|<=epsilon, ge: pred>=target, le: pred<=target
   epsilon: 0.0
   sampling_target: 100
@@ -169,7 +200,16 @@ ood_aware_inverse:
 # F7 chemistry/physics analysis args
 chem_physics_analysis:
   enabled: true
-  properties: ["Tg", "Tm", "Td", "Eg"]
+  properties: [
+    "Tg",
+    "Tm",
+    "Td",
+    "Eg",
+    "cohesive_energy_density",
+    "electron_affinity",
+    "electron_injection_barrier",
+    "ionization_energy",
+  ]
   # Optional path templates with {property}, e.g.:
   # "results/step5_foundation_inverse/files/candidate_scores_{property}.csv"
   candidate_scores_template: ""
@@ -187,6 +227,11 @@ chem_physics_analysis:
 paper_results:
   enabled: true
   output_dir: "paper_package"    # relative path resolves under results_dir
+  # Prefer explicit result directories to avoid mixing stale/partial runs.
+  # Leave empty to use only paths.results_dir.
+  results_dirs: []
+  # Optional broad auto-discovery of BASE_DIR/results* (guarded; default off).
+  auto_discover_results_dirs: ture
   include_large_csv: true        # include candidate_scores / full OOD score tables
   include_figures: true
   max_panels_per_figure: 6       # subfigures per composite figure: (a), (b), ...

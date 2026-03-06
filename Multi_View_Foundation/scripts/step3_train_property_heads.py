@@ -1078,7 +1078,11 @@ def _plot_f3_cross_view_summary(metrics_df: pd.DataFrame, figures_dir: Path) -> 
             if np.isfinite(rmse_val):
                 rmse_mat[pi, ri] = float(rmse_val)
 
-    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+    max_label_len = max(len(p) for p in properties)
+    label_rotation = 45 if max_label_len >= 14 else 30
+    fig_width = max(18.0, min(32.0, 12.0 + 0.9 * len(properties)))
+    fig_height = 12.0 if len(properties) <= 6 else 13.5
+    fig, axes = plt.subplots(2, 2, figsize=(fig_width, fig_height))
     ax0, ax1, ax2, ax3 = axes.reshape(-1)
     palette = [_representation_color(r) for r in reps]
     x = np.arange(len(properties), dtype=np.float32)
@@ -1091,7 +1095,7 @@ def _plot_f3_cross_view_summary(metrics_df: pd.DataFrame, figures_dir: Path) -> 
         vals = r2_mat[:, ri]
         bars = ax0.bar(x + offsets[ri], vals, width=width, color=color, alpha=0.88, label=rep)
     ax0.set_xticks(x)
-    ax0.set_xticklabels(properties, rotation=30, ha="right")
+    ax0.set_xticklabels(properties, rotation=label_rotation, ha="right")
     ax0.set_ylabel("Test R²")
     ax0.set_title("(A) Test R² per property per view")
     ax0.grid(axis="y", alpha=0.25)
@@ -1106,7 +1110,7 @@ def _plot_f3_cross_view_summary(metrics_df: pd.DataFrame, figures_dir: Path) -> 
         vals = rmse_mat[:, ri]
         ax1.bar(x + offsets[ri], vals, width=width, color=color, alpha=0.88, label=rep)
     ax1.set_xticks(x)
-    ax1.set_xticklabels(properties, rotation=30, ha="right")
+    ax1.set_xticklabels(properties, rotation=label_rotation, ha="right")
     ax1.set_ylabel("Test RMSE")
     ax1.set_title("(B) Test RMSE per property per view")
     ax1.grid(axis="y", alpha=0.25)

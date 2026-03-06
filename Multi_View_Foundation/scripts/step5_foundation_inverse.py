@@ -919,6 +919,77 @@ def _parse_property_names_from_files(values: Any) -> List[str]:
     return names
 
 
+def _lookup_property_config(mapping: Any, property_name: str):
+    if not isinstance(mapping, dict):
+        return None
+    prop = _normalize_property_name(property_name).lower()
+    for key, value in mapping.items():
+        if _normalize_property_name(key).lower() == prop:
+            return value
+    return None
+
+
+def _is_active_property_in_config(f5_cfg: dict, property_name: str) -> bool:
+    cfg_prop = _normalize_property_name(f5_cfg.get("property", ""))
+    arg_prop = _normalize_property_name(property_name)
+    return bool(cfg_prop and arg_prop and cfg_prop.lower() == arg_prop.lower())
+
+
+def _resolve_target_value(arg_target: Optional[float], property_name: str, f5_cfg: dict) -> float:
+    if arg_target is not None:
+        return float(arg_target)
+
+    value = _lookup_property_config(f5_cfg.get("targets", {}) or {}, property_name)
+    if value is not None:
+        return float(value)
+
+    if _is_active_property_in_config(f5_cfg, property_name):
+        scalar = f5_cfg.get("target")
+        if scalar is not None:
+            return float(scalar)
+
+    raise ValueError(
+        f"Missing target for property='{property_name}'. Provide --target, or set "
+        f"foundation_inverse.targets.{property_name} in config."
+    )
+
+
+def _resolve_target_mode(arg_target_mode: Optional[str], property_name: str, f5_cfg: dict) -> str:
+    mode = str(arg_target_mode).strip().lower() if arg_target_mode is not None else ""
+    if not mode:
+        value = _lookup_property_config(f5_cfg.get("target_modes", {}) or {}, property_name)
+        if value is not None:
+            mode = str(value).strip().lower()
+    if not mode and _is_active_property_in_config(f5_cfg, property_name):
+        value = f5_cfg.get("target_mode")
+        if value is not None:
+            mode = str(value).strip().lower()
+    if not mode:
+        mode = "window"
+    if mode not in {"window", "ge", "le"}:
+        raise ValueError(
+            f"Invalid target_mode='{mode}' for property='{property_name}'. "
+            "Supported values: window|ge|le."
+        )
+    return mode
+
+
+def _resolve_epsilon(arg_epsilon: Optional[float], property_name: str, f5_cfg: dict) -> float:
+    if arg_epsilon is not None:
+        return float(arg_epsilon)
+
+    value = _lookup_property_config(f5_cfg.get("epsilons", {}) or {}, property_name)
+    if value is not None:
+        return float(value)
+
+    if _is_active_property_in_config(f5_cfg, property_name):
+        scalar = f5_cfg.get("epsilon")
+        if scalar is not None:
+            return float(scalar)
+
+    return 30.0
+
+
 def _resolve_committee_properties(config: dict, target_property: str, override: Optional[str]) -> List[str]:
     f5_cfg = _f5_cfg(config)
     names: List[str] = []
@@ -2539,9 +2610,9 @@ def main(args):
             raise FileNotFoundError(f"Property model not found: {model_path}")
 
     model = _load_property_model(Path(model_path))
-    target_value = float(args.target)
-    epsilon = float(args.epsilon)
-    target_mode = str(args.target_mode).strip().lower()
+    target_value = _resolve_target_value(args.target, args.property, f5_cfg)
+    target_mode = _resolve_target_mode(args.target_mode, args.property, f5_cfg)
+    epsilon = _resolve_epsilon(args.epsilon, args.property, f5_cfg)
 
     train_smiles_path = _resolve_path(config["paths"]["polymer_file"])
     training_set = _load_training_smiles(train_smiles_path)
@@ -2996,9 +3067,9 @@ if __name__ == "__main__":
     parser.add_argument("--encoder_view", type=str, default=None, choices=list(SUPPORTED_VIEWS))
     parser.add_argument("--proposal_views", type=str, default=None, help="Comma list or 'all' for F5 proposal generation views.")
     parser.add_argument("--property", type=str, required=True)
-    parser.add_argument("--target", type=float, required=True)
-    parser.add_argument("--target_mode", type=str, default="window", choices=["window", "ge", "le"])
-    parser.add_argument("--epsilon", type=float, default=30.0)
+    parser.add_argument("--target", type=float, default=None)
+    parser.add_argument("--target_mode", type=str, default=None, choices=["window", "ge", "le"])
+    parser.add_argument("--epsilon", type=float, default=None)
     parser.add_argument("--sampling_target", type=int, default=None)
     parser.add_argument("--sampling_num_per_batch", type=int, default=None)
     parser.add_argument("--sampling_batch_size", type=int, default=None)

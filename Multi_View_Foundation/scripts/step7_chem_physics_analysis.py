@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """F7: Chemistry + physics analysis for OOD-aware inverse design results.
 
-This step summarizes science-facing evidence across properties (Tg/Tm/Td/Eg):
+This step summarizes science-facing evidence across configured properties:
 - descriptor shifts (reference vs F5 candidates vs F6 top-k)
 - polymer motif enrichment
 - physics-consistency checks from predefined heuristic rules
@@ -50,7 +50,16 @@ except Exception:  # pragma: no cover
     rdMolDescriptors = None
 
 
-DEFAULT_PROPERTIES = ["Tg", "Tm", "Td", "Eg"]
+DEFAULT_PROPERTIES = [
+    "Tg",
+    "Tm",
+    "Td",
+    "Eg",
+    "cohesive_energy_density",
+    "electron_affinity",
+    "electron_injection_barrier",
+    "ionization_energy",
+]
 
 DESCRIPTOR_COLUMNS = [
     "mol_wt",
@@ -83,8 +92,9 @@ POLYMER_MOTIF_SMARTS = {
     "polystyrene": "c1ccccc1",
 }
 
-# Heuristic direction: +1 means higher in top-k is more physics-consistent,
-# -1 means lower in top-k is more physics-consistent.
+# Heuristic direction is defined for the property value itself:
+# +1 means the feature tends to increase the property, -1 means decrease.
+# For target_mode='le' objectives, the expected sign is flipped automatically.
 PHYSICS_RULES = {
     "Tg": [
         ("aromatic_ring_count", +1, "Higher chain rigidity tends to increase Tg."),
@@ -110,6 +120,28 @@ PHYSICS_RULES = {
         ("fraction_csp3", +1, "Less conjugated/aliphatic character can increase Eg."),
         ("ring_count", -1, "Extensive aromatic cyclic systems can reduce Eg."),
         ("polystyrene", -1, "Aromatic-rich motifs may correspond to lower Eg."),
+    ],
+    "cohesive_energy_density": [
+        ("aromatic_ring_count", +1, "Aromatic packing interactions can increase cohesive energy density."),
+        ("ring_count", +1, "Rigid cyclic units can improve chain packing and intermolecular cohesion."),
+        ("tpsa", +1, "Higher polarity can strengthen intermolecular attraction."),
+        ("rotatable_bonds", -1, "Reduced flexibility can support denser packing."),
+    ],
+    "electron_affinity": [
+        ("aromatic_ring_count", +1, "Conjugated aromatic systems can stabilize an added electron."),
+        ("hetero_atom_fraction", +1, "Hetero atoms can increase electron-withdrawing character."),
+        ("fraction_csp3", -1, "Higher saturation generally weakens electron-accepting character."),
+        ("tpsa", +1, "Polar functionality can correlate with stronger electron-acceptor behavior."),
+    ],
+    "electron_injection_barrier": [
+        ("aromatic_ring_count", -1, "Greater conjugation can reduce electron injection barriers."),
+        ("fraction_csp3", +1, "More saturated backbones can increase injection barriers."),
+        ("hetero_atom_fraction", -1, "Electron-withdrawing hetero atoms can lower injection barriers."),
+    ],
+    "ionization_energy": [
+        ("aromatic_ring_count", -1, "Extended conjugation can reduce ionization energy."),
+        ("fraction_csp3", +1, "More saturated backbones can increase ionization energy."),
+        ("hetero_atom_fraction", +1, "Polar/hetero-atom-rich motifs can increase ionization energy."),
     ],
 }
 
@@ -216,7 +248,25 @@ def _parse_properties(args, cfg: dict) -> List[str]:
         props = [str(x).strip() for x in raw if str(x).strip()]
     if not props:
         return list(DEFAULT_PROPERTIES)
-    return props
+    names = []
+    for prop in props:
+        name = _normalize_property_name(prop)
+        if name and name not in names:
+            names.append(name)
+    return names or list(DEFAULT_PROPERTIES)
+
+
+def _lookup_property_setting(mapping: dict, property_name: str):
+    if not isinstance(mapping, dict):
+        return None
+    key = _normalize_property_name(property_name)
+    if key in mapping:
+        return mapping[key]
+    target = key.lower()
+    for k, v in mapping.items():
+        if _normalize_property_name(k).lower() == target:
+            return v
+    return None
 
 
 def _safe_mkdir(path: Path) -> None:
@@ -575,9 +625,12 @@ def _physics_consistency_table(
     property_name: str,
     descriptor_shift_df: pd.DataFrame,
     motif_enrich_df: pd.DataFrame,
+    target_mode: str = "window",
 ) -> pd.DataFrame:
     rules = PHYSICS_RULES.get(property_name, [])
     rows = []
+    mode = str(target_mode).strip().lower()
+    direction_multiplier = -1 if mode == "le" else 1
     for feature, expected, rationale in rules:
         if feature in set(descriptor_shift_df["descriptor"].astype(str)):
             row = descriptor_shift_df[descriptor_shift_df["descriptor"] == feature].iloc[0]
@@ -590,13 +643,16 @@ def _physics_consistency_table(
         else:
             observed = np.nan
             source = "missing"
-        sign_match = bool(observed * expected > 0) if np.isfinite(observed) else False
+        expected_for_objective = int(expected) * int(direction_multiplier)
+        sign_match = bool(observed * expected_for_objective > 0) if np.isfinite(observed) else False
         rows.append(
             {
                 "property": property_name,
                 "feature": feature,
                 "source": source,
-                "expected_direction": int(expected),
+                "target_mode": mode,
+                "expected_direction_property": int(expected),
+                "expected_direction": int(expected_for_objective),
                 "observed_delta_topk_vs_ref": observed,
                 "sign_match": sign_match,
                 "rationale": rationale,
@@ -734,18 +790,32 @@ def _resolve_target_config(
     target_modes = cfg_step7.get("target_modes", {}) or {}
     epsilons = cfg_step7.get("epsilons", {}) or {}
 
-    target = _to_float_or_none(targets.get(property_name))
-    if target is None and str(cfg_f5.get("property", "")).strip() == property_name:
+    prop_name = _normalize_property_name(property_name)
+    prop_name_lower = prop_name.lower()
+    f5_property = _normalize_property_name(cfg_f5.get("property", ""))
+    f5_property_is_active = f5_property.lower() == prop_name_lower
+
+    target = _to_float_or_none(_lookup_property_setting(targets, prop_name))
+    if target is None:
+        target = _to_float_or_none(_lookup_property_setting(cfg_f5.get("targets", {}) or {}, prop_name))
+    if target is None and f5_property_is_active:
         target = _to_float_or_none(cfg_f5.get("target"))
 
-    target_mode = str(target_modes.get(property_name, "")).strip()
-    if not target_mode and str(cfg_f5.get("property", "")).strip() == property_name:
+    target_mode = str(_lookup_property_setting(target_modes, prop_name) or "").strip()
+    if not target_mode:
+        target_mode = str(_lookup_property_setting(cfg_f5.get("target_modes", {}) or {}, prop_name) or "").strip()
+    if not target_mode and f5_property_is_active:
         target_mode = str(cfg_f5.get("target_mode", "window")).strip()
     if not target_mode:
         target_mode = "window"
+    target_mode = target_mode.lower()
+    if target_mode not in {"window", "ge", "le"}:
+        target_mode = "window"
 
-    epsilon = _to_float_or_none(epsilons.get(property_name))
-    if epsilon is None and str(cfg_f5.get("property", "")).strip() == property_name:
+    epsilon = _to_float_or_none(_lookup_property_setting(epsilons, prop_name))
+    if epsilon is None:
+        epsilon = _to_float_or_none(_lookup_property_setting(cfg_f5.get("epsilons", {}) or {}, prop_name))
+    if epsilon is None and f5_property_is_active:
         epsilon = _to_float_or_none(cfg_f5.get("epsilon"))
     return target, target_mode, epsilon
 
@@ -1557,7 +1627,7 @@ def main(args):
 
         shift_df = _descriptor_shift_table(prop, ref_desc_used, cand_desc, top_desc)
         motif_df = _motif_enrichment_table(prop, ref_desc_used, cand_desc, top_desc)
-        physics_df = _physics_consistency_table(prop, shift_df, motif_df)
+        physics_df = _physics_consistency_table(prop, shift_df, motif_df, target_mode=target_mode)
         nn_df = _nearest_neighbor_explanations(prop, ref_df_used, topk_df, ref_desc_used, top_desc)
 
         all_descriptor_shift.append(shift_df)

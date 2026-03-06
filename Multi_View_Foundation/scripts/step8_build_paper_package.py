@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -55,6 +56,17 @@ FIGURE_FALLBACK_ORDER = [
 ]
 
 MODEL_SIZE_ORDER = ["small", "medium", "large", "xl", "base", "unknown"]
+STEP_LEAF_DIR_NAMES = {"files", "metrics", "figures"}
+PROPERTY_PRIORITY = [
+    "Tg",
+    "Tm",
+    "Td",
+    "Eg",
+    "cohesive_energy_density",
+    "electron_affinity",
+    "electron_injection_barrier",
+    "ionization_energy",
+]
 STEP2_METRIC_COLUMNS = ["step2_validity", "step2_uniqueness", "step2_novelty", "step2_diversity"]
 METHOD_PLOT_COLORS = {
     "Bi_Diffusion_SMILES": "#2563EB",
@@ -67,9 +79,9 @@ METHOD_PLOT_COLORS = {
 MANUSCRIPT_CAPTIONS = [
     "Figure 1. Generation quality of five bidirectional diffusion models across molecular representation types. (a) Valid polymer fraction for each representation at the best-performing model size. (b) Unique fraction among valid generated polymers, reflecting generation diversity. (c) Validity-uniqueness trade-off colored by novelty.",
     "Figure 2. Cross-view molecular alignment in the multi-view foundation model. (a) Recall@1 heatmap: fraction of queries for which the correct paired molecule ranks first under cosine similarity. (b) Recall@10 heatmap: fraction of correct pairs recovered within the top-10 retrieved candidates.",
-    "Figure 3. Property prediction with multi-view foundation embeddings across model scales. (a) Test-set R^2 versus model size for Tg, Tm, Td, and Eg, comparing the best baseline representation and the best MVF/fusion representation at each size. (b) Fusion gain in R^2 across model sizes.",
+    "Figure 3. Property prediction with multi-view foundation embeddings across model scales. (a) Test-set R^2 versus model size across configured target properties, comparing the best baseline representation and the best MVF/fusion representation at each size. (b) Fusion gain in R^2 across model sizes.",
     "Figure 4. Out-of-distribution (OOD) shift analysis across model scales. (a) Mean distance between training-set (D1) and target-domain (D2) polymer embeddings as a function of model size for baseline and MVF. (b) Fraction of generated polymers within the D2 neighborhood across model sizes.",
-    "Figure 5. Multi-view foundation model-guided inverse polymer design across model scales. (a) Inverse-design success rate versus model size for Tg, Tm, Td, and Eg, comparing baseline and MVF reranking. (b) Absolute success-rate improvement from MVF reranking across model sizes.",
+    "Figure 5. Multi-view foundation model-guided inverse polymer design across model scales. (a) Inverse-design success rate versus model size across configured target properties, comparing baseline and MVF reranking. (b) Absolute success-rate improvement from MVF reranking across model sizes.",
     "Figure 6. Chemistry and physics analysis of inversely designed polymers. (a) Normalized descriptor shifts of accepted candidates relative to the D1 reference set for key physicochemical features and each target property. (b) Motif enrichment ratios for discriminative polymer substructures in accepted candidates compared to the reference distribution.",
 ]
 
@@ -200,6 +212,83 @@ def _collect_glob_unique(source_dirs: Iterable[Path], patterns: Iterable[str]) -
     return collected
 
 
+def _iter_property_scoped_dirs(step_root: Path) -> list[Path]:
+    if not step_root.exists() or not step_root.is_dir():
+        return []
+    out: list[Path] = []
+    for p in sorted(step_root.iterdir()):
+        if not p.is_dir():
+            continue
+        if p.name.lower() in STEP_LEAF_DIR_NAMES:
+            continue
+        if p.name.startswith("."):
+            continue
+        out.append(p)
+    return out
+
+
+def _collect_step_artifact_dirs(
+    *,
+    mvf_results_dir: Path,
+    step_subdir: str,
+    include_property_scopes: bool = False,
+    include_root_when_property_scopes: bool = False,
+) -> list[Path]:
+    step_root = mvf_results_dir / step_subdir
+    dirs: list[Path] = []
+    property_scopes = _iter_property_scoped_dirs(step_root) if include_property_scopes else []
+    if property_scopes:
+        for prop_dir in property_scopes:
+            dirs.extend(_existing_dirs([prop_dir / "files", prop_dir]))
+        if include_root_when_property_scopes:
+            dirs.extend(_existing_dirs([step_root / "files", step_root]))
+    else:
+        dirs.extend(_existing_dirs([step_root / "files", step_root]))
+    return dirs
+
+
+def _load_step_scope_csv(scope_dir: Path, filename: str) -> pd.DataFrame:
+    candidates = [
+        scope_dir / "metrics" / filename,
+        scope_dir / "files" / filename,
+        scope_dir / filename,
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
+def _tag_mvf_frame(df: pd.DataFrame, res_dir: Path, property_hint: Optional[str] = None) -> pd.DataFrame:
+    tagged = df.copy()
+    inferred = _normalize_model_size(_infer_model_size_from_results_dir(res_dir))
+    if "model_size" in tagged.columns:
+        tagged["model_size"] = tagged["model_size"].apply(_normalize_model_size)
+        tagged.loc[tagged["model_size"].isin(["", "unknown", "nan", "none"]), "model_size"] = inferred
+    else:
+        tagged["model_size"] = inferred
+    tagged["source_results_dir"] = res_dir.name
+
+    prop_hint = _normalize_property_name(property_hint) if property_hint is not None else ""
+    if prop_hint:
+        if "property" not in tagged.columns:
+            tagged["property"] = prop_hint
+        else:
+            prop_series = tagged["property"].astype(str).str.strip()
+            missing_mask = (
+                tagged["property"].isna()
+                | prop_series.eq("")
+                | prop_series.str.lower().isin({"nan", "none", "null"})
+            )
+            tagged.loc[missing_mask, "property"] = prop_hint
+        tagged["source_property_scope"] = prop_hint
+    return tagged
+
+
 def _read_json(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -305,6 +394,28 @@ def _configured_properties(config: dict) -> list[str]:
     return props
 
 
+def _ordered_properties(values: Iterable[object]) -> list[str]:
+    """Return stable property ordering with configured priority first."""
+    by_lower: dict[str, str] = {}
+    for raw in values:
+        text = str(raw).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key not in by_lower:
+            by_lower[key] = text
+
+    ordered: list[str] = []
+    for prop in PROPERTY_PRIORITY:
+        key = prop.lower()
+        if key in by_lower:
+            ordered.append(by_lower.pop(key))
+
+    for key in sorted(by_lower):
+        ordered.append(by_lower[key])
+    return ordered
+
+
 def _discover_properties(
     config: dict,
     step5_dirs: list[Path],
@@ -394,15 +505,62 @@ def _unique_paths(paths: Sequence[Path]) -> list[Path]:
     return out
 
 
-def _discover_mvf_results_dirs(primary_results_dir: Path) -> list[Path]:
+def _parse_results_dirs(value) -> list[Path]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        tokens = [v.strip() for v in value.split(",") if v.strip()]
+        return [_resolve_path(token) for token in tokens]
+    if isinstance(value, (list, tuple, set)):
+        paths: list[Path] = []
+        for v in value:
+            token = str(v).strip()
+            if not token:
+                continue
+            paths.append(_resolve_path(token))
+        return paths
+    return []
+
+
+def _has_mvf_step_artifacts(results_dir: Path) -> bool:
+    for step in [
+        "step1_alignment_embeddings",
+        "step2_retrieval",
+        "step3_property",
+        "step4_ood",
+        "step5_foundation_inverse",
+        "step6_ood_aware_inverse",
+        "step7_chem_physics_analysis",
+    ]:
+        step_dir = results_dir / step
+        if not step_dir.exists() or not step_dir.is_dir():
+            continue
+        if any((step_dir / leaf).exists() for leaf in STEP_LEAF_DIR_NAMES):
+            return True
+        if any(step_dir.glob("*.csv")):
+            return True
+    return False
+
+
+def _discover_mvf_results_dirs(
+    primary_results_dir: Path,
+    *,
+    explicit_results_dirs: Sequence[Path],
+    auto_discover: bool,
+) -> list[Path]:
     candidates: list[Path] = [primary_results_dir]
-    for p in sorted(BASE_DIR.glob("results*")):
-        if not p.is_dir():
-            continue
-        name = p.name.lower()
-        if "paper_package" in name:
-            continue
-        candidates.append(p)
+    candidates.extend(explicit_results_dirs)
+
+    if auto_discover:
+        for p in sorted(BASE_DIR.glob("results*")):
+            if not p.is_dir():
+                continue
+            name = p.name.lower()
+            if "paper_package" in name:
+                continue
+            if not _has_mvf_step_artifacts(p):
+                continue
+            candidates.append(p)
 
     dirs = _unique_paths(candidates)
     if not dirs:
@@ -558,11 +716,17 @@ def _collect_source_panels(
     for method_name in (method_dirs or list(DEFAULT_METHOD_DIRS)):
         method_root = _resolve_repo_path(method_name)
         for res_dir in _iter_method_results_dirs(method_root):
-            fig_dir = res_dir / "step0_data_prep" / "figures"
-            if not fig_dir.exists():
-                continue
-            for png in sorted(fig_dir.glob("*.png")):
-                add("base_step0", png)
+            step0_fig_dir = res_dir / "step0_data_prep" / "figures"
+            if step0_fig_dir.exists():
+                for png in sorted(step0_fig_dir.glob("*.png")):
+                    add("base_step0", png)
+
+            for step12_name in ["step1_backbone", "step2_sampling"]:
+                fig_dir = res_dir / step12_name / "figures"
+                if not fig_dir.exists():
+                    continue
+                for png in sorted(fig_dir.glob("*.png")):
+                    add("base_step12", png)
 
     aggregate_root = REPO_ROOT / "results"
     if aggregate_root.exists():
@@ -824,6 +988,79 @@ def _copy_tree_files(
         )
 
 
+def _property_from_suffixed_filename(filename: str) -> str:
+    m = re.match(
+        r"^(?:candidate_scores|accepted_candidates|accepted_polymer_report|accepted_polymer_summary|"
+        r"ood_objective_scores|ood_objective_topk|metrics_inverse_ood_objective|"
+        r"descriptor_shifts|motif_enrichment|physics_consistency|nearest_neighbor_explanations|"
+        r"property_input_files|run_meta)_(.+)\.(?:csv|json)$",
+        filename,
+    )
+    if not m:
+        return ""
+    return _normalize_property_name(m.group(1))
+
+
+def _extract_property_scope_from_path(path: Path) -> str:
+    parts = list(path.parts)
+    for step_name in [
+        "step5_foundation_inverse",
+        "step6_ood_aware_inverse",
+        "step7_chem_physics_analysis",
+    ]:
+        if step_name not in parts:
+            continue
+        idx = parts.index(step_name)
+        if idx + 1 >= len(parts):
+            continue
+        candidate = parts[idx + 1]
+        if candidate.lower() in STEP_LEAF_DIR_NAMES:
+            continue
+        prop = _normalize_property_name(candidate)
+        if prop:
+            return prop
+    return _property_from_suffixed_filename(path.name)
+
+
+def _stable_hashed_copy_name(path: Path, *, root: Path, default_stem: str = "artifact") -> str:
+    rel = _safe_rel(path, root).replace("\\", "/")
+    digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:12]
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", path.stem).strip("._")
+    if not stem:
+        stem = default_stem
+    stem = stem[:90]
+    suffix = path.suffix.lower() if path.suffix else ".bin"
+    return f"{stem}__{digest}{suffix}"
+
+
+def _supplementary_dst_name(path: Path, size_tag: str) -> Path:
+    property_scope = _extract_property_scope_from_path(path) or "global"
+    safe_scope = re.sub(r"[^A-Za-z0-9._-]+", "_", property_scope).strip("._") or "global"
+    hashed = _stable_hashed_copy_name(path, root=REPO_ROOT, default_stem="supp")
+    return Path(f"{size_tag}__{safe_scope}__{hashed}")
+
+
+def _collapse_copied_artifacts(copied: Sequence[dict]) -> list[dict]:
+    grouped: dict[tuple[str, str], dict] = {}
+    for item in copied:
+        category = str(item.get("category", ""))
+        source = str(item.get("source", ""))
+        destination = str(item.get("destination", ""))
+        key = (category, source)
+        if key not in grouped:
+            grouped[key] = {
+                "category": category,
+                "source": source,
+                "destinations": [],
+            }
+        if destination and destination not in grouped[key]["destinations"]:
+            grouped[key]["destinations"].append(destination)
+
+    collapsed = list(grouped.values())
+    collapsed.sort(key=lambda row: (str(row.get("category", "")), str(row.get("source", ""))))
+    return collapsed
+
+
 def _parse_method_dirs(value) -> list[str]:
     if value is None:
         return list(DEFAULT_METHOD_DIRS)
@@ -941,21 +1178,66 @@ def _load_mvf_csv(results_dir: Path, step_subdir: str, filename: str) -> pd.Data
     return pd.DataFrame()
 
 
-def _load_mvf_csv_multi(results_dirs: Sequence[Path], step_subdir: str, filename: str) -> pd.DataFrame:
+def _load_mvf_csv_multi(
+    results_dirs: Sequence[Path],
+    step_subdir: str,
+    filename: str,
+    *,
+    include_property_scopes: bool = False,
+    suffixed_filename_regex: Optional[str] = None,
+) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
+    suffixed_pattern = re.compile(suffixed_filename_regex) if suffixed_filename_regex else None
+
     for res_dir in _unique_paths(list(results_dirs)):
+        step_root = res_dir / step_subdir
+        property_scopes = _iter_property_scoped_dirs(step_root) if include_property_scopes else []
+        scope_dirs: list[Path] = property_scopes if property_scopes else [step_root]
+        loaded_for_res_dir = False
+
+        for scope_dir in scope_dirs:
+            df = _load_step_scope_csv(scope_dir, filename)
+            if df is None or df.empty:
+                continue
+            prop_hint = scope_dir.name if scope_dir != step_root else None
+            frames.append(_tag_mvf_frame(df, res_dir, property_hint=prop_hint))
+            loaded_for_res_dir = True
+
+        if loaded_for_res_dir:
+            continue
+
+        if include_property_scopes and suffixed_pattern is not None and step_root.exists():
+            seen_suffix_paths: set[str] = set()
+            for search_dir in [step_root / "metrics", step_root / "files", step_root]:
+                if not search_dir.exists() or not search_dir.is_dir():
+                    continue
+                for path in sorted(search_dir.glob("*.csv")):
+                    key = str(path.resolve())
+                    if key in seen_suffix_paths:
+                        continue
+                    seen_suffix_paths.add(key)
+                    m = suffixed_pattern.match(path.name)
+                    if not m:
+                        continue
+                    prop_hint = _normalize_property_name(m.group(1))
+                    try:
+                        df = pd.read_csv(path)
+                    except Exception:
+                        continue
+                    if df.empty:
+                        continue
+                    frames.append(_tag_mvf_frame(df, res_dir, property_hint=prop_hint))
+                    loaded_for_res_dir = True
+
+        if loaded_for_res_dir:
+            continue
+
+        # Legacy fallback: non-property-scoped file locations.
         df = _load_mvf_csv(res_dir, step_subdir, filename)
         if df is None or df.empty:
             continue
-        tagged = df.copy()
-        inferred = _normalize_model_size(_infer_model_size_from_results_dir(res_dir))
-        if "model_size" in tagged.columns:
-            tagged["model_size"] = tagged["model_size"].apply(_normalize_model_size)
-            tagged.loc[tagged["model_size"].isin(["", "unknown", "nan", "none"]), "model_size"] = inferred
-        else:
-            tagged["model_size"] = inferred
-        tagged["source_results_dir"] = res_dir.name
-        frames.append(tagged)
+        frames.append(_tag_mvf_frame(df, res_dir))
+
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -1650,10 +1932,7 @@ def _fig3_property_prediction(
     if not size_order:
         size_order = ["unknown"]
 
-    prop_order = [p for p in ["Tg", "Tm", "Td", "Eg"] if p in set(data["property"])]
-    for p in sorted(set(data["property"])):
-        if p not in prop_order:
-            prop_order.append(p)
+    prop_order = _ordered_properties(data["property"].tolist())
 
     agg = data.groupby(["property", "model_size", "representation_label", "source_name"], as_index=False)["r2"].mean(numeric_only=True)
     if agg.empty:
@@ -1822,7 +2101,7 @@ def _fig4_ood_analysis(
 
     data = pd.concat(frames, ignore_index=True)
     data = data.groupby(["source_name", "model_size"], as_index=False)[["dist", "frac"]].mean(numeric_only=True)
-    data = data.dropna(subset=["model_size", "dist", "frac"], how="all")
+    data = data.dropna(subset=["dist", "frac"], how="all")
     if data.empty:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
@@ -1844,7 +2123,7 @@ def _fig4_ood_analysis(
         if sub.empty:
             continue
         sub["x"] = sub["model_size"].map(size_to_x)
-        sub = sub.dropna(subset=["x"]).sort_values("x")
+        sub = sub.dropna(subset=["x", "dist"]).sort_values("x")
         if sub.empty:
             continue
         label = "Baseline" if source == "baseline" else "MVF"
@@ -1874,7 +2153,7 @@ def _fig4_ood_analysis(
         if sub.empty:
             continue
         sub["x"] = sub["model_size"].map(size_to_x)
-        sub = sub.dropna(subset=["x"]).sort_values("x")
+        sub = sub.dropna(subset=["x", "frac"]).sort_values("x")
         if sub.empty:
             continue
         label = "Baseline" if source == "baseline" else "MVF"
@@ -1961,10 +2240,7 @@ def _fig5_inverse_design(
         size_order = ["unknown"]
     size_to_x = {s: i for i, s in enumerate(size_order)}
 
-    prop_order = [p for p in ["Tg", "Tm", "Td", "Eg"] if p in set(data["property"])]
-    for p in sorted(set(data["property"])):
-        if p not in prop_order:
-            prop_order.append(p)
+    prop_order = _ordered_properties(data["property"].tolist())
 
     rows: list[dict[str, object]] = []
     for prop in prop_order:
@@ -2120,7 +2396,16 @@ def _fig6_chem_physics(
     if not has_desc and not has_motif:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
-    fig, axes = plt.subplots(1, 2, figsize=(15.8, 6.3), squeeze=False)
+    layout_properties: list[str] = []
+    if has_desc and prop_col in desc.columns:
+        layout_properties = _ordered_properties(desc[prop_col].dropna().astype(str).str.strip().tolist())
+    max_prop_label_len = max([len(p) for p in layout_properties], default=12)
+    prop_count = max(1, len(layout_properties))
+    fig_width = max(15.8, 14.0 + 0.10 * max_prop_label_len)
+    fig_height = max(6.8, 5.2 + 0.45 * prop_count)
+    left_margin = min(0.36, 0.14 + 0.006 * max_prop_label_len)
+
+    fig, axes = plt.subplots(1, 2, figsize=(fig_width, fig_height), squeeze=False)
     ax0, ax1 = axes[0]
 
     if has_desc:
@@ -2141,9 +2426,7 @@ def _fig6_chem_physics(
                 .index.tolist()
             )
             d = d[d["descriptor"].isin(top_desc)]
-            prop_order = [p for p in ["Tg", "Tm", "Td", "Eg"] if p in set(d["property"])] + [
-                p for p in sorted(set(d["property"])) if p not in {"Tg", "Tm", "Td", "Eg"}
-            ]
+            prop_order = _ordered_properties(d["property"].tolist())
             mat_df = d.pivot_table(index="property", columns="descriptor", values="value", aggfunc="mean")
             mat_df = mat_df.reindex(index=prop_order, columns=top_desc)
             mat = mat_df.to_numpy(dtype=float)
@@ -2209,7 +2492,7 @@ def _fig6_chem_physics(
         ax1.set_yticks([])
     _panel_mark(ax1, "(b)", font_size)
 
-    fig.tight_layout()
+    fig.subplots_adjust(left=left_margin, right=0.985, bottom=0.22, top=0.94, wspace=0.34)
     return _save_plot_figure(fig, output_path, dpi), caption
 
 
@@ -2261,7 +2544,13 @@ def main(args):
     else:
         results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
-    mvf_results_dirs = _discover_mvf_results_dirs(results_dir)
+    explicit_results_dirs = _parse_results_dirs(paper_cfg.get("results_dirs"))
+    auto_discover_results_dirs = _to_bool(paper_cfg.get("auto_discover_results_dirs", False), False)
+    mvf_results_dirs = _discover_mvf_results_dirs(
+        results_dir,
+        explicit_results_dirs=explicit_results_dirs,
+        auto_discover=auto_discover_results_dirs,
+    )
 
     cfg_output = str(paper_cfg.get("output_dir", "")).strip()
     if args.output_dir:
@@ -2394,7 +2683,15 @@ def main(args):
     step_metric_sources: dict[str, Optional[Path]] = {}
     for step_id, step_name, step_subdir, filename, out_name in step_metric_map:
         main_dst = tables_main_dir / out_name
-        df_step = _load_mvf_csv_multi(mvf_results_dirs, step_subdir, filename)
+        include_property_scopes = step_id in {"F5", "F6", "F7"}
+        suffix_regex = r"^metrics_inverse_ood_objective_(.+)\.csv$" if step_id == "F6" else None
+        df_step = _load_mvf_csv_multi(
+            mvf_results_dirs,
+            step_subdir,
+            filename,
+            include_property_scopes=include_property_scopes,
+            suffixed_filename_regex=suffix_regex,
+        )
         if df_step.empty:
             missing.append({"category": "table_main", "name": out_name})
             step_metric_sources[step_id] = None
@@ -2446,27 +2743,27 @@ def main(args):
     step7_files_dirs: list[Path] = []
     for mvf_dir in mvf_results_dirs:
         step5_dirs.extend(
-            _existing_dirs(
-                [
-                    mvf_dir / "step5_foundation_inverse" / "files",
-                    mvf_dir / "step5_foundation_inverse",
-                ]
+            _collect_step_artifact_dirs(
+                mvf_results_dir=mvf_dir,
+                step_subdir="step5_foundation_inverse",
+                include_property_scopes=True,
+                include_root_when_property_scopes=False,
             )
         )
         step6_dirs.extend(
-            _existing_dirs(
-                [
-                    mvf_dir / "step6_ood_aware_inverse" / "files",
-                    mvf_dir / "step6_ood_aware_inverse",
-                ]
+            _collect_step_artifact_dirs(
+                mvf_results_dir=mvf_dir,
+                step_subdir="step6_ood_aware_inverse",
+                include_property_scopes=True,
+                include_root_when_property_scopes=False,
             )
         )
         step7_files_dirs.extend(
-            _existing_dirs(
-                [
-                    mvf_dir / "step7_chem_physics_analysis" / "files",
-                    mvf_dir / "step7_chem_physics_analysis",
-                ]
+            _collect_step_artifact_dirs(
+                mvf_results_dir=mvf_dir,
+                step_subdir="step7_chem_physics_analysis",
+                include_property_scopes=True,
+                include_root_when_property_scopes=True,
             )
         )
     step5_dirs = _unique_paths(step5_dirs)
@@ -2488,7 +2785,7 @@ def main(args):
         return "unknown"
 
     for src in _collect_glob_unique(step5_dirs, f5_patterns):
-        rel_dst = Path(f"{_size_tag_for(src)}__{src.name}")
+        rel_dst = _supplementary_dst_name(src, _size_tag_for(src))
         _copy_file(
             src,
             tables_supp_dir / rel_dst,
@@ -2507,7 +2804,7 @@ def main(args):
         )
 
     for src in _collect_glob_unique(step6_dirs, f6_patterns):
-        rel_dst = Path(f"{_size_tag_for(src)}__{src.name}")
+        rel_dst = _supplementary_dst_name(src, _size_tag_for(src))
         _copy_file(
             src,
             tables_supp_dir / rel_dst,
@@ -2535,7 +2832,7 @@ def main(args):
             "property_input_files.csv",
         ],
     ):
-        rel_dst = Path(f"{_size_tag_for(src)}__{src.name}")
+        rel_dst = _supplementary_dst_name(src, _size_tag_for(src))
         _copy_file(
             src,
             tables_supp_dir / rel_dst,
@@ -2701,9 +2998,24 @@ def main(args):
             df_mvf_alignment = _load_mvf_csv_multi(mvf_results_dirs, "step2_retrieval", "metrics_alignment.csv")
             df_mvf_property = _load_mvf_csv_multi(mvf_results_dirs, "step3_property", "metrics_property.csv")
             df_mvf_ood = _load_mvf_csv_multi(mvf_results_dirs, "step4_ood", "metrics_ood.csv")
-            df_mvf_inverse = _load_mvf_csv_multi(mvf_results_dirs, "step5_foundation_inverse", "metrics_inverse.csv")
-            df_mvf_desc = _load_mvf_csv_multi(mvf_results_dirs, "step7_chem_physics_analysis", "descriptor_shifts.csv")
-            df_mvf_motif = _load_mvf_csv_multi(mvf_results_dirs, "step7_chem_physics_analysis", "motif_enrichment.csv")
+            df_mvf_inverse = _load_mvf_csv_multi(
+                mvf_results_dirs,
+                "step5_foundation_inverse",
+                "metrics_inverse.csv",
+                include_property_scopes=True,
+            )
+            df_mvf_desc = _load_mvf_csv_multi(
+                mvf_results_dirs,
+                "step7_chem_physics_analysis",
+                "descriptor_shifts.csv",
+                include_property_scopes=True,
+            )
+            df_mvf_motif = _load_mvf_csv_multi(
+                mvf_results_dirs,
+                "step7_chem_physics_analysis",
+                "motif_enrichment.csv",
+                include_property_scopes=True,
+            )
 
             manuscript_specs = [
                 {
@@ -2798,8 +3110,15 @@ def main(args):
             source_panels_dir = si_figures_dir / "source_panels"
             source_panels_dir.mkdir(parents=True, exist_ok=True)
             for panel in all_panels:
-                rel = _safe_rel(panel, REPO_ROOT).replace("/", "__")
-                dst = source_panels_dir / rel
+                dst_name = _stable_hashed_copy_name(panel, root=REPO_ROOT, default_stem="panel")
+                dst = source_panels_dir / dst_name
+                if dst.exists():
+                    counter = 2
+                    stem = Path(dst_name).stem
+                    suffix = Path(dst_name).suffix
+                    while dst.exists():
+                        dst = source_panels_dir / f"{stem}_{counter}{suffix}"
+                        counter += 1
                 _copy_file(
                     panel,
                     dst,
@@ -2911,7 +3230,7 @@ def main(args):
         step5_dirs + step6_dirs + step7_files_dirs,
         ["run_meta*.json"],
     ):
-        dst_name = f"{_size_tag_for(src)}__{src.name}"
+        dst_name = str(_supplementary_dst_name(src, _size_tag_for(src)))
         _copy_file(
             src,
             run_meta_dir / dst_name,
@@ -2920,6 +3239,8 @@ def main(args):
             results_dir=results_dir,
             output_dir=output_dir,
         )
+
+    copied_summary = _collapse_copied_artifacts(copied)
 
     manifest_payload = {
         "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2939,7 +3260,10 @@ def main(args):
         "generated_manuscript_figures": generated_manuscript_figures,
         "generated_supporting_information_figures": generated_si_figures,
         "steps": step_rows,
-        "copied_artifacts": copied,
+        "copied_artifacts": copied_summary,
+        "copy_operations": copied,
+        "copied_artifact_count": len(copied_summary),
+        "copy_operation_count": len(copied),
         "missing_artifacts": missing,
     }
 
