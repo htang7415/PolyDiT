@@ -80,13 +80,13 @@ property:
     "ionization_energy.csv",
   ]
   max_samples: null
-  train_ratio: 0.8
-  val_ratio: 0.1
-  test_ratio: 0.1
+  test_ratio: 0.1            # 10% holdout; remaining 90% used for CV and final training
   model_type: "mlp"
   views: null
+  enable_multiview_mean_head: false
   generate_figures: true
   hyperparameter_tuning:
+    cv_folds: 5
     n_trials: 150
     enabled: true
     tuning_epochs: 50

@@ -1520,7 +1520,12 @@ def _default_property_model_path(results_dir: Path, property_name: str, view: st
     return legacy
 
 
-def _discover_property_model_paths(results_dir: Path, property_name: str) -> Dict[str, Path]:
+def _discover_property_model_paths(
+    results_dir: Path,
+    property_name: str,
+    *,
+    include_multiview_mean: bool = False,
+) -> Dict[str, Path]:
     model_dir = results_dir / "step3_property"
     files_dir = model_dir / "files"
     prop = _normalize_property_name(property_name)
@@ -1544,16 +1549,17 @@ def _discover_property_model_paths(results_dir: Path, property_name: str) -> Dic
         if model_path is not None:
             discovered[view] = model_path
 
-    mv_filename = f"{property_name}_multiview_mean_mlp.pt"
-    mv_candidates = []
-    if prop_files_dir is not None:
-        mv_candidates.append(prop_files_dir / mv_filename)
-    if prop_step_dir is not None:
-        mv_candidates.append(prop_step_dir / mv_filename)
-    mv_candidates.extend([files_dir / mv_filename, model_dir / mv_filename])
-    mv_path = next((p for p in mv_candidates if p.exists()), None)
-    if mv_path is not None:
-        discovered["multiview_mean"] = mv_path
+    if include_multiview_mean:
+        mv_filename = f"{property_name}_multiview_mean_mlp.pt"
+        mv_candidates = []
+        if prop_files_dir is not None:
+            mv_candidates.append(prop_files_dir / mv_filename)
+        if prop_step_dir is not None:
+            mv_candidates.append(prop_step_dir / mv_filename)
+        mv_candidates.extend([files_dir / mv_filename, model_dir / mv_filename])
+        mv_path = next((p for p in mv_candidates if p.exists()), None)
+        if mv_path is not None:
+            discovered["multiview_mean"] = mv_path
 
     return discovered
 
@@ -2576,6 +2582,8 @@ def _resample_candidates_until_target(
 def main(args):
     config = load_config(args.config)
     f5_cfg = _f5_cfg(config)
+    prop_cfg = config.get("property", {}) if isinstance(config.get("property", {}), dict) else {}
+    include_multiview_mean = _to_bool(prop_cfg.get("enable_multiview_mean_head", False), False)
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
     step_dirs = ensure_step_dirs(results_dir, "step5_foundation_inverse")
@@ -2607,7 +2615,11 @@ def main(args):
         model_path = _resolve_path(model_path)
 
     if not Path(model_path).exists():
-        discovered = _discover_property_model_paths(results_dir, args.property)
+        discovered = _discover_property_model_paths(
+            results_dir,
+            args.property,
+            include_multiview_mean=include_multiview_mean,
+        )
         fallback = discovered.get(encoder_view) or discovered.get("smiles")
         if fallback is not None and Path(fallback).exists():
             model_path = fallback
@@ -2673,7 +2685,11 @@ def main(args):
         missing_properties: List[str] = []
         smiles_for_committee = scored_df["smiles"].astype(str).tolist()
         for committee_prop in committee_properties:
-            all_model_paths = _discover_property_model_paths(results_dir, committee_prop)
+            all_model_paths = _discover_property_model_paths(
+                results_dir,
+                committee_prop,
+                include_multiview_mean=include_multiview_mean,
+            )
             if committee_prop == args.property and encoder_view not in all_model_paths and Path(model_path).exists():
                 # Keep backward compatibility for primary scoring model location.
                 all_model_paths[encoder_view] = Path(model_path)
@@ -2744,6 +2760,7 @@ def main(args):
             {
                 "property_model_mode": "all",
                 "prediction_aggregation": "mean",
+                "include_multiview_mean_head": bool(include_multiview_mean),
                 "committee_properties_requested": committee_properties,
                 "committee_properties_scored": sorted(committee_models_used.keys()),
                 "committee_properties_missing": missing_properties,
@@ -2758,6 +2775,7 @@ def main(args):
             {
                 "property_model_mode": "all",
                 "prediction_aggregation": "mean",
+                "include_multiview_mean_head": bool(include_multiview_mean),
                 "committee_properties_requested": committee_properties,
                 "committee_properties_scored": [],
                 "committee_properties_missing": committee_properties,
@@ -2769,6 +2787,7 @@ def main(args):
         source_meta.update(
             {
                 "property_model_mode": "single",
+                "include_multiview_mean_head": bool(include_multiview_mean),
                 "property_models_used": {encoder_view: str(Path(model_path))},
             }
         )
