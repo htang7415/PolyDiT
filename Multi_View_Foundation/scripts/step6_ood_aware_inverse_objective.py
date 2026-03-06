@@ -553,6 +553,7 @@ def _load_d1_to_d2_mean_distance(results_dir: Path, k: int) -> float:
 def _save_augmented_ood_metrics(
     *,
     results_dir: Path,
+    property_name: str,
     representation: str,
     model_size: str,
     generated_d2_distance: np.ndarray,
@@ -577,6 +578,7 @@ def _save_augmented_ood_metrics(
 
     row = {
         "method": "Multi_View_Foundation",
+        "property": _normalize_property_name(property_name) or str(property_name).strip(),
         "representation": representation,
         "model_size": model_size,
         "d1_to_d2_mean_dist": round(float(d1_to_d2_mean), 4) if np.isfinite(d1_to_d2_mean) else np.nan,
@@ -585,14 +587,16 @@ def _save_augmented_ood_metrics(
         "generated_to_d2_mean_dist": round(gen_mean, 4),  # backward-compat alias
         "frac_generated_near_d2": round(frac_near, 4) if np.isfinite(frac_near) else np.nan,
     }
-    out_path = results_dir / "step4_ood" / "metrics" / "metrics_ood.csv"
+    prop = _normalize_property_name(property_name) or "property"
+    out_path = results_dir / "step6_ood_aware_inverse" / prop / "metrics" / "metrics_ood_augmented.csv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     save_csv(
         pd.DataFrame([row]),
         out_path,
         legacy_paths=[
-            results_dir / "metrics_ood.csv",
-            results_dir / "step4_ood" / "metrics_ood.csv",
+            results_dir / "step6_ood_aware_inverse" / "metrics" / f"metrics_ood_augmented_{prop}.csv",
+            results_dir / "step6_ood_aware_inverse" / f"metrics_ood_augmented_{prop}.csv",
+            results_dir / f"metrics_ood_augmented_{prop}.csv",
         ],
         index=False,
     )
@@ -1562,6 +1566,7 @@ def main(args):
     )
     _save_augmented_ood_metrics(
         results_dir=results_dir,
+        property_name=property_name,
         representation=representation,
         model_size=str(model_size),
         generated_d2_distance=pd.to_numeric(

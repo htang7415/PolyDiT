@@ -2772,11 +2772,35 @@ def main(args):
 
     properties = _discover_properties(config, step5_dirs, step6_dirs, step_metric_sources.get("F7"))
 
-    f5_patterns = ["accepted_candidates*.csv"]
+    f5_artifacts: list[Path] = []
     f6_patterns = ["ood_objective_topk*.csv"]
     if include_large_csv:
-        f5_patterns = ["candidate_scores*.csv", "accepted_candidates*.csv"]
         f6_patterns = ["ood_objective_scores*.csv", "ood_objective_topk*.csv"]
+
+    # Prefer property-scoped suffixed files to avoid double-copying duplicates
+    # (e.g., candidate_scores.csv and candidate_scores_<PROPERTY>.csv in the same scope).
+    f5_seen: set[str] = set()
+
+    def _append_f5_unique(paths: list[Path]) -> None:
+        for p in paths:
+            key = str(p.resolve())
+            if key in f5_seen:
+                continue
+            f5_seen.add(key)
+            f5_artifacts.append(p)
+
+    if include_large_csv:
+        candidate_prop = _collect_glob_unique(step5_dirs, ["candidate_scores_*.csv"])
+        if candidate_prop:
+            _append_f5_unique(candidate_prop)
+        else:
+            _append_f5_unique(_collect_glob_unique(step5_dirs, ["candidate_scores.csv"]))
+
+    accepted_prop = _collect_glob_unique(step5_dirs, ["accepted_candidates_*.csv"])
+    if accepted_prop:
+        _append_f5_unique(accepted_prop)
+    else:
+        _append_f5_unique(_collect_glob_unique(step5_dirs, ["accepted_candidates.csv"]))
 
     def _size_tag_for(path: Path) -> str:
         for mvf_dir in mvf_results_dirs:
@@ -2784,7 +2808,7 @@ def main(args):
                 return _normalize_model_size(_infer_model_size_from_results_dir(mvf_dir))
         return "unknown"
 
-    for src in _collect_glob_unique(step5_dirs, f5_patterns):
+    for src in f5_artifacts:
         rel_dst = _supplementary_dst_name(src, _size_tag_for(src))
         _copy_file(
             src,

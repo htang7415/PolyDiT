@@ -231,7 +231,7 @@ paper_results:
   # Leave empty to use only paths.results_dir.
   results_dirs: []
   # Optional broad auto-discovery of BASE_DIR/results* (guarded; default off).
-  auto_discover_results_dirs: ture
+  auto_discover_results_dirs: true
   include_large_csv: true        # include candidate_scores / full OOD score tables
   include_figures: true
   max_panels_per_figure: 6       # subfigures per composite figure: (a), (b), ...

@@ -302,10 +302,14 @@ def main():
     print("[B4] Loading SELFIES converter...")
     selfies_to_psmiles = _load_selfies_converter(config)
 
-    # Load SELFIES property model
-    prop_model_path = results_dir / "step3_property" / "files" / f"{args.property}_selfies_mlp.pt"
-    if not prop_model_path.exists():
-        prop_model_path = results_dir / "step3_property" / f"{args.property}_selfies_mlp.pt"
+    # Load SELFIES property model (property-scoped preferred, legacy fallback kept).
+    prop_candidates = [
+        results_dir / "step3_property" / args.property / "files" / f"{args.property}_selfies_mlp.pt",
+        results_dir / "step3_property" / args.property / f"{args.property}_selfies_mlp.pt",
+        results_dir / "step3_property" / "files" / f"{args.property}_selfies_mlp.pt",
+        results_dir / "step3_property" / f"{args.property}_selfies_mlp.pt",
+    ]
+    prop_model_path = next((p for p in prop_candidates if p.exists()), prop_candidates[0])
     print(f"[B4] Property model: {prop_model_path}")
     prop_model = _load_property_model(prop_model_path, device)
 
