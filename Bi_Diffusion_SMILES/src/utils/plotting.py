@@ -12,6 +12,19 @@ from matplotlib.ticker import MaxNLocator
 class PlotUtils:
     """Utility class for creating standardized plots."""
 
+    def _save_figure(self, fig: plt.Figure, save_path: Optional[str]) -> None:
+        """Save a figure with one retry for transient missing-directory failures."""
+        if not save_path:
+            return
+
+        save_path = Path(save_path)
+        try:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+        except FileNotFoundError:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+
     def __init__(
         self,
         figure_size: Tuple[float, float] = (4.5, 4.5),
@@ -106,8 +119,7 @@ class PlotUtils:
         plt.tight_layout()
 
         if save_path:
-            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            self._save_figure(fig, save_path)
             plt.close(fig)
 
         return fig

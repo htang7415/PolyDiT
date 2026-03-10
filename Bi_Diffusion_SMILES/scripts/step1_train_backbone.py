@@ -453,34 +453,41 @@ def main(args):
     # Create loss plot
     if is_main_process:
         print("\n5. Creating loss plot...")
+        # Re-create output directories in case the shared scratch tree was moved or cleaned up mid-run.
+        step_dir.mkdir(parents=True, exist_ok=True)
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        figures_dir.mkdir(parents=True, exist_ok=True)
         plotter = PlotUtils(
             figure_size=tuple(config['plotting']['figure_size']),
             font_size=config['plotting']['font_size'],
             dpi=config['plotting']['dpi']
         )
 
-        plotter.loss_curve(
-            train_losses=history['train_losses'],
-            val_losses=history['val_losses'],
-            xlabel='Step',
-            ylabel='Loss',
-            title='Backbone Training Loss',
-            save_path=figures_dir / 'backbone_loss_curve.png'
-        )
-
-        epoch_train_losses = history.get('epoch_train_losses', [])
-        epoch_val_losses = history.get('epoch_val_losses', [])
-        if epoch_train_losses:
-            train_bpb = [loss / math.log(2.0) for loss in epoch_train_losses]
-            val_bpb = [loss / math.log(2.0) for loss in epoch_val_losses] if epoch_val_losses else None
+        try:
             plotter.loss_curve(
-                train_losses=train_bpb,
-                val_losses=val_bpb,
-                xlabel='Epoch',
-                ylabel='BPB',
-                title='Backbone Training BPB',
-                save_path=figures_dir / 'backbone_bpb_curve.png'
+                train_losses=history['train_losses'],
+                val_losses=history['val_losses'],
+                xlabel='Step',
+                ylabel='Loss',
+                title='Backbone Training Loss',
+                save_path=figures_dir / 'backbone_loss_curve.png'
             )
+
+            epoch_train_losses = history.get('epoch_train_losses', [])
+            epoch_val_losses = history.get('epoch_val_losses', [])
+            if epoch_train_losses:
+                train_bpb = [loss / math.log(2.0) for loss in epoch_train_losses]
+                val_bpb = [loss / math.log(2.0) for loss in epoch_val_losses] if epoch_val_losses else None
+                plotter.loss_curve(
+                    train_losses=train_bpb,
+                    val_losses=val_bpb,
+                    xlabel='Epoch',
+                    ylabel='BPB',
+                    title='Backbone Training BPB',
+                    save_path=figures_dir / 'backbone_bpb_curve.png'
+                )
+        except OSError as exc:
+            print(f"WARNING: failed to save Step 1 plots to {figures_dir}: {exc}")
 
         summary = {
             'total_steps': int(trainer.global_step),
@@ -493,7 +500,11 @@ def main(args):
             'num_trainable_params': int(num_trainable),
         }
         summary_df = pd.DataFrame([summary])
-        summary_df.to_csv(metrics_dir / 'training_summary.csv', index=False)
+        try:
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+            summary_df.to_csv(metrics_dir / 'training_summary.csv', index=False)
+        except OSError as exc:
+            print(f"WARNING: failed to save Step 1 summary to {metrics_dir}: {exc}")
 
         print("\n" + "=" * 50)
         print("Backbone training complete!")
