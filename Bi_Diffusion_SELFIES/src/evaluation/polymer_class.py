@@ -20,14 +20,14 @@ class PolymerClassifier:
 
     # Default SMARTS patterns for polymer classes
     DEFAULT_PATTERNS = {
-        "polyimide": "[#6](=O)-[#7]-[#6](=O)",
-        "polyester": "[#6](=O)-[#8]-[#6]",
-        "polyamide": "[#6](=O)-[#7]-[#6]",
-        "polyurethane": "[#8]-[#6](=O)-[#7]",
-        "polyether": "[#6]-[#8]-[#6]",
-        "polysiloxane": "[Si]-[#8]-[Si]",
-        "polycarbonate": "[#8]-[#6](=O)-[#8]",
-        "polysulfone": "[#6]-[S](=O)(=O)-[#6]",
+        "polyimide": "[#6][CX3](=[OX1])[NX3][CX3](=[OX1])[#6]",
+        "polyester": "[#6][CX3](=[OX1])[OX2][#6]",
+        "polyamide": "[#6][CX3](=[OX1])[NX3;!$([N]([C](=O))[C](=O))][#6;!$([CX3](=[OX1]))]",
+        "polyurethane": "[#6][OX2][CX3](=[OX1])[NX3][#6]",
+        "polyether": "[#6;!$([CX3](=[OX1]))][OX2][#6;!$([CX3](=[OX1]))]",
+        "polysiloxane": "[Si][OX2][Si]",
+        "polycarbonate": "[#6][OX2][CX3](=[OX1])[OX2][#6]",
+        "polysulfone": "[#6][SX4](=[OX1])(=[OX1])[#6]",
         "polyacrylate": "[#6]-[#6](=O)-[#8]",
         "polystyrene": "[#6]-[#6](c1ccccc1)-[#6]"
     }
