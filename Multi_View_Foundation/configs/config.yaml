@@ -37,18 +37,20 @@ data:
   max_samples_d2: 12888
 
 # F0/F1 view selection
-alignment_views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
+alignment_views: ["selfies"]
 
 views:
+  smiles:
+    enabled: false
   smiles_bpe:
-    enabled: true
+    enabled: false
   selfies:
     enabled: true
   group_selfies:
-    enabled: true
+    enabled: false
     tokenizer_path: "../Bi_Diffusion_Group_SELFIES/results/tokenizer.pkl"
   graph:
-    enabled: true
+    enabled: false
 
 # F1 embedding-figure args
 alignment_embeddings:
@@ -82,7 +84,7 @@ property:
   max_samples: null
   test_ratio: 0.1            # 10% holdout; remaining 90% used for CV and final training
   model_type: "mlp"
-  views: null
+  views: ["selfies"]
   enable_multiview_mean_head: false
   generate_figures: true
   hyperparameter_tuning:
@@ -159,14 +161,14 @@ foundation_inverse:
   generate_figures: true
   ood_k: 5
   # ood_prop = cosine dist to D2 (property MLP training set); ood_gen = cosine dist to D1 (backbone training set)
-  encoder_view: "smiles"           # backbone used to embed candidates for property scoring and D2 OOD distance
+  encoder_view: "selfies"          # backbone used to embed candidates for property scoring and D2 OOD distance
 
 # F6 OOD-aware inverse args
 ood_aware_inverse:
   enabled: true
   run_all_properties: false
-  encoder_view: ""              # backbone for D2 OOD distance; empty => inherits from foundation_inverse.encoder_view
-  ood_views: "all"              # views used to compute per-view D2 distances, then averaged; "all" or comma-separated list
+  encoder_view: "selfies"       # backbone for D2 OOD distance
+  ood_views: "selfies"          # views used to compute per-view D2 distances, then averaged; "all" or comma-separated list
   property: "Tg"
   target: null
   target_mode: ""

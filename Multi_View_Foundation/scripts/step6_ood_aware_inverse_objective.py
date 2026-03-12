@@ -761,24 +761,35 @@ def _resolve_candidate_scores_path(results_dir: Path, property_name: str) -> Pat
     return candidates[0]
 
 
-def _compute_d2_distance_single_view(
+def _resolve_view_device(step5, config: dict, encoder_view: str) -> str:
+    encoder_key = step5.VIEW_SPECS[encoder_view]["encoder_key"]
+    encoder_cfg = config.get(encoder_key, {})
+    device = encoder_cfg.get("device", "auto")
+    if device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return str(device)
+
+
+def _compute_ood_distances_single_view(
     *,
     config: dict,
     results_dir: Path,
     smiles_list: list[str],
     encoder_view: str,
     ood_k: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Compute per-candidate D2 and D1 distances for a single view.
+
+    Returns:
+        (d2_full, d1_full, d1_available)
+    where `d1_available` is False only when D1 reference embeddings are missing.
+    """
     if not smiles_list:
-        return np.zeros((0,), dtype=np.float32)
+        empty = np.zeros((0,), dtype=np.float32)
+        return empty, empty, True
 
     step5 = _load_step5_module()
-    encoder_key = step5.VIEW_SPECS[encoder_view]["encoder_key"]
-    encoder_cfg = config.get(encoder_key, {})
-    device = encoder_cfg.get("device", "auto")
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
+    device = _resolve_view_device(step5, config, encoder_view)
     assets = step5._load_view_assets(config=config, view=encoder_view, device=device)
     embeddings, kept_indices = step5._embed_candidates(
         view=encoder_view,
@@ -788,14 +799,45 @@ def _compute_d2_distance_single_view(
     )
 
     d2_full = np.full((len(smiles_list),), np.nan, dtype=np.float32)
+    d1_full = np.full((len(smiles_list),), np.nan, dtype=np.float32)
     if embeddings.size == 0 or not kept_indices:
-        return d2_full
+        return d2_full, d1_full, True
 
     d2_embeddings = step5._load_d2_embeddings(results_dir, encoder_view)
-    distances = knn_distances(embeddings, d2_embeddings, k=int(ood_k))
-    mean_dist = distances.mean(axis=1).astype(np.float32, copy=False)
+    d2_distances = knn_distances(embeddings, d2_embeddings, k=int(ood_k))
+    d2_mean = d2_distances.mean(axis=1).astype(np.float32, copy=False)
     for local_i, global_i in enumerate(kept_indices):
-        d2_full[int(global_i)] = mean_dist[local_i]
+        d2_full[int(global_i)] = d2_mean[local_i]
+
+    d1_available = True
+    try:
+        d1_embeddings = step5._load_d1_embeddings(results_dir, encoder_view)
+    except FileNotFoundError:
+        d1_available = False
+    else:
+        d1_distances = knn_distances(embeddings, d1_embeddings, k=int(ood_k))
+        d1_mean = d1_distances.mean(axis=1).astype(np.float32, copy=False)
+        for local_i, global_i in enumerate(kept_indices):
+            d1_full[int(global_i)] = d1_mean[local_i]
+
+    return d2_full, d1_full, d1_available
+
+
+def _compute_d2_distance_single_view(
+    *,
+    config: dict,
+    results_dir: Path,
+    smiles_list: list[str],
+    encoder_view: str,
+    ood_k: int,
+) -> np.ndarray:
+    d2_full, _d1_full, _d1_available = _compute_ood_distances_single_view(
+        config=config,
+        results_dir=results_dir,
+        smiles_list=smiles_list,
+        encoder_view=encoder_view,
+        ood_k=ood_k,
+    )
     return d2_full
 
 
@@ -808,33 +850,13 @@ def _compute_d1_distance_single_view(
     ood_k: int,
 ) -> np.ndarray:
     """Compute cosine distance from candidates to D1 (backbone training set) for a single view."""
-    if not smiles_list:
-        return np.zeros((0,), dtype=np.float32)
-
-    step5 = _load_step5_module()
-    encoder_key = step5.VIEW_SPECS[encoder_view]["encoder_key"]
-    encoder_cfg = config.get(encoder_key, {})
-    device = encoder_cfg.get("device", "auto")
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    assets = step5._load_view_assets(config=config, view=encoder_view, device=device)
-    embeddings, kept_indices = step5._embed_candidates(
-        view=encoder_view,
+    _d2_full, d1_full, _d1_available = _compute_ood_distances_single_view(
+        config=config,
+        results_dir=results_dir,
         smiles_list=smiles_list,
-        assets=assets,
-        device=device,
+        encoder_view=encoder_view,
+        ood_k=ood_k,
     )
-
-    d1_full = np.full((len(smiles_list),), np.nan, dtype=np.float32)
-    if embeddings.size == 0 or not kept_indices:
-        return d1_full
-
-    d1_embeddings = step5._load_d1_embeddings(results_dir, encoder_view)
-    distances = knn_distances(embeddings, d1_embeddings, k=int(ood_k))
-    mean_dist = distances.mean(axis=1).astype(np.float32, copy=False)
-    for local_i, global_i in enumerate(kept_indices):
-        d1_full[int(global_i)] = mean_dist[local_i]
     return d1_full
 
 
@@ -872,9 +894,8 @@ def _compute_ood_distance_columns(
     used_views: list[str] = []
 
     for view in ood_views:
-        # D2 distance (ood_prop) — required for view to count as used
         try:
-            d2_vec = _compute_d2_distance_single_view(
+            d2_vec, d1_vec, d1_available = _compute_ood_distances_single_view(
                 config=config,
                 results_dir=results_dir,
                 smiles_list=smiles_list,
@@ -887,18 +908,8 @@ def _compute_ood_distance_columns(
         d2_per_view[view] = np.asarray(d2_vec, dtype=np.float32).reshape(-1)
         used_views.append(view)
 
-        # D1 distance (ood_gen) — optional, skip gracefully
-        try:
-            d1_vec = _compute_d1_distance_single_view(
-                config=config,
-                results_dir=results_dir,
-                smiles_list=smiles_list,
-                encoder_view=view,
-                ood_k=ood_k,
-            )
+        if d1_available:
             d1_per_view[view] = np.asarray(d1_vec, dtype=np.float32).reshape(-1)
-        except FileNotFoundError:
-            pass
 
     if not used_views:
         raise FileNotFoundError(
