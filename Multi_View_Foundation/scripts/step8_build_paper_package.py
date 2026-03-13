@@ -69,12 +69,26 @@ PROPERTY_PRIORITY = [
 ]
 STEP2_METRIC_COLUMNS = ["step2_validity", "step2_uniqueness", "step2_novelty", "step2_diversity"]
 METHOD_PLOT_COLORS = {
-    "Bi_Diffusion_SMILES": "#2563EB",
-    "Bi_Diffusion_SMILES_BPE": "#0EA5E9",
-    "Bi_Diffusion_SELFIES": "#16A34A",
-    "Bi_Diffusion_Group_SELFIES": "#F97316",
-    "Bi_Diffusion_graph": "#7C3AED",
+    "Bi_Diffusion_SMILES": "#3C5488",
+    "Bi_Diffusion_SMILES_BPE": "#4DBBD5",
+    "Bi_Diffusion_SELFIES": "#00A087",
+    "Bi_Diffusion_Group_SELFIES": "#E64B35",
+    "Bi_Diffusion_graph": "#8491B4",
 }
+NATURE_PALETTE = [
+    "#E64B35",
+    "#4DBBD5",
+    "#00A087",
+    "#3C5488",
+    "#F39B7F",
+    "#8491B4",
+    "#91D1C2",
+    "#DC0000",
+    "#7E6148",
+    "#B09C85",
+]
+COLOR_TEXT = "#1F2937"
+COLOR_MUTED = "#B8BFC9"
 
 MANUSCRIPT_CAPTIONS = [
     "Figure 1. Generation quality of five bidirectional diffusion models across molecular representation types. (a) Valid polymer fraction for each representation at the best-performing model size. (b) Unique fraction among valid generated polymers, reflecting generation diversity. (c) Validity-uniqueness trade-off colored by novelty.",
@@ -817,8 +831,61 @@ def _set_publication_style(font_size: int) -> None:
             "legend.fontsize": font_size,
             "figure.dpi": 300,
             "savefig.dpi": 600,
+            "figure.constrained_layout.use": True,
+            "legend.frameon": False,
+            "axes.prop_cycle": matplotlib.cycler(color=NATURE_PALETTE),
         }
     )
+
+
+def _nature_sequential_cmap():
+    if plt is None:
+        return None
+    return matplotlib.colors.LinearSegmentedColormap.from_list(
+        "paper_nature_seq",
+        ["#F7FBFF", NATURE_PALETTE[1], NATURE_PALETTE[3]],
+    )
+
+
+def _nature_diverging_cmap():
+    if plt is None:
+        return None
+    return matplotlib.colors.LinearSegmentedColormap.from_list(
+        "paper_nature_div",
+        [NATURE_PALETTE[3], "#F7F7F7", NATURE_PALETTE[0]],
+    )
+
+
+def _wrap_ticklabels(ax, axis: str = "x", width: int = 16, rotation: int = 32) -> None:
+    ticks = ax.get_xticklabels() if axis == "x" else ax.get_yticklabels()
+    updated = []
+    needs_rotation = False
+    for tick in ticks:
+        text = str(tick.get_text())
+        if not text:
+            updated.append(text)
+            continue
+        words = text.replace("_", " ").split()
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            proposal = word if not current else f"{current} {word}"
+            if len(proposal) <= width:
+                current = proposal
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        wrapped = "\n".join(lines) if lines else text
+        if "\n" in wrapped or len(text) > width:
+            needs_rotation = True
+        updated.append(wrapped)
+    if axis == "x":
+        ax.set_xticklabels(updated, rotation=rotation if needs_rotation else 0, ha="right" if needs_rotation else "center")
+    else:
+        ax.set_yticklabels(updated)
 
 
 def _compose_multi_panel_figure(
@@ -846,10 +913,16 @@ def _compose_multi_panel_figure(
         except Exception:
             continue
     median_aspect = float(np.median(np.asarray(panel_aspects, dtype=float))) if panel_aspects else 1.44
-    cell_h = 5.0
-    cell_w = max(5.2, min(8.2, cell_h * median_aspect))
+    cell_h = 5.2
+    cell_w = max(5.8, min(7.6, cell_h * median_aspect))
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(cell_w * ncols, cell_h * nrows))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(cell_w * ncols, cell_h * nrows),
+        squeeze=False,
+        constrained_layout=True,
+    )
     if hasattr(axes, "ravel"):
         ax_list = list(axes.ravel())
     else:
@@ -902,7 +975,6 @@ def _compose_multi_panel_figure(
             transform=ax.transAxes,
         )
 
-    fig.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01, wspace=0.04, hspace=0.06)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -1006,7 +1078,7 @@ def _property_from_suffixed_filename(filename: str) -> str:
     m = re.match(
         r"^(?:candidate_scores|accepted_candidates|accepted_polymer_report|accepted_polymer_summary|"
         r"ood_objective_scores|ood_objective_topk|metrics_inverse_ood_objective|"
-        r"descriptor_shifts|motif_enrichment|physics_consistency|nearest_neighbor_explanations|"
+        r"descriptor_shifts|motif_enrichment|physics_consistency|nearest_neighbor_explanations|design_filter_audit|"
         r"property_input_files|run_meta)_(.+)\.(?:csv|json)$",
         filename,
     )
@@ -1300,6 +1372,27 @@ def _panel_mark(ax, label: str, font_size: int) -> None:
 
 def _save_plot_figure(fig, output_path: Path, dpi: int) -> bool:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    for ax in fig.axes:
+        try:
+            ax.title.set_fontsize(16)
+            ax.xaxis.label.set_fontsize(16)
+            ax.yaxis.label.set_fontsize(16)
+        except Exception:
+            pass
+        for tick in ax.get_xticklabels() + ax.get_yticklabels():
+            try:
+                tick.set_fontsize(16)
+            except Exception:
+                continue
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.set_loc("best")
+            for text in legend.get_texts():
+                text.set_fontsize(16)
+        if ax.get_xlabel():
+            ax.xaxis.label.set_color(COLOR_TEXT)
+        if ax.get_ylabel():
+            ax.yaxis.label.set_color(COLOR_TEXT)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     return True
@@ -1557,7 +1650,7 @@ def _generate_step12_scale_panels(
         size_order = list(MODEL_SIZE_ORDER)
 
     # Panel 1: Step1 BPB vs model size for each method.
-    fig1, ax1 = plt.subplots(figsize=(9.0, 6.2))
+    fig1, ax1 = plt.subplots(figsize=(9.0, 6.2), constrained_layout=True)
     for method_dir in (DEFAULT_METHOD_DIRS + [m for m in sorted(summary_df["method_dir"].unique()) if m not in DEFAULT_METHOD_DIRS]):
         sub = summary_df[summary_df["method_dir"] == method_dir].copy()
         if sub.empty:
@@ -1581,14 +1674,13 @@ def _generate_step12_scale_panels(
     ax1.set_ylabel("Step1 BPB")
     ax1.grid(True, linestyle="--", alpha=0.45)
     ax1.legend(loc="best", frameon=False)
-    fig1.tight_layout()
     p1 = panel_dir / "figure_step12_scale_step1_bpb_vs_size.png"
     fig1.savefig(p1, dpi=dpi, bbox_inches="tight")
     plt.close(fig1)
     generated.append(p1)
 
     # Panel 2: Step2 quality vs model size for each method.
-    fig2, ax2 = plt.subplots(figsize=(9.0, 6.2))
+    fig2, ax2 = plt.subplots(figsize=(9.0, 6.2), constrained_layout=True)
     for method_dir in (DEFAULT_METHOD_DIRS + [m for m in sorted(summary_df["method_dir"].unique()) if m not in DEFAULT_METHOD_DIRS]):
         sub = summary_df[summary_df["method_dir"] == method_dir].copy()
         if sub.empty:
@@ -1612,14 +1704,13 @@ def _generate_step12_scale_panels(
     ax2.set_ylabel("Step2 Composite Quality")
     ax2.grid(True, linestyle="--", alpha=0.45)
     ax2.legend(loc="best", frameon=False)
-    fig2.tight_layout()
     p2 = panel_dir / "figure_step12_scale_step2_quality_vs_size.png"
     fig2.savefig(p2, dpi=dpi, bbox_inches="tight")
     plt.close(fig2)
     generated.append(p2)
 
     # Panel 3: Step1-Step2 tradeoff frontier across methods and scales.
-    fig3, ax3 = plt.subplots(figsize=(8.8, 6.2))
+    fig3, ax3 = plt.subplots(figsize=(8.8, 6.2), constrained_layout=True)
     marker_by_size = {"small": "o", "medium": "s", "large": "^", "xl": "D", "base": "P", "unknown": "X"}
     for method_dir in (DEFAULT_METHOD_DIRS + [m for m in sorted(summary_df["method_dir"].unique()) if m not in DEFAULT_METHOD_DIRS]):
         sub = summary_df[summary_df["method_dir"] == method_dir].copy()
@@ -1637,7 +1728,7 @@ def _generate_step12_scale_panels(
                 s=150,
                 marker=marker_by_size.get(size, "o"),
                 color=METHOD_PLOT_COLORS.get(method_dir, "#334155"),
-                edgecolors="#111827",
+                edgecolors=COLOR_TEXT,
                 linewidths=0.7,
                 alpha=0.92,
             )
@@ -1646,7 +1737,6 @@ def _generate_step12_scale_panels(
     ax3.set_xlabel("Step1 BPB (lower is better)")
     ax3.set_ylabel("Step2 Composite Quality (higher is better)")
     ax3.grid(True, linestyle="--", alpha=0.45)
-    fig3.tight_layout()
     p3 = panel_dir / "figure_step12_scale_frontier.png"
     fig3.savefig(p3, dpi=dpi, bbox_inches="tight")
     plt.close(fig3)
@@ -1655,7 +1745,13 @@ def _generate_step12_scale_panels(
     # Optional panel 4: metric ribbons for validity/novelty/diversity by size.
     if max_panels_per_figure >= 4:
         metric_plot_cols = ["step2_validity", "step2_novelty", "step2_diversity"]
-        fig4, axes = plt.subplots(1, len(metric_plot_cols), figsize=(5.6 * len(metric_plot_cols), 5.6), squeeze=False)
+        fig4, axes = plt.subplots(
+            1,
+            len(metric_plot_cols),
+            figsize=(5.6 * len(metric_plot_cols), 5.6),
+            squeeze=False,
+            constrained_layout=True,
+        )
         for mi, metric_col in enumerate(metric_plot_cols):
             ax = axes[0, mi]
             for method_dir in (DEFAULT_METHOD_DIRS + [m for m in sorted(summary_df["method_dir"].unique()) if m not in DEFAULT_METHOD_DIRS]):
@@ -1679,7 +1775,6 @@ def _generate_step12_scale_panels(
             ax.set_xlabel("Model Size")
             ax.set_ylabel(metric_col.replace("step2_", "").replace("_", " ").title())
             ax.grid(True, linestyle="--", alpha=0.45)
-        fig4.tight_layout()
         p4 = panel_dir / "figure_step12_scale_step2_metric_trends.png"
         fig4.savefig(p4, dpi=dpi, bbox_inches="tight")
         plt.close(fig4)
@@ -1803,20 +1898,22 @@ def _fig1_baseline_generation(
     ax0, ax1, ax2 = axes[0]
 
     x = np.arange(len(best))
-    ax0.bar(x, best["validity"].to_numpy(dtype=float), color="#4E79A7", edgecolor="#1F2937", linewidth=0.8)
+    ax0.bar(x, best["validity"].to_numpy(dtype=float), color=NATURE_PALETTE[3], edgecolor=COLOR_TEXT, linewidth=0.8)
     ax0.set_ylim(0.0, 1.02)
     ax0.set_ylabel("Validity")
     ax0.set_xticks(x)
     ax0.set_xticklabels(best["representation_label"].tolist(), rotation=25, ha="right")
     ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+    _wrap_ticklabels(ax0, axis="x", width=14, rotation=32)
     _panel_mark(ax0, "(a)", font_size)
 
-    ax1.bar(x, best["uniqueness"].to_numpy(dtype=float), color="#F28E2B", edgecolor="#1F2937", linewidth=0.8)
+    ax1.bar(x, best["uniqueness"].to_numpy(dtype=float), color=NATURE_PALETTE[0], edgecolor=COLOR_TEXT, linewidth=0.8)
     ax1.set_ylim(0.0, 1.02)
     ax1.set_ylabel("Uniqueness")
     ax1.set_xticks(x)
     ax1.set_xticklabels(best["representation_label"].tolist(), rotation=25, ha="right")
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+    _wrap_ticklabels(ax1, axis="x", width=14, rotation=32)
     _panel_mark(ax1, "(b)", font_size)
 
     novelty_vals = pd.to_numeric(scatter_df.get("novelty"), errors="coerce")
@@ -1824,9 +1921,9 @@ def _fig1_baseline_generation(
         pd.to_numeric(scatter_df.get("validity"), errors="coerce"),
         pd.to_numeric(scatter_df.get("uniqueness"), errors="coerce"),
         c=novelty_vals,
-        cmap="viridis",
+        cmap=_nature_sequential_cmap(),
         s=140,
-        edgecolors="#1F2937",
+        edgecolors=COLOR_TEXT,
         linewidths=0.6,
         alpha=0.9,
     )
@@ -1839,7 +1936,6 @@ def _fig1_baseline_generation(
     cbar.set_label("Novelty")
     _panel_mark(ax2, "(c)", font_size)
 
-    fig.tight_layout()
     return _save_plot_figure(fig, output_path, dpi), caption
 
 
@@ -1885,7 +1981,7 @@ def _fig2_mvf_alignment(
     fig, axes = plt.subplots(1, 2, figsize=(14.2, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
     mats = [p1.to_numpy(dtype=float), p10.to_numpy(dtype=float)]
-    cmap = plt.get_cmap("YlGnBu").copy()
+    cmap = _nature_sequential_cmap()
     cmap.set_bad(color="#D1D5DB")
     for ax, mat, panel_tag in [(ax0, mats[0], "(a)"), (ax1, mats[1], "(b)")]:
         im = ax.imshow(np.ma.masked_invalid(mat), cmap=cmap, vmin=0.0, vmax=1.0, aspect="auto")
@@ -1900,12 +1996,13 @@ def _fig2_mvf_alignment(
                 val = mat[i, j]
                 if np.isnan(val):
                     continue
-                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=max(10, font_size - 5), color="#111827")
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=max(10, font_size - 5), color=COLOR_TEXT)
         _panel_mark(ax, panel_tag, font_size)
         cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cbar.set_label("Recall")
+        _wrap_ticklabels(ax, axis="x", width=12, rotation=35)
+        _wrap_ticklabels(ax, axis="y", width=12, rotation=0)
 
-    fig.tight_layout()
     return _save_plot_figure(fig, output_path, dpi), caption
 
 
@@ -2007,7 +2104,6 @@ def _fig3_property_prediction(
     fig, axes = plt.subplots(1, 2, figsize=(15.8, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
 
-    cmap = plt.get_cmap("tab10")
     for idx, prop in enumerate(prop_order):
         sub = comp[comp["property"] == prop].copy()
         if sub.empty:
@@ -2016,7 +2112,7 @@ def _fig3_property_prediction(
         sub = sub.dropna(subset=["x"]).sort_values("x")
         if sub.empty:
             continue
-        color = cmap(idx % 10)
+        color = NATURE_PALETTE[idx % len(NATURE_PALETTE)]
         x_vals = sub["x"].to_numpy(dtype=float)
         ax0.plot(
             x_vals,
@@ -2066,8 +2162,8 @@ def _fig3_property_prediction(
     ax1.bar(
         gain_by_size["x"].to_numpy(dtype=float),
         gain_by_size["fusion_gain"].to_numpy(dtype=float),
-        color="#59A14F",
-        edgecolor="#1F2937",
+        color=NATURE_PALETTE[2],
+        edgecolor=COLOR_TEXT,
         linewidth=0.7,
     )
     for idx, prop in enumerate(prop_order):
@@ -2084,10 +2180,10 @@ def _fig3_property_prediction(
             linestyle="",
             marker="o",
             markersize=4.8,
-            color=cmap(idx % 10),
+            color=NATURE_PALETTE[idx % len(NATURE_PALETTE)],
             alpha=0.8,
         )
-    ax1.axhline(0.0, color="#111827", linewidth=1.0, alpha=0.75)
+    ax1.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, alpha=0.75)
     ax1.set_xticks(np.arange(len(size_order)))
     ax1.set_xticklabels([s.upper() for s in size_order])
     ax1.set_xlabel("Model Size")
@@ -2095,7 +2191,6 @@ def _fig3_property_prediction(
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
     _panel_mark(ax1, "(b)", font_size)
 
-    fig.tight_layout()
     return _save_plot_figure(fig, output_path, dpi), caption
 
 
@@ -2157,8 +2252,8 @@ def _fig4_ood_analysis(
     fig, axes = plt.subplots(1, 2, figsize=(15.4, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
     for source, color, marker, style in [
-        ("baseline", "#4E79A7", "o", "--"),
-        ("mvf", "#F28E2B", "s", "-"),
+        ("baseline", NATURE_PALETTE[3], "o", "--"),
+        ("mvf", NATURE_PALETTE[0], "s", "-"),
     ]:
         sub = data[data["source_name"] == source].copy()
         if sub.empty:
@@ -2187,8 +2282,8 @@ def _fig4_ood_analysis(
     _panel_mark(ax0, "(a)", font_size)
 
     for source, color, marker, style in [
-        ("baseline", "#4E79A7", "o", "--"),
-        ("mvf", "#F28E2B", "s", "-"),
+        ("baseline", NATURE_PALETTE[3], "o", "--"),
+        ("mvf", NATURE_PALETTE[0], "s", "-"),
     ]:
         sub = data[data["source_name"] == source].copy()
         if sub.empty:
@@ -2219,7 +2314,6 @@ def _fig4_ood_analysis(
     ax1.legend(loc="best", frameon=False)
     _panel_mark(ax1, "(b)", font_size)
 
-    fig.tight_layout()
     return _save_plot_figure(fig, output_path, dpi), caption
 
 
@@ -2322,7 +2416,6 @@ def _fig5_inverse_design(
     fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.3), squeeze=False)
     ax0, ax1 = axes[0]
 
-    cmap = plt.get_cmap("tab10")
     for idx, prop in enumerate(prop_order):
         sub = comp[comp["property"] == prop].copy()
         if sub.empty:
@@ -2331,7 +2424,7 @@ def _fig5_inverse_design(
         sub = sub.dropna(subset=["x"]).sort_values("x")
         if sub.empty:
             continue
-        color = cmap(idx % 10)
+        color = NATURE_PALETTE[idx % len(NATURE_PALETTE)]
         x_vals = sub["x"].to_numpy(dtype=float)
         ax0.plot(
             x_vals,
@@ -2380,8 +2473,8 @@ def _fig5_inverse_design(
     ax1.bar(
         gain_by_size["x"].to_numpy(dtype=float),
         gain_by_size["rerank_gain"].to_numpy(dtype=float),
-        color="#59A14F",
-        edgecolor="#1F2937",
+        color=NATURE_PALETTE[2],
+        edgecolor=COLOR_TEXT,
         linewidth=0.7,
     )
     for idx, prop in enumerate(prop_order):
@@ -2398,10 +2491,10 @@ def _fig5_inverse_design(
             linestyle="",
             marker="o",
             markersize=4.8,
-            color=cmap(idx % 10),
+            color=NATURE_PALETTE[idx % len(NATURE_PALETTE)],
             alpha=0.8,
         )
-    ax1.axhline(0.0, color="#111827", linewidth=1.0, alpha=0.75)
+    ax1.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, alpha=0.75)
     ax1.set_xticks(np.arange(len(size_order)))
     ax1.set_xticklabels([s.upper() for s in size_order])
     ax1.set_xlabel("Model Size")
@@ -2409,7 +2502,6 @@ def _fig5_inverse_design(
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
     _panel_mark(ax1, "(b)", font_size)
 
-    fig.tight_layout()
     return _save_plot_figure(fig, output_path, dpi), caption
 
 
@@ -2488,7 +2580,7 @@ def _fig6_chem_physics(
                 std = np.nanstd(mat)
                 if std > 1e-12:
                     mat = (mat - mean) / std
-            im = ax0.imshow(np.ma.masked_invalid(mat), cmap="coolwarm", aspect="auto")
+            im = ax0.imshow(np.ma.masked_invalid(mat), cmap=_nature_diverging_cmap(), aspect="auto")
             ax0.set_xticks(np.arange(len(top_desc)))
             ax0.set_xticklabels(top_desc, rotation=35, ha="right")
             ax0.set_yticks(np.arange(len(prop_order)))
@@ -2536,21 +2628,22 @@ def _fig6_chem_physics(
             )
             bar_colors = np.where(
                 pd.to_numeric(top["score"], errors="coerce").to_numpy(dtype=float) >= 0.0,
-                "#E15759",
-                "#4E79A7",
+                NATURE_PALETTE[0],
+                NATURE_PALETTE[3],
             )
             ax1.bar(
                 np.arange(len(top)),
                 top["score"].to_numpy(dtype=float),
                 color=bar_colors,
-                edgecolor="#1F2937",
+                edgecolor=COLOR_TEXT,
                 linewidth=0.7,
             )
             ax1.set_xticks(np.arange(len(top)))
             ax1.set_xticklabels(top["motif"].tolist(), rotation=35, ha="right")
             ax1.set_ylabel(y_label)
-            ax1.axhline(0.0, color="#111111", linewidth=1.0, linestyle="--")
+            ax1.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, linestyle="--")
             ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+            _wrap_ticklabels(ax1, axis="x", width=14, rotation=35)
         else:
             has_motif = False
     if not has_motif:
@@ -2920,6 +3013,7 @@ def main(args):
             "motif_enrichment.csv",
             "physics_consistency.csv",
             "nearest_neighbor_explanations.csv",
+            "design_filter_audit.csv",
             "property_input_files.csv",
         ],
     ):

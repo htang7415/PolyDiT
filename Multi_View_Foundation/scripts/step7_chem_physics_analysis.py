@@ -160,12 +160,31 @@ PUBLICATION_STYLE = {
     "legend.fontsize": 16,
     "figure.dpi": 300,
     "savefig.dpi": 600,
+    "figure.constrained_layout.use": True,
 }
 
-COLOR_PRIMARY = "#2A5CAA"
-COLOR_SECONDARY = "#E76F51"
-COLOR_ACCENT = "#2A9D8F"
-COLOR_MUTED = "#9AA3AF"
+NATURE_PALETTE = [
+    "#E64B35",
+    "#4DBBD5",
+    "#00A087",
+    "#3C5488",
+    "#F39B7F",
+    "#8491B4",
+    "#91D1C2",
+    "#DC0000",
+    "#7E6148",
+    "#B09C85",
+]
+COLOR_PRIMARY = NATURE_PALETTE[3]
+COLOR_SECONDARY = NATURE_PALETTE[0]
+COLOR_ACCENT = NATURE_PALETTE[2]
+COLOR_TERTIARY = NATURE_PALETTE[1]
+COLOR_QUATERNARY = NATURE_PALETTE[5]
+COLOR_MUTED = "#B8BFC9"
+COLOR_TEXT = "#1F2937"
+
+if plt is not None:  # pragma: no branch
+    PUBLICATION_STYLE["axes.prop_cycle"] = matplotlib.cycler(color=NATURE_PALETTE)
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -222,7 +241,102 @@ def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: st
 def _save_figure_png(fig, output_base: Path) -> None:
     output_base.parent.mkdir(parents=True, exist_ok=True)
     _standardize_figure_text_and_legend(fig, font_size=16, legend_loc="best")
-    fig.savefig(output_base.with_suffix(".png"), dpi=600, bbox_inches="tight")
+    fig.savefig(output_base.with_suffix(".png"), dpi=600, bbox_inches="tight", pad_inches=0.08)
+
+
+def _nature_sequential_cmap():
+    if plt is None:
+        return None
+    return matplotlib.colors.LinearSegmentedColormap.from_list(
+        "mvf_nature_seq",
+        ["#F7FBFF", COLOR_TERTIARY, COLOR_PRIMARY],
+    )
+
+
+def _nature_diverging_cmap():
+    if plt is None:
+        return None
+    return matplotlib.colors.LinearSegmentedColormap.from_list(
+        "mvf_nature_div",
+        [COLOR_PRIMARY, "#F7F7F7", COLOR_SECONDARY],
+    )
+
+
+def _make_panel_figure(
+    nrows: int,
+    ncols: int,
+    *,
+    panel_width: float = 6.6,
+    panel_height: float = 5.6,
+):
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(panel_width * max(ncols, 1), panel_height * max(nrows, 1)),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    return fig, axes
+
+
+def _wrap_ticklabels(ax, axis: str = "x", width: int = 16, rotation: int = 32) -> None:
+    if axis == "x":
+        ticks = ax.get_xticklabels()
+    else:
+        ticks = ax.get_yticklabels()
+    updated = []
+    needs_rotation = False
+    for tick in ticks:
+        text = str(tick.get_text())
+        if not text:
+            updated.append(text)
+            continue
+        words = text.replace("_", " ").split()
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            proposal = word if not current else f"{current} {word}"
+            if len(proposal) <= width:
+                current = proposal
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        wrapped = "\n".join(lines) if lines else text
+        if "\n" in wrapped or len(text) > width:
+            needs_rotation = True
+        updated.append(wrapped)
+    if axis == "x":
+        ax.set_xticklabels(updated, rotation=rotation if needs_rotation else 0, ha="right" if needs_rotation else "center")
+    else:
+        ax.set_yticklabels(updated)
+
+
+def _annotate_scatter_subset(
+    ax,
+    df: pd.DataFrame,
+    *,
+    x_col: str,
+    y_col: str,
+    label_col: str,
+    max_labels: int = 6,
+) -> None:
+    if df.empty:
+        return
+    label_df = df.copy().head(max_labels)
+    offsets = [(8, 6), (8, -10), (-10, 8), (-10, -12), (10, 12), (-12, 12)]
+    for idx, (_, row) in enumerate(label_df.iterrows()):
+        dx, dy = offsets[idx % len(offsets)]
+        ax.annotate(
+            str(row[label_col]),
+            (float(row[x_col]), float(row[y_col])),
+            xytext=(dx, dy),
+            textcoords="offset points",
+            bbox={"facecolor": "white", "alpha": 0.88, "edgecolor": "none", "pad": 1.5},
+            color=COLOR_TEXT,
+        )
 
 
 def _numeric_array(values) -> np.ndarray:
@@ -392,6 +506,299 @@ def _load_property_reference(property_dir: Path, property_name: str, max_samples
         out = out.head(int(max_samples)).copy()
     out["property"] = property_name
     return out
+
+
+def _load_json_dict(path: Optional[Path]) -> dict:
+    if path is None or not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _load_neighbor_run_meta(artifact_path: Optional[Path], property_name: str) -> Tuple[dict, str]:
+    if artifact_path is None:
+        return {}, ""
+    prop = _normalize_property_name(property_name)
+    candidates = [
+        artifact_path.parent / f"run_meta_{prop}.json",
+        artifact_path.parent / "run_meta.json",
+    ]
+    for candidate in candidates:
+        payload = _load_json_dict(candidate)
+        if payload:
+            return payload, str(candidate)
+    return {}, ""
+
+
+def _stringify_list_like(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        items = [str(x).strip() for x in value if str(x).strip()]
+        return ",".join(items)
+    text = str(value).strip()
+    return text
+
+
+def _stringify_jsonish(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, sort_keys=True)
+        except Exception:
+            return str(value)
+    if isinstance(value, (list, tuple, set)):
+        try:
+            return json.dumps([str(x) for x in value])
+        except Exception:
+            return _stringify_list_like(value)
+    return str(value)
+
+
+def _boolish_rate(values) -> float:
+    series = pd.Series(values)
+    if series.empty:
+        return np.nan
+    if pd.api.types.is_bool_dtype(series):
+        numeric = series.astype(float)
+    else:
+        numeric = pd.to_numeric(series, errors="coerce")
+        if not numeric.notna().any():
+            text = series.astype(str).str.strip().str.lower()
+            numeric = pd.to_numeric(
+                text.map(
+                    {
+                        "true": 1.0,
+                        "false": 0.0,
+                        "yes": 1.0,
+                        "no": 0.0,
+                        "1": 1.0,
+                        "0": 0.0,
+                    }
+                ),
+                errors="coerce",
+            )
+    return float(numeric.mean()) if numeric.notna().any() else np.nan
+
+
+def _series_mean(values) -> float:
+    series = pd.to_numeric(pd.Series(values), errors="coerce")
+    return float(series.mean()) if series.notna().any() else np.nan
+
+
+def _smiles_unique_rate(df: pd.DataFrame) -> float:
+    if df.empty or "smiles" not in df.columns:
+        return np.nan
+    smiles = df["smiles"].astype(str).str.strip()
+    if smiles.empty:
+        return np.nan
+    return float(smiles.nunique(dropna=True) / max(len(smiles), 1))
+
+
+def _smiles_two_star_rate(df: pd.DataFrame) -> float:
+    if df.empty or "smiles" not in df.columns:
+        return np.nan
+    return float(df["smiles"].astype(str).map(lambda x: float(str(x).count("*") == 2)).mean())
+
+
+def _validity_rate(df: pd.DataFrame, desc_df: pd.DataFrame) -> float:
+    if "is_valid" in df.columns:
+        return _boolish_rate(df["is_valid"])
+    if df.empty:
+        return np.nan
+    return float(len(desc_df) / max(len(df), 1))
+
+
+def _sa_series(df: pd.DataFrame, desc_df: pd.DataFrame) -> pd.Series:
+    if "sa_score" in df.columns:
+        series = pd.to_numeric(df["sa_score"], errors="coerce")
+        if series.notna().any():
+            return series
+    if "sa_score" in desc_df.columns:
+        series = pd.to_numeric(desc_df["sa_score"], errors="coerce")
+        if series.notna().any():
+            return series
+    return pd.Series(dtype=float)
+
+
+def _sa_lt_rate(df: pd.DataFrame, desc_df: pd.DataFrame, max_sa: Optional[float]) -> float:
+    if max_sa is None:
+        return np.nan
+    series = _sa_series(df, desc_df)
+    if not series.notna().any():
+        return np.nan
+    return float((series < float(max_sa)).mean())
+
+
+def _build_design_filter_audit_row(
+    *,
+    property_name: str,
+    candidate_df: pd.DataFrame,
+    topk_df: pd.DataFrame,
+    cand_desc: pd.DataFrame,
+    top_desc: pd.DataFrame,
+    cand_path: Optional[Path],
+    topk_path: Optional[Path],
+    f5_run_meta: dict,
+    f5_run_meta_path: str,
+    f6_run_meta: dict,
+    f6_run_meta_path: str,
+    cfg_f5: dict,
+    cfg_f6: dict,
+    reference_class_filter_requested: bool,
+    reference_class_filter_applied: bool,
+    reference_class_filter: str,
+) -> dict:
+    prop_name = _normalize_property_name(property_name)
+    f5_cfg_property = _normalize_property_name(cfg_f5.get("property", ""))
+    f6_cfg_property = _normalize_property_name(cfg_f6.get("property", ""))
+    f5_cfg_active = bool(f5_cfg_property) and f5_cfg_property.lower() == prop_name.lower()
+    f6_cfg_active = bool(f6_cfg_property) and f6_cfg_property.lower() == prop_name.lower()
+    f5_meta_property = _normalize_property_name(f5_run_meta.get("property", ""))
+    f6_meta_property = _normalize_property_name(f6_run_meta.get("property", ""))
+    f5_meta_active = bool(f5_meta_property) and f5_meta_property.lower() == prop_name.lower()
+    f6_meta_active = bool(f6_meta_property) and f6_meta_property.lower() == prop_name.lower()
+
+    f5_source = "run_meta" if f5_meta_active else ("config" if f5_cfg_active else "")
+    f6_source = "run_meta" if f6_meta_active else ("config" if f6_cfg_active else "")
+
+    if f5_meta_active:
+        f5_target_classes = f5_run_meta.get("target_classes", [])
+        f5_target_class = _stringify_list_like(f5_target_classes)
+        f5_proposal_views = _stringify_list_like(f5_run_meta.get("proposal_views"))
+        f5_encoder_view = str(f5_run_meta.get("encoder_view", "")).strip()
+        f5_require_validity = _to_bool(f5_run_meta.get("require_validity"), True)
+        f5_require_two_stars = _to_bool(f5_run_meta.get("require_two_stars"), True)
+        f5_require_novel = _to_bool(f5_run_meta.get("require_novel"), True)
+        f5_require_unique = _to_bool(f5_run_meta.get("require_unique"), True)
+        f5_max_sa = _to_float_or_none(f5_run_meta.get("max_sa"))
+        f5_rerank_strategy = str(f5_run_meta.get("rerank_strategy", "")).strip()
+        f5_property_model_mode = str(f5_run_meta.get("property_model_mode", "")).strip()
+    elif f5_cfg_active:
+        f5_target_class = str(cfg_f5.get("target_class", "")).strip()
+        f5_proposal_views = _stringify_list_like(cfg_f5.get("proposal_views"))
+        f5_encoder_view = str(cfg_f5.get("encoder_view", "")).strip()
+        f5_require_validity = _to_bool(cfg_f5.get("require_validity", True), True)
+        f5_require_two_stars = _to_bool(cfg_f5.get("require_two_stars", True), True)
+        f5_require_novel = _to_bool(cfg_f5.get("require_novel", True), True)
+        f5_require_unique = _to_bool(cfg_f5.get("require_unique", True), True)
+        f5_max_sa = _to_float_or_none(cfg_f5.get("max_sa"))
+        f5_rerank_strategy = str(cfg_f5.get("rerank_strategy", "")).strip()
+        f5_property_model_mode = str(cfg_f5.get("property_model_mode", "")).strip()
+    else:
+        f5_target_class = ""
+        f5_proposal_views = ""
+        f5_encoder_view = ""
+        f5_require_validity = None
+        f5_require_two_stars = None
+        f5_require_novel = None
+        f5_require_unique = None
+        f5_max_sa = np.nan
+        f5_rerank_strategy = ""
+        f5_property_model_mode = ""
+
+    if f6_meta_active:
+        f6_encoder_view = str(f6_run_meta.get("encoder_view", "")).strip()
+        f6_ood_views_requested = _stringify_list_like(f6_run_meta.get("ood_views_requested"))
+        f6_property_weight = _to_float_or_none(f6_run_meta.get("objective_property_weight"))
+        f6_ood_weight = _to_float_or_none(f6_run_meta.get("objective_ood_weight"))
+        f6_uncertainty_weight = _to_float_or_none(f6_run_meta.get("objective_uncertainty_weight"))
+        f6_constraint_weight = _to_float_or_none(f6_run_meta.get("objective_constraint_weight"))
+        f6_sa_weight = _to_float_or_none(f6_run_meta.get("objective_sa_weight"))
+        f6_descriptor_weight = _to_float_or_none(f6_run_meta.get("objective_descriptor_weight"))
+        f6_constraint_properties = _stringify_list_like(f6_run_meta.get("constraint_properties"))
+        f6_descriptor_constraints = _stringify_list_like(f6_run_meta.get("descriptor_constraints"))
+        f6_d2_distance_source = str(f6_run_meta.get("d2_distance_source", "")).strip()
+    elif f6_cfg_active:
+        f6_encoder_view = str(cfg_f6.get("encoder_view", "")).strip()
+        f6_ood_views_requested = _stringify_list_like(cfg_f6.get("ood_views"))
+        f6_property_weight = _to_float_or_none(cfg_f6.get("property_weight"))
+        f6_ood_weight = _to_float_or_none(cfg_f6.get("ood_weight"))
+        f6_uncertainty_weight = _to_float_or_none(cfg_f6.get("uncertainty_weight"))
+        f6_constraint_weight = _to_float_or_none(cfg_f6.get("constraint_weight"))
+        f6_sa_weight = _to_float_or_none(cfg_f6.get("sa_weight"))
+        f6_descriptor_weight = _to_float_or_none(cfg_f6.get("descriptor_weight"))
+        f6_constraint_properties = _stringify_list_like(cfg_f6.get("constraint_properties"))
+        f6_descriptor_constraints = _stringify_jsonish(cfg_f6.get("descriptor_constraints"))
+        f6_d2_distance_source = ""
+    else:
+        f6_encoder_view = ""
+        f6_ood_views_requested = ""
+        f6_property_weight = np.nan
+        f6_ood_weight = np.nan
+        f6_uncertainty_weight = np.nan
+        f6_constraint_weight = np.nan
+        f6_sa_weight = np.nan
+        f6_descriptor_weight = np.nan
+        f6_constraint_properties = ""
+        f6_descriptor_constraints = ""
+        f6_d2_distance_source = ""
+
+    cand_mean_sa = _series_mean(_sa_series(candidate_df, cand_desc))
+    top_mean_sa = _series_mean(_sa_series(topk_df, top_desc))
+    cand_valid_rate = _validity_rate(candidate_df, cand_desc)
+    top_valid_rate = _validity_rate(topk_df, top_desc)
+    cand_two_star_rate = _boolish_rate(candidate_df["is_two_star"]) if "is_two_star" in candidate_df.columns else _smiles_two_star_rate(candidate_df)
+    top_two_star_rate = _boolish_rate(topk_df["is_two_star"]) if "is_two_star" in topk_df.columns else _smiles_two_star_rate(topk_df)
+    cand_unique_rate = _smiles_unique_rate(candidate_df)
+    top_unique_rate = _smiles_unique_rate(topk_df)
+    cand_novel_rate = _boolish_rate(candidate_df["is_novel"]) if "is_novel" in candidate_df.columns else np.nan
+    top_novel_rate = _boolish_rate(topk_df["is_novel"]) if "is_novel" in topk_df.columns else np.nan
+    cand_sa_lt_rate = _sa_lt_rate(candidate_df, cand_desc, f5_max_sa)
+    top_sa_lt_rate = _sa_lt_rate(topk_df, top_desc, f5_max_sa)
+
+    return {
+        "property": property_name,
+        "candidate_scores_path": str(cand_path) if cand_path else "",
+        "topk_scores_path": str(topk_path) if topk_path else "",
+        "f5_run_meta_path": f5_run_meta_path,
+        "f6_run_meta_path": f6_run_meta_path,
+        "f5_policy_source": f5_source,
+        "f6_policy_source": f6_source,
+        "reference_class_filter_requested": bool(reference_class_filter_requested),
+        "reference_class_filter_applied": bool(reference_class_filter_applied),
+        "reference_class_filter": reference_class_filter or "",
+        "n_candidates": int(len(candidate_df)),
+        "n_topk": int(len(topk_df)),
+        "candidate_valid_rate": round(cand_valid_rate, 4) if np.isfinite(cand_valid_rate) else np.nan,
+        "topk_valid_rate": round(top_valid_rate, 4) if np.isfinite(top_valid_rate) else np.nan,
+        "candidate_two_star_rate": round(cand_two_star_rate, 4) if np.isfinite(cand_two_star_rate) else np.nan,
+        "topk_two_star_rate": round(top_two_star_rate, 4) if np.isfinite(top_two_star_rate) else np.nan,
+        "candidate_unique_smiles_rate": round(cand_unique_rate, 4) if np.isfinite(cand_unique_rate) else np.nan,
+        "topk_unique_smiles_rate": round(top_unique_rate, 4) if np.isfinite(top_unique_rate) else np.nan,
+        "candidate_novel_rate": round(cand_novel_rate, 4) if np.isfinite(cand_novel_rate) else np.nan,
+        "topk_novel_rate": round(top_novel_rate, 4) if np.isfinite(top_novel_rate) else np.nan,
+        "candidate_mean_sa": round(cand_mean_sa, 4) if np.isfinite(cand_mean_sa) else np.nan,
+        "topk_mean_sa": round(top_mean_sa, 4) if np.isfinite(top_mean_sa) else np.nan,
+        "candidate_sa_lt_max_rate": round(cand_sa_lt_rate, 4) if np.isfinite(cand_sa_lt_rate) else np.nan,
+        "topk_sa_lt_max_rate": round(top_sa_lt_rate, 4) if np.isfinite(top_sa_lt_rate) else np.nan,
+        "f5_encoder_view": f5_encoder_view,
+        "f5_proposal_views": f5_proposal_views,
+        "f5_require_validity": f5_require_validity,
+        "f5_require_two_stars": f5_require_two_stars,
+        "f5_require_novel": f5_require_novel,
+        "f5_require_unique": f5_require_unique,
+        "f5_target_class": f5_target_class,
+        "f5_max_sa": f5_max_sa,
+        "f5_rerank_strategy": f5_rerank_strategy,
+        "f5_property_model_mode": f5_property_model_mode,
+        "f6_encoder_view": f6_encoder_view,
+        "f6_ood_views_requested": f6_ood_views_requested,
+        "f6_property_weight": f6_property_weight,
+        "f6_ood_weight": f6_ood_weight,
+        "f6_uncertainty_weight": f6_uncertainty_weight,
+        "f6_constraint_weight": f6_constraint_weight,
+        "f6_sa_weight": f6_sa_weight,
+        "f6_descriptor_weight": f6_descriptor_weight,
+        "f6_constraint_properties": f6_constraint_properties,
+        "f6_descriptor_constraints": f6_descriptor_constraints,
+        "f6_d2_distance_source": f6_d2_distance_source,
+    }
 
 
 def _resolve_template_path(template: Optional[str], property_name: str) -> Optional[Path]:
@@ -797,23 +1204,45 @@ def _resolve_target_config(
     property_name: str,
     cfg_step7: dict,
     cfg_f5: dict,
+    cfg_f6: Optional[dict] = None,
+    f5_run_meta: Optional[dict] = None,
+    f6_run_meta: Optional[dict] = None,
 ) -> Tuple[Optional[float], str, Optional[float]]:
     targets = cfg_step7.get("targets", {}) or {}
     target_modes = cfg_step7.get("target_modes", {}) or {}
     epsilons = cfg_step7.get("epsilons", {}) or {}
+    cfg_f6 = cfg_f6 or {}
+    f5_run_meta = f5_run_meta or {}
+    f6_run_meta = f6_run_meta or {}
 
     prop_name = _normalize_property_name(property_name)
     prop_name_lower = prop_name.lower()
     f5_property = _normalize_property_name(cfg_f5.get("property", ""))
     f5_property_is_active = f5_property.lower() == prop_name_lower
+    f6_property = _normalize_property_name(cfg_f6.get("property", ""))
+    f6_property_is_active = f6_property.lower() == prop_name_lower
+    f5_run_meta_is_active = _normalize_property_name(f5_run_meta.get("property", "")).lower() == prop_name_lower
+    f6_run_meta_is_active = _normalize_property_name(f6_run_meta.get("property", "")).lower() == prop_name_lower
 
     target = _to_float_or_none(_lookup_property_setting(targets, prop_name))
+    if target is None and f6_run_meta_is_active:
+        target = _to_float_or_none(f6_run_meta.get("target_value"))
+    if target is None and f6_property_is_active:
+        target = _to_float_or_none(cfg_f6.get("target"))
+    if target is None and f5_run_meta_is_active:
+        target = _to_float_or_none(f5_run_meta.get("target_value"))
     if target is None:
         target = _to_float_or_none(_lookup_property_setting(cfg_f5.get("targets", {}) or {}, prop_name))
     if target is None and f5_property_is_active:
         target = _to_float_or_none(cfg_f5.get("target"))
 
     target_mode = str(_lookup_property_setting(target_modes, prop_name) or "").strip()
+    if not target_mode and f6_run_meta_is_active:
+        target_mode = str(f6_run_meta.get("target_mode", "")).strip()
+    if not target_mode and f6_property_is_active:
+        target_mode = str(cfg_f6.get("target_mode", "")).strip()
+    if not target_mode and f5_run_meta_is_active:
+        target_mode = str(f5_run_meta.get("target_mode", "")).strip()
     if not target_mode:
         target_mode = str(_lookup_property_setting(cfg_f5.get("target_modes", {}) or {}, prop_name) or "").strip()
     if not target_mode and f5_property_is_active:
@@ -825,6 +1254,12 @@ def _resolve_target_config(
         target_mode = "window"
 
     epsilon = _to_float_or_none(_lookup_property_setting(epsilons, prop_name))
+    if epsilon is None and f6_run_meta_is_active:
+        epsilon = _to_float_or_none(f6_run_meta.get("epsilon"))
+    if epsilon is None and f6_property_is_active:
+        epsilon = _to_float_or_none(cfg_f6.get("epsilon"))
+    if epsilon is None and f5_run_meta_is_active:
+        epsilon = _to_float_or_none(f5_run_meta.get("epsilon"))
     if epsilon is None:
         epsilon = _to_float_or_none(_lookup_property_setting(cfg_f5.get("epsilons", {}) or {}, prop_name))
     if epsilon is None and f5_property_is_active:
@@ -837,6 +1272,7 @@ def _resolve_reference_class(
     property_name: str,
     cfg_step7: dict,
     cfg_f5: dict,
+    f5_run_meta: Optional[dict],
     candidate_df: pd.DataFrame,
     topk_df: pd.DataFrame,
     override_class: Optional[str] = None,
@@ -854,6 +1290,20 @@ def _resolve_reference_class(
     text = str(cfg_step7.get("reference_class", "")).strip().lower()
     if text:
         return text
+
+    f5_run_meta = f5_run_meta or {}
+    f5_run_meta_property = _normalize_property_name(f5_run_meta.get("property", ""))
+    if f5_run_meta_property.lower() == _normalize_property_name(property_name).lower():
+        target_classes = f5_run_meta.get("target_classes")
+        if isinstance(target_classes, str):
+            text = str(target_classes).strip().lower()
+            if text:
+                return text
+        if isinstance(target_classes, (list, tuple, set)):
+            uniq = [str(x).strip().lower() for x in target_classes if str(x).strip()]
+            uniq = sorted(set(uniq))
+            if len(uniq) == 1:
+                return uniq[0]
 
     # Use F5 target_class when this property is the active F5 target.
     f5_prop = str(cfg_f5.get("property", "")).strip()
@@ -955,27 +1405,28 @@ def _plot_descriptor_detail_figure(property_name: str, descriptor_shift_df: pd.D
     if ds.empty:
         return
     ds["abs_d"] = np.abs(ds["cohens_d_topk_vs_ref"])
-    ds = ds.sort_values("abs_d", ascending=False).head(12).iloc[::-1]
+    ds = ds.sort_values("abs_d", ascending=False).head(8).iloc[::-1]
 
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, axes = plt.subplots(1, 2, figsize=(13, 5.4))
-        ax0, ax1 = axes
+        fig, axes = _make_panel_figure(1, 2)
+        ax0, ax1 = axes[0]
 
         colors = [COLOR_ACCENT if v >= 0 else COLOR_SECONDARY for v in ds["cohens_d_topk_vs_ref"].to_numpy(dtype=np.float32)]
         ax0.barh(ds["descriptor"].astype(str), ds["cohens_d_topk_vs_ref"], color=colors, alpha=0.9)
-        ax0.axvline(0.0, color="#111111", linewidth=1.0)
+        ax0.axvline(0.0, color=COLOR_TEXT, linewidth=1.0)
         ax0.set_xlabel("Cohen's d (top-k vs reference)")
         ax0.grid(axis="x", alpha=0.25)
+        _wrap_ticklabels(ax0, axis="y", width=18)
 
         pair_df = ds.dropna(subset=["ref_median", "topk_median"]).copy()
         if not pair_df.empty:
-            ax1.scatter(pair_df["ref_median"], pair_df["topk_median"], s=50, color=COLOR_PRIMARY, alpha=0.9)
+            ax1.scatter(pair_df["ref_median"], pair_df["topk_median"], s=62, color=COLOR_PRIMARY, alpha=0.9)
             lo = float(np.nanmin(np.concatenate([pair_df["ref_median"].to_numpy(dtype=np.float32), pair_df["topk_median"].to_numpy(dtype=np.float32)])))
             hi = float(np.nanmax(np.concatenate([pair_df["ref_median"].to_numpy(dtype=np.float32), pair_df["topk_median"].to_numpy(dtype=np.float32)])))
             if np.isfinite(lo) and np.isfinite(hi):
                 ax1.plot([lo, hi], [lo, hi], linestyle="--", color=COLOR_MUTED, linewidth=1.1)
-            for _, row in pair_df.iterrows():
-                ax1.text(float(row["ref_median"]), float(row["topk_median"]), str(row["descriptor"]), fontsize=15, alpha=0.8)
+            label_df = pair_df.assign(distance=np.abs(pair_df["topk_median"] - pair_df["ref_median"])).sort_values("distance", ascending=False)
+            _annotate_scatter_subset(ax1, label_df, x_col="ref_median", y_col="topk_median", label_col="descriptor", max_labels=6)
             ax1.set_xlabel("Reference median")
             ax1.set_ylabel("Top-k median")
             ax1.grid(alpha=0.25)
@@ -983,7 +1434,6 @@ def _plot_descriptor_detail_figure(property_name: str, descriptor_shift_df: pd.D
             ax1.text(0.5, 0.5, "No median values", ha="center", va="center")
             ax1.set_axis_off()
 
-        fig.tight_layout()
         _save_figure_png(fig, output_base)
         plt.close(fig)
 
@@ -1000,17 +1450,18 @@ def _plot_motif_detail_figure(property_name: str, motif_df: pd.DataFrame, output
     if mf.empty:
         return
     mf["abs_log2"] = np.abs(mf["log2_enrichment_topk_vs_ref"])
-    mf = mf.sort_values("abs_log2", ascending=False).head(12).iloc[::-1]
+    mf = mf.sort_values("abs_log2", ascending=False).head(8).iloc[::-1]
 
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, axes = plt.subplots(1, 2, figsize=(13, 5.4))
-        ax0, ax1 = axes
+        fig, axes = _make_panel_figure(1, 2)
+        ax0, ax1 = axes[0]
 
         colors = [COLOR_ACCENT if v >= 0 else COLOR_SECONDARY for v in mf["log2_enrichment_topk_vs_ref"].to_numpy(dtype=np.float32)]
         ax0.barh(mf["motif"].astype(str), mf["log2_enrichment_topk_vs_ref"], color=colors, alpha=0.9)
-        ax0.axvline(0.0, color="#111111", linewidth=1.0)
+        ax0.axvline(0.0, color=COLOR_TEXT, linewidth=1.0)
         ax0.set_xlabel("log2(top-k / reference)")
         ax0.grid(axis="x", alpha=0.25)
+        _wrap_ticklabels(ax0, axis="y", width=18)
 
         x = np.arange(len(mf), dtype=np.float32)
         width = 0.25
@@ -1023,8 +1474,8 @@ def _plot_motif_detail_figure(property_name: str, motif_df: pd.DataFrame, output
         ax1.set_ylabel("Frequency")
         ax1.grid(axis="y", alpha=0.25)
         ax1.legend(loc="best")
+        _wrap_ticklabels(ax1, axis="x", width=16, rotation=35)
 
-        fig.tight_layout()
         _save_figure_png(fig, output_base)
         plt.close(fig)
 
@@ -1039,11 +1490,11 @@ def _plot_physics_rule_detail_figure(property_name: str, physics_df: pd.DataFram
         return
 
     pf["abs_delta"] = np.abs(pf["observed_delta_topk_vs_ref"])
-    pf = pf.sort_values("abs_delta", ascending=False).copy()
+    pf = pf.sort_values("abs_delta", ascending=False).head(8).copy()
 
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, axes = plt.subplots(1, 2, figsize=(13, 5.4))
-        ax0, ax1 = axes
+        fig, axes = _make_panel_figure(1, 2)
+        ax0, ax1 = axes[0]
 
         labels = [f"{r['feature']} ({r['source']})" for _, r in pf.iterrows()]
         vals = pf["observed_delta_topk_vs_ref"].to_numpy(dtype=np.float32)
@@ -1053,9 +1504,10 @@ def _plot_physics_rule_detail_figure(property_name: str, physics_df: pd.DataFram
         ax0.barh(y, vals, color=colors, alpha=0.9)
         ax0.set_yticks(y)
         ax0.set_yticklabels(labels)
-        ax0.axvline(0.0, color="#111111", linewidth=1.0)
+        ax0.axvline(0.0, color=COLOR_TEXT, linewidth=1.0)
         ax0.set_xlabel("Observed delta (top-k vs reference)")
         ax0.grid(axis="x", alpha=0.25)
+        _wrap_ticklabels(ax0, axis="y", width=20)
 
         n_match = int(np.sum(ok))
         n_total = int(len(ok))
@@ -1066,7 +1518,6 @@ def _plot_physics_rule_detail_figure(property_name: str, physics_df: pd.DataFram
         if n_total > 0:
             ax1.text(0.5, max(n_match, n_mismatch, 1) * 1.02, f"Consistency: {n_match / n_total:.2f}", ha="center", va="bottom")
 
-        fig.tight_layout()
         _save_figure_png(fig, output_base)
         plt.close(fig)
 
@@ -1103,15 +1554,15 @@ def _plot_property_ood_landscape_figure(
     tk = plot_df[plot_df["is_topk"]]
 
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, axes = plt.subplots(1, 2, figsize=(13, 5.4))
-        ax0, ax1 = axes
+        fig, axes = _make_panel_figure(1, 2)
+        ax0, ax1 = axes[0]
 
         if not base.empty:
-            ax0.scatter(base["d2_distance"], base[y_col], s=10, alpha=0.22, color=COLOR_PRIMARY, label="Candidates")
+            ax0.scatter(base["d2_distance"], base[y_col], s=12, alpha=0.24, color=COLOR_TERTIARY, label="Candidates")
         if not tk.empty:
-            ax0.scatter(tk["d2_distance"], tk[y_col], s=26, alpha=0.9, color=COLOR_SECONDARY, label="F6 top-k")
+            ax0.scatter(tk["d2_distance"], tk[y_col], s=30, alpha=0.9, color=COLOR_SECONDARY, label="F6 top-k")
         if use_target_excess:
-            ax0.axhline(0.0, color="#111111", linewidth=1.0, linestyle="--")
+            ax0.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, linestyle="--")
         ax0.set_xlabel("D2 distance (lower is better)")
         ax0.set_ylabel(y_label)
         ax0.grid(alpha=0.25)
@@ -1132,7 +1583,6 @@ def _plot_property_ood_landscape_figure(
             ax1.text(0.5, 0.5, "No finite error values", ha="center", va="center")
             ax1.set_axis_off()
 
-        fig.tight_layout()
         _save_figure_png(fig, output_base)
         plt.close(fig)
 
@@ -1150,11 +1600,11 @@ def _plot_nearest_neighbor_detail_figure(property_name: str, nn_df: pd.DataFrame
         return
 
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5.5))
-        ax0, ax1, ax2 = axes
+        fig, axes = _make_panel_figure(1, 3, panel_width=5.8, panel_height=5.8)
+        ax0, ax1, ax2 = axes[0]
 
-        ax0.hist(sims, bins=18, color="#6D597A", alpha=0.85)
-        ax0.axvline(float(np.mean(sims)), color="#111111", linestyle="--", linewidth=1.1, label="Mean")
+        ax0.hist(sims, bins=18, color=COLOR_QUATERNARY, alpha=0.85)
+        ax0.axvline(float(np.mean(sims)), color=COLOR_TEXT, linestyle="--", linewidth=1.1, label="Mean")
         ax0.set_xlabel("Tanimoto")
         ax0.set_ylabel("Count")
         ax0.grid(alpha=0.25)
@@ -1204,31 +1654,30 @@ def _plot_nearest_neighbor_detail_figure(property_name: str, nn_df: pd.DataFrame
             colors = [COLOR_ACCENT if v >= 0 else COLOR_SECONDARY for v in vals]
             y_pos = np.arange(len(labels), dtype=np.float32)
             ax2.barh(y_pos, vals, color=colors, alpha=0.85)
-            ax2.axvline(0.0, color="#111111", linewidth=1.0)
-            # No y-ticks — embed label + value as white text inside each bar
-            ax2.set_yticks([])
-            ax2.set_xlabel("Mean Δ (top-k vs nearest reference)", fontsize=9)
-            ax2.set_title("Descriptor shifts\n(top-k vs nearest ref)", fontsize=10)
+            ax2.axvline(0.0, color=COLOR_TEXT, linewidth=1.0)
+            ax2.set_yticks(y_pos)
+            ax2.set_yticklabels(labels)
+            ax2.set_xlabel("Mean Δ (top-k vs nearest reference)")
+            ax2.set_title("Descriptor shifts")
             ax2.grid(axis="x", alpha=0.25)
-            x_range = max(abs(v) for v in vals) if vals else 1.0
-            for y_pos_i, v, label in zip(y_pos, vals, labels):
-                # Embed combined "label: value" just inside the zero end of the bar
-                inner_x = -0.03 * x_range if v < 0 else 0.03 * x_range
-                ha_inner = "right" if v < 0 else "left"
-                ax2.text(inner_x, y_pos_i, f"{label}: {v:+.2f}",
-                         va="center", ha=ha_inner, fontsize=8,
-                         color="white", fontweight="bold")
-            # Show large-magnitude descriptors as a text block below the plot
+            _wrap_ticklabels(ax2, axis="y", width=18)
             if note_lines:
-                note_text = "  ".join(note_lines)
-                ax2.text(0.5, -0.18, note_text, transform=ax2.transAxes,
-                         ha="center", va="top", fontsize=8, color="#555555",
-                         style="italic")
+                note_text = "\n".join(note_lines)
+                ax2.text(
+                    0.02,
+                    0.02,
+                    note_text,
+                    transform=ax2.transAxes,
+                    ha="left",
+                    va="bottom",
+                    bbox={"facecolor": "white", "alpha": 0.88, "edgecolor": "none", "pad": 1.5},
+                    color=COLOR_TEXT,
+                    style="italic",
+                )
         else:
             ax2.text(0.5, 0.5, "No descriptor delta columns", ha="center", va="center")
             ax2.set_axis_off()
 
-        fig.tight_layout()
         _save_figure_png(fig, output_base)
         plt.close(fig)
 
@@ -1300,93 +1749,97 @@ def _plot_property_figure(
 ) -> None:
     if plt is None:
         return
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, axes = _make_panel_figure(2, 2, panel_width=6.7, panel_height=5.7)
+        ax1, ax2, ax3, ax4 = axes.ravel()
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    ax1, ax2, ax3, ax4 = axes.ravel()
-
-    # Panel A: descriptor effect sizes (top-k vs reference)
-    ds = descriptor_shift_df.copy()
-    ds = ds.replace([np.inf, -np.inf], np.nan).dropna(subset=["cohens_d_topk_vs_ref"])
-    if not ds.empty:
-        ds = ds.assign(abs_d=np.abs(ds["cohens_d_topk_vs_ref"]))
-        ds = ds.sort_values("abs_d", ascending=False).head(10).iloc[::-1]
-        ax1.barh(ds["descriptor"], ds["cohens_d_topk_vs_ref"], color="#2C7FB8")
-        ax1.axvline(0.0, color="black", linewidth=1)
-        ax1.set_xlabel("Effect size")
-    else:
-        ax1.text(0.5, 0.5, "No descriptor shift data", ha="center", va="center")
-        ax1.set_axis_off()
-
-    # Panel B: motif enrichment
-    mf = motif_df.copy()
-    mf = mf.replace([np.inf, -np.inf], np.nan).dropna(subset=["log2_enrichment_topk_vs_ref"])
-    if not mf.empty:
-        mf = mf.assign(abs_log2=np.abs(mf["log2_enrichment_topk_vs_ref"]))
-        mf = mf.sort_values("abs_log2", ascending=False).head(10).iloc[::-1]
-        ax2.barh(mf["motif"], mf["log2_enrichment_topk_vs_ref"], color="#41AB5D")
-        ax2.axvline(0.0, color="black", linewidth=1)
-        ax2.set_xlabel("log2 enrichment")
-    else:
-        ax2.text(0.5, 0.5, "No motif data", ha="center", va="center")
-        ax2.set_axis_off()
-
-    # Panel C: property error vs OOD distance
-    cdf = _prepare_candidate_error_df(candidate_df, target=target, target_mode=target_mode)
-    use_target_excess = str(target_mode).strip().lower() in {"ge", "le"} and cdf["target_excess"].notna().any()
-    y_col = "target_excess" if use_target_excess else "property_error"
-    y_label = (
-        f"{_target_excess_axis_label(property_name, target_mode)} (>=0 is hit)"
-        if use_target_excess
-        else "Property error/proxy"
-    )
-
-    if {"d2_distance", y_col, "smiles"}.issubset(set(cdf.columns)):
-        plot_df = cdf.dropna(subset=["d2_distance", y_col]).copy()
-        if not plot_df.empty:
-            topk_set = set(topk_df["smiles"].astype(str).tolist()) if "smiles" in topk_df.columns else set()
-            plot_df["is_topk"] = plot_df["smiles"].astype(str).isin(topk_set)
-            base = plot_df[~plot_df["is_topk"]]
-            tk = plot_df[plot_df["is_topk"]]
-            if not base.empty:
-                ax3.scatter(base["d2_distance"], base[y_col], s=12, alpha=0.35, label="Candidates", color="#9ECAE1")
-            if not tk.empty:
-                ax3.scatter(tk["d2_distance"], tk[y_col], s=24, alpha=0.9, label="F6 top-k", color="#D94801")
-            if use_target_excess:
-                ax3.axhline(0.0, color="#111111", linewidth=1.0, linestyle="--")
-            ax3.set_xlabel("D2 distance (lower is closer)")
-            ax3.set_ylabel(y_label)
-            ax3.legend(frameon=False, loc="best", fontsize=15)
+        ds = descriptor_shift_df.copy()
+        ds = ds.replace([np.inf, -np.inf], np.nan).dropna(subset=["cohens_d_topk_vs_ref"])
+        if not ds.empty:
+            ds = ds.assign(abs_d=np.abs(ds["cohens_d_topk_vs_ref"]))
+            ds = ds.sort_values("abs_d", ascending=False).head(8).iloc[::-1]
+            bar_colors = [COLOR_ACCENT if v >= 0 else COLOR_SECONDARY for v in ds["cohens_d_topk_vs_ref"].to_numpy(dtype=np.float32)]
+            ax1.barh(ds["descriptor"], ds["cohens_d_topk_vs_ref"], color=bar_colors)
+            ax1.axvline(0.0, color=COLOR_TEXT, linewidth=1.0)
+            ax1.set_xlabel("Effect size")
+            ax1.grid(axis="x", alpha=0.25)
+            _wrap_ticklabels(ax1, axis="y", width=18)
         else:
-            ax3.text(0.5, 0.5, "No valid scatter points", ha="center", va="center")
+            ax1.text(0.5, 0.5, "No descriptor shift data", ha="center", va="center")
+            ax1.set_axis_off()
+
+        mf = motif_df.copy()
+        mf = mf.replace([np.inf, -np.inf], np.nan).dropna(subset=["log2_enrichment_topk_vs_ref"])
+        if not mf.empty:
+            mf = mf.assign(abs_log2=np.abs(mf["log2_enrichment_topk_vs_ref"]))
+            mf = mf.sort_values("abs_log2", ascending=False).head(8).iloc[::-1]
+            bar_colors = [COLOR_ACCENT if v >= 0 else COLOR_SECONDARY for v in mf["log2_enrichment_topk_vs_ref"].to_numpy(dtype=np.float32)]
+            ax2.barh(mf["motif"], mf["log2_enrichment_topk_vs_ref"], color=bar_colors)
+            ax2.axvline(0.0, color=COLOR_TEXT, linewidth=1.0)
+            ax2.set_xlabel("log2 enrichment")
+            ax2.grid(axis="x", alpha=0.25)
+            _wrap_ticklabels(ax2, axis="y", width=18)
+        else:
+            ax2.text(0.5, 0.5, "No motif data", ha="center", va="center")
+            ax2.set_axis_off()
+
+        cdf = _prepare_candidate_error_df(candidate_df, target=target, target_mode=target_mode)
+        use_target_excess = str(target_mode).strip().lower() in {"ge", "le"} and cdf["target_excess"].notna().any()
+        y_col = "target_excess" if use_target_excess else "property_error"
+        y_label = (
+            f"{_target_excess_axis_label(property_name, target_mode)} (>=0 is hit)"
+            if use_target_excess
+            else "Property error/proxy"
+        )
+
+        if {"d2_distance", y_col, "smiles"}.issubset(set(cdf.columns)):
+            plot_df = cdf.dropna(subset=["d2_distance", y_col]).copy()
+            if not plot_df.empty:
+                topk_set = set(topk_df["smiles"].astype(str).tolist()) if "smiles" in topk_df.columns else set()
+                plot_df["is_topk"] = plot_df["smiles"].astype(str).isin(topk_set)
+                base = plot_df[~plot_df["is_topk"]]
+                tk = plot_df[plot_df["is_topk"]]
+                if not base.empty:
+                    ax3.scatter(base["d2_distance"], base[y_col], s=12, alpha=0.24, label="Candidates", color=COLOR_TERTIARY)
+                if not tk.empty:
+                    ax3.scatter(tk["d2_distance"], tk[y_col], s=28, alpha=0.9, label="F6 top-k", color=COLOR_SECONDARY)
+                if use_target_excess:
+                    ax3.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, linestyle="--")
+                ax3.set_xlabel("D2 distance (lower is closer)")
+                ax3.set_ylabel(y_label)
+                ax3.grid(alpha=0.25)
+                ax3.legend(frameon=False, loc="best")
+            else:
+                ax3.text(0.5, 0.5, "No valid scatter points", ha="center", va="center")
+                ax3.set_axis_off()
+        else:
+            ax3.text(0.5, 0.5, "Need prediction + d2_distance", ha="center", va="center")
             ax3.set_axis_off()
-    else:
-        ax3.text(0.5, 0.5, "Need prediction + d2_distance", ha="center", va="center")
-        ax3.set_axis_off()
 
-    # Panel D: nearest-neighbor similarity
-    if not nn_df.empty and "nearest_tanimoto" in nn_df.columns:
-        vals = pd.to_numeric(nn_df["nearest_tanimoto"], errors="coerce").dropna().to_numpy(dtype=np.float32)
-        if vals.size:
-            ax4.hist(vals, bins=15, color="#756BB1", alpha=0.85)
-            ax4.set_xlabel("Tanimoto similarity")
-            ax4.set_ylabel("Count")
+        if not nn_df.empty and "nearest_tanimoto" in nn_df.columns:
+            vals = pd.to_numeric(nn_df["nearest_tanimoto"], errors="coerce").dropna().to_numpy(dtype=np.float32)
+            if vals.size:
+                ax4.hist(vals, bins=15, color=COLOR_QUATERNARY, alpha=0.85)
+                ax4.set_xlabel("Tanimoto similarity")
+                ax4.set_ylabel("Count")
+                ax4.grid(axis="y", alpha=0.25)
+            else:
+                ax4.text(0.5, 0.5, "No NN similarity values", ha="center", va="center")
+                ax4.set_axis_off()
         else:
-            ax4.text(0.5, 0.5, "No NN similarity values", ha="center", va="center")
+            ax4.text(0.5, 0.5, "No NN explanation data", ha="center", va="center")
             ax4.set_axis_off()
-    else:
-        ax4.text(0.5, 0.5, "No NN explanation data", ha="center", va="center")
-        ax4.set_axis_off()
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    _save_figure_png(fig, output_base)
-    plt.close(fig)
+        _save_figure_png(fig, output_base)
+        plt.close(fig)
 
 
 def _plot_summary_figure(metrics_df: pd.DataFrame, output_base: Path) -> None:
     if plt is None or metrics_df.empty:
         return
     with plt.rc_context(PUBLICATION_STYLE):
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4.8))
+        fig, axes = _make_panel_figure(1, 3, panel_width=5.8, panel_height=5.2)
+        axes = axes[0]
 
         df = metrics_df.copy().sort_values("property")
         props = df["property"].astype(str).tolist()
@@ -1395,16 +1848,18 @@ def _plot_summary_figure(metrics_df: pd.DataFrame, output_base: Path) -> None:
         axes[0].set_ylim(0, 1)
         axes[0].set_ylabel("Rate")
         axes[0].grid(axis="y", alpha=0.25)
+        _wrap_ticklabels(axes[0], axis="x", width=14, rotation=35)
 
         axes[1].bar(props, pd.to_numeric(df["topk_hit_rate"], errors="coerce").fillna(0.0), color=COLOR_ACCENT)
         axes[1].set_ylim(0, 1)
         axes[1].grid(axis="y", alpha=0.25)
+        _wrap_ticklabels(axes[1], axis="x", width=14, rotation=35)
 
-        axes[2].bar(props, pd.to_numeric(df["mean_nn_similarity"], errors="coerce").fillna(0.0), color="#6D597A")
+        axes[2].bar(props, pd.to_numeric(df["mean_nn_similarity"], errors="coerce").fillna(0.0), color=COLOR_QUATERNARY)
         axes[2].set_ylim(0, 1)
         axes[2].grid(axis="y", alpha=0.25)
+        _wrap_ticklabels(axes[2], axis="x", width=14, rotation=35)
 
-        fig.tight_layout()
         _save_figure_png(fig, output_base)
         plt.close(fig)
 
@@ -1416,6 +1871,7 @@ def main(args):
     config = load_config(args.config)
     cfg_step7 = config.get("chem_physics_analysis", {}) or {}
     cfg_f5 = config.get("foundation_inverse", {}) or {}
+    cfg_f6 = config.get("ood_aware_inverse", {}) or {}
 
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -1468,6 +1924,7 @@ def main(args):
     all_nn = []
     metric_rows = []
     file_rows = []
+    design_audit_rows = []
     skipped = []
     multi_property_run = len(properties) > 1
 
@@ -1489,23 +1946,20 @@ def main(args):
             candidate_template=candidate_template,
             topk_template=topk_template,
         )
+        f5_run_meta, f5_run_meta_path = _load_neighbor_run_meta(cand_path, prop)
+        f6_run_meta, f6_run_meta_path = _load_neighbor_run_meta(topk_path, prop)
+        prop_file_row = {
+            "property": prop,
+            "candidate_scores_path": str(cand_path) if cand_path else "",
+            "topk_scores_path": str(topk_path) if topk_path else "",
+            "f5_run_meta_path": f5_run_meta_path,
+            "f6_run_meta_path": f6_run_meta_path,
+        }
         file_rows.append(
-            {
-                "property": prop,
-                "candidate_scores_path": str(cand_path) if cand_path else "",
-                "topk_scores_path": str(topk_path) if topk_path else "",
-            }
+            dict(prop_file_row)
         )
         save_csv(
-            pd.DataFrame(
-                [
-                    {
-                        "property": prop,
-                        "candidate_scores_path": str(cand_path) if cand_path else "",
-                        "topk_scores_path": str(topk_path) if topk_path else "",
-                    }
-                ]
-            ),
+            pd.DataFrame([prop_file_row]),
             prop_step_dirs["files_dir"] / "property_input_files.csv",
             index=False,
         )
@@ -1581,12 +2035,20 @@ def main(args):
         else:
             candidate_df = topk_df.copy()
 
-        target, target_mode, epsilon = _resolve_target_config(prop, cfg_step7, cfg_f5)
+        target, target_mode, epsilon = _resolve_target_config(
+            prop,
+            cfg_step7,
+            cfg_f5,
+            cfg_f6=cfg_f6,
+            f5_run_meta=f5_run_meta,
+            f6_run_meta=f6_run_meta,
+        )
 
         resolved_reference_class = _resolve_reference_class(
             property_name=prop,
             cfg_step7=cfg_step7,
             cfg_f5=cfg_f5,
+            f5_run_meta=f5_run_meta,
             candidate_df=candidate_df,
             topk_df=topk_df,
             override_class=reference_class_override,
@@ -1641,17 +2103,38 @@ def main(args):
         motif_df = _motif_enrichment_table(prop, ref_desc_used, cand_desc, top_desc)
         physics_df = _physics_consistency_table(prop, shift_df, motif_df, target_mode=target_mode)
         nn_df = _nearest_neighbor_explanations(prop, ref_df_used, topk_df, ref_desc_used, top_desc)
+        reference_class_filter_applied = bool(reference_class_filter_enabled and bool(resolved_reference_class))
+        design_audit_row = _build_design_filter_audit_row(
+            property_name=prop,
+            candidate_df=candidate_df,
+            topk_df=topk_df,
+            cand_desc=cand_desc,
+            top_desc=top_desc,
+            cand_path=cand_path,
+            topk_path=topk_path,
+            f5_run_meta=f5_run_meta,
+            f5_run_meta_path=f5_run_meta_path,
+            f6_run_meta=f6_run_meta,
+            f6_run_meta_path=f6_run_meta_path,
+            cfg_f5=cfg_f5,
+            cfg_f6=cfg_f6,
+            reference_class_filter_requested=bool(reference_class_filter_enabled),
+            reference_class_filter_applied=reference_class_filter_applied,
+            reference_class_filter=resolved_reference_class,
+        )
 
         all_descriptor_shift.append(shift_df)
         all_motif.append(motif_df)
         all_physics.append(physics_df)
         if not nn_df.empty:
             all_nn.append(nn_df)
+        design_audit_rows.append(design_audit_row)
 
         save_csv(shift_df, prop_step_dirs["files_dir"] / "descriptor_shifts.csv", index=False)
         save_csv(motif_df, prop_step_dirs["files_dir"] / "motif_enrichment.csv", index=False)
         save_csv(physics_df, prop_step_dirs["files_dir"] / "physics_consistency.csv", index=False)
         save_csv(nn_df, prop_step_dirs["files_dir"] / "nearest_neighbor_explanations.csv", index=False)
+        save_csv(pd.DataFrame([design_audit_row]), prop_step_dirs["files_dir"] / "design_filter_audit.csv", index=False)
 
         if "property_hit" in topk_df.columns:
             hit_vals = pd.to_numeric(topk_df["property_hit"], errors="coerce")
@@ -1689,7 +2172,7 @@ def main(args):
             "n_reference": int(len(ref_df_used)),
             "n_candidates": int(len(candidate_df)),
             "n_topk": int(len(topk_df)),
-            "reference_class_filter_enabled": bool(reference_class_filter_enabled and bool(resolved_reference_class)),
+            "reference_class_filter_enabled": reference_class_filter_applied,
             "reference_class_filter": resolved_reference_class if resolved_reference_class else "",
             "descriptor_consistency_rate": round(consistency_rate, 4) if np.isfinite(consistency_rate) else np.nan,
             "mean_nn_similarity": round(mean_nn, 4) if np.isfinite(mean_nn) else np.nan,
@@ -1701,6 +2184,19 @@ def main(args):
             "target_value": target,
             "target_mode": target_mode,
             "epsilon": epsilon,
+            "f5_require_novel": design_audit_row["f5_require_novel"],
+            "f5_max_sa": design_audit_row["f5_max_sa"],
+            "f5_target_class": design_audit_row["f5_target_class"],
+            "candidate_novel_rate": design_audit_row["candidate_novel_rate"],
+            "topk_novel_rate": design_audit_row["topk_novel_rate"],
+            "candidate_sa_lt_max_rate": design_audit_row["candidate_sa_lt_max_rate"],
+            "topk_sa_lt_max_rate": design_audit_row["topk_sa_lt_max_rate"],
+            "f6_property_weight": design_audit_row["f6_property_weight"],
+            "f6_ood_weight": design_audit_row["f6_ood_weight"],
+            "f6_uncertainty_weight": design_audit_row["f6_uncertainty_weight"],
+            "f6_constraint_weight": design_audit_row["f6_constraint_weight"],
+            "f6_sa_weight": design_audit_row["f6_sa_weight"],
+            "f6_descriptor_weight": design_audit_row["f6_descriptor_weight"],
         }
         metric_rows.append(metric_row)
         save_csv(pd.DataFrame([metric_row]), prop_step_dirs["metrics_dir"] / "metrics_chem_physics.csv", index=False)
@@ -1724,12 +2220,16 @@ def main(args):
                 "property": prop,
                 "candidate_scores_path": str(cand_path) if cand_path else "",
                 "topk_scores_path": str(topk_path) if topk_path else "",
-                "reference_class_filter_enabled": bool(reference_class_filter_enabled),
+                "f5_run_meta_path": f5_run_meta_path,
+                "f6_run_meta_path": f6_run_meta_path,
+                "reference_class_filter_requested": bool(reference_class_filter_enabled),
+                "reference_class_filter_enabled": reference_class_filter_applied,
                 "reference_class_filter": resolved_reference_class if resolved_reference_class else "",
                 "target_value": target,
                 "target_mode": target_mode,
                 "epsilon": epsilon,
                 "generate_figures": bool(generate_figures),
+                "design_filter_audit": design_audit_row,
             },
             prop_step_dirs["files_dir"] / "run_meta.json",
         )
@@ -1746,6 +2246,7 @@ def main(args):
     nn_all = pd.concat(all_nn, ignore_index=True) if all_nn else pd.DataFrame()
     metrics_df = pd.DataFrame(metric_rows)
     files_df = pd.DataFrame(file_rows)
+    design_audit_df = pd.DataFrame(design_audit_rows)
 
     save_csv(
         descriptor_shift_all,
@@ -1778,6 +2279,12 @@ def main(args):
         index=False,
     )
     save_csv(
+        design_audit_df,
+        step_dirs["files_dir"] / "design_filter_audit.csv",
+        legacy_paths=[results_dir / "step7_chem_physics_analysis" / "design_filter_audit.csv"],
+        index=False,
+    )
+    save_csv(
         metrics_df,
         step_dirs["metrics_dir"] / "metrics_chem_physics.csv",
         legacy_paths=[results_dir / "metrics_chem_physics.csv"],
@@ -1797,9 +2304,20 @@ def main(args):
             "skipped": skipped,
             "candidate_scores_template": candidate_template,
             "topk_scores_template": topk_template,
-            "reference_class_filter_enabled": bool(reference_class_filter_enabled),
+            "reference_class_filter_requested": bool(reference_class_filter_enabled),
+            "reference_class_filter_enabled": (
+                bool(
+                    design_audit_df["reference_class_filter_applied"]
+                    .fillna(False)
+                    .astype(bool)
+                    .any()
+                )
+                if not design_audit_df.empty and "reference_class_filter_applied" in design_audit_df.columns
+                else False
+            ),
             "reference_class_override": reference_class_override or "",
             "generate_figures": bool(generate_figures),
+            "design_filter_audit_path": str(step_dirs["files_dir"] / "design_filter_audit.csv"),
         },
         step_dirs["files_dir"] / "run_meta.json",
         legacy_paths=[results_dir / "step7_chem_physics_analysis" / "run_meta.json"],
