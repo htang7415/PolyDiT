@@ -37,15 +37,15 @@ data:
   max_samples_d2: 12888
 
 # F0/F1 view selection
-alignment_views: ["selfies"]
+alignment_views: ["smiles"]
 
 views:
   smiles:
-    enabled: false
+    enabled: true
   smiles_bpe:
     enabled: false
   selfies:
-    enabled: true
+    enabled: false
   group_selfies:
     enabled: false
     tokenizer_path: "../Bi_Diffusion_Group_SELFIES/results/tokenizer.pkl"
@@ -84,7 +84,7 @@ property:
   max_samples: null
   test_ratio: 0.1            # 10% holdout; remaining 90% used for CV and final training
   model_type: "mlp"
-  views: ["selfies"]
+  views: ["smiles"]
   enable_multiview_mean_head: false
   generate_figures: true
   hyperparameter_tuning:
@@ -140,18 +140,18 @@ foundation_inverse:
   sampling_num_per_batch: 512
   sampling_batch_size: 128
   sampling_max_batches: 10000
-  proposal_views: ["selfies"]   # which diffusion backbone(s) generate candidate molecules; list of views or "all"
+  proposal_views: ["smiles"]    # which diffusion backbone(s) generate candidate molecules; list of views or "all"
   sampling_temperature: null
   sampling_num_atoms: null
   # Optional comma-separated class filter. Supported classes:
   # polyimide, polyester, polyamide, polyurethane, polyether,
   # polysiloxane, polycarbonate, polysulfone, polyacrylate, polystyrene
-  target_class: "polyimide"         # empty string disables class filter
+  target_class: ""                  # empty string disables class filter
   require_validity: true
   require_two_stars: true
-  require_novel: true
+  require_novel: true               # candidate_source="novel" relative to training polymers
   require_unique: true
-  max_sa: 4.0
+  max_sa: 3.6
   per_view_min_hits: 2
   per_view_quota_relax_after_batches: 12
   property_model_mode: "single"     # single: use one MLP (encoder_view's); all: ensemble all view MLPs (committee)
@@ -161,14 +161,14 @@ foundation_inverse:
   generate_figures: true
   ood_k: 5
   # ood_prop = cosine dist to D2 (property MLP training set); ood_gen = cosine dist to D1 (backbone training set)
-  encoder_view: "selfies"          # backbone used to embed candidates for property scoring and D2 OOD distance
+  encoder_view: "smiles"           # backbone used to embed candidates for property scoring and D2 OOD distance
 
 # F6 OOD-aware inverse args
 ood_aware_inverse:
   enabled: true
   run_all_properties: false
-  encoder_view: "selfies"       # backbone for D2 OOD distance
-  ood_views: "selfies"          # views used to compute per-view D2 distances, then averaged; "all" or comma-separated list
+  encoder_view: "smiles"        # backbone for D2 OOD distance
+  ood_views: "smiles"           # views used to compute per-view D2 distances, then averaged; "all" or comma-separated list
   property: "Tg"
   target: null
   target_mode: ""
@@ -177,21 +177,11 @@ ood_aware_inverse:
   property_weight: 0.6
   ood_weight: 0.2
   uncertainty_weight: 0.15      # penalize committee disagreement (prediction std)
-  constraint_weight: 0.05       # soft constraints on non-target properties
+  constraint_weight: 0.0        # disable non-target soft constraints
   sa_weight: 0.0                # optional SA penalty term
-  descriptor_weight: 0.25       # optional structure-prior penalty (ring/aromatic for Td-like tasks)
-  constraint_properties: []     # empty => auto from available pred_<PROP>_mean + targets map
-  descriptor_constraints:
-    aromatic_ring_count:
-      target: 1.0
-      mode: ge
-      weight: 1.0
-      min: 2
-    ring_count:
-      target: 1.0
-      mode: ge
-      weight: 1.0
-      min: 3
+  descriptor_weight: 0.0        # disable descriptor constraints/penalties
+  constraint_properties: []     # empty => no additional property constraints
+  descriptor_constraints: {}
   constraint_weights: {}        # optional per-property multipliers, e.g. {Tm: 2.0}
   normalization: "minmax"       # minmax|rank|none
   ood_k: 5
