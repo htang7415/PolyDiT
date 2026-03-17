@@ -28,6 +28,17 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.utils.config import load_config, save_config
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
+from src.utils.visualization import (
+    COLOR_MUTED as SHARED_COLOR_MUTED,
+    COLOR_TEXT as SHARED_COLOR_TEXT,
+    NATURE_PALETTE as SHARED_NATURE_PALETTE,
+    PUBLICATION_STYLE as SHARED_PUBLICATION_STYLE,
+    normalize_view_name,
+    ordered_views,
+    save_figure_png as shared_save_figure_png,
+    view_color,
+    view_label,
+)
 
 try:  # pragma: no cover
     import matplotlib
@@ -35,6 +46,7 @@ try:  # pragma: no cover
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except Exception:  # pragma: no cover
+    matplotlib = None
     plt = None
 
 try:  # pragma: no cover
@@ -50,16 +62,7 @@ except Exception:  # pragma: no cover
     rdMolDescriptors = None
 
 
-DEFAULT_PROPERTIES = [
-    "Tg",
-    "Tm",
-    "Td",
-    "Eg",
-    "cohesive_energy_density",
-    "electron_affinity",
-    "electron_injection_barrier",
-    "ionization_energy",
-]
+DEFAULT_PROPERTIES = ["Tg"]
 
 DESCRIPTOR_COLUMNS = [
     "mol_wt",
@@ -146,42 +149,23 @@ PHYSICS_RULES = {
 }
 
 PUBLICATION_STYLE = {
-    "font.family": "serif",
-    "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
+    **SHARED_PUBLICATION_STYLE,
     "axes.spines.top": False,
     "axes.spines.right": False,
-    "axes.linewidth": 0.8,
+    "axes.linewidth": SHARED_PUBLICATION_STYLE.get("axes.linewidth", 0.9),
     "axes.titleweight": "bold",
-    "axes.labelsize": 16,
-    "axes.titlesize": 16,
-    "xtick.labelsize": 16,
-    "ytick.labelsize": 16,
     "legend.frameon": False,
-    "legend.fontsize": 16,
-    "figure.dpi": 300,
-    "savefig.dpi": 600,
     "figure.constrained_layout.use": True,
 }
 
-NATURE_PALETTE = [
-    "#E64B35",
-    "#4DBBD5",
-    "#00A087",
-    "#3C5488",
-    "#F39B7F",
-    "#8491B4",
-    "#91D1C2",
-    "#DC0000",
-    "#7E6148",
-    "#B09C85",
-]
+NATURE_PALETTE = list(SHARED_NATURE_PALETTE)
 COLOR_PRIMARY = NATURE_PALETTE[3]
 COLOR_SECONDARY = NATURE_PALETTE[0]
 COLOR_ACCENT = NATURE_PALETTE[2]
 COLOR_TERTIARY = NATURE_PALETTE[1]
 COLOR_QUATERNARY = NATURE_PALETTE[5]
-COLOR_MUTED = "#B8BFC9"
-COLOR_TEXT = "#1F2937"
+COLOR_MUTED = SHARED_COLOR_MUTED
+COLOR_TEXT = SHARED_COLOR_TEXT
 
 if plt is not None:  # pragma: no branch
     PUBLICATION_STYLE["axes.prop_cycle"] = matplotlib.cycler(color=NATURE_PALETTE)
@@ -226,22 +210,8 @@ def _to_float_or_none(value):
     return float(text)
 
 
-def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: str = "best") -> None:
-    for text_obj in fig.findobj(match=lambda artist: hasattr(artist, "set_fontsize")):
-        try:
-            text_obj.set_fontsize(font_size)
-        except Exception:
-            continue
-    for ax in fig.axes:
-        legend = ax.get_legend()
-        if legend is not None:
-            legend.set_loc(legend_loc)
-
-
 def _save_figure_png(fig, output_base: Path) -> None:
-    output_base.parent.mkdir(parents=True, exist_ok=True)
-    _standardize_figure_text_and_legend(fig, font_size=16, legend_loc="best")
-    fig.savefig(output_base.with_suffix(".png"), dpi=600, bbox_inches="tight", pad_inches=0.08)
+    shared_save_figure_png(fig, output_base, font_size=16, dpi=600, legend_loc="best")
 
 
 def _nature_sequential_cmap():
@@ -381,11 +351,6 @@ def _lookup_property_setting(mapping: dict, property_name: str):
         if _normalize_property_name(k).lower() == target:
             return v
     return None
-
-
-def _safe_mkdir(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
 
 def _load_module(module_name: str, path: Path):
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -1385,6 +1350,8 @@ def _prepare_candidate_error_df(candidate_df: pd.DataFrame, target: Optional[flo
         )
     elif "abs_error" in cdf.columns:
         cdf["target_violation"] = pd.to_numeric(cdf["abs_error"], errors="coerce")
+    elif "property_error_raw" in cdf.columns:
+        cdf["target_violation"] = pd.to_numeric(cdf["property_error_raw"], errors="coerce")
     elif "property_error_normed" in cdf.columns:
         cdf["target_violation"] = pd.to_numeric(cdf["property_error_normed"], errors="coerce")
     else:
@@ -1864,6 +1831,49 @@ def _plot_summary_figure(metrics_df: pd.DataFrame, output_base: Path) -> None:
         plt.close(fig)
 
 
+def _plot_view_summary_figure(view_summary_df: pd.DataFrame, output_base: Path, property_name: str) -> None:
+    if plt is None or view_summary_df.empty:
+        return
+    with plt.rc_context(PUBLICATION_STYLE):
+        fig, axes = _make_panel_figure(1, 3, panel_width=5.8, panel_height=5.0)
+        axes = axes[0]
+        df = view_summary_df.copy()
+        df["proposal_view"] = df["proposal_view"].astype(str).map(normalize_view_name)
+        views = ordered_views(df["proposal_view"].tolist())
+        if not views:
+            plt.close(fig)
+            return
+        df = df.set_index("proposal_view").reindex(views).reset_index()
+        xpos = np.arange(len(df), dtype=np.int64)
+        colors = [view_color(v) for v in df["proposal_view"].tolist()]
+        labels = [view_label(v) for v in df["proposal_view"].tolist()]
+
+        axes[0].bar(xpos, pd.to_numeric(df["topk_hit_rate"], errors="coerce").fillna(0.0), color=colors, alpha=0.82)
+        axes[0].set_ylim(0, 1)
+        axes[0].set_ylabel("Top-k hit rate")
+        axes[0].set_xticks(xpos)
+        axes[0].set_xticklabels(labels, rotation=20, ha="right")
+        axes[0].grid(axis="y", alpha=0.25)
+
+        fair_col = "topk_fair_hit_rate" if "topk_fair_hit_rate" in df.columns else "topk_hit_rate"
+        axes[1].bar(xpos, pd.to_numeric(df[fair_col], errors="coerce").fillna(0.0), color=colors, alpha=0.82)
+        axes[1].set_ylim(0, 1)
+        axes[1].set_ylabel("Top-k fair hit rate")
+        axes[1].set_xticks(xpos)
+        axes[1].set_xticklabels(labels, rotation=20, ha="right")
+        axes[1].grid(axis="y", alpha=0.25)
+
+        axes[2].bar(xpos, pd.to_numeric(df["topk_mean_ood_prop"], errors="coerce").fillna(0.0), color=colors, alpha=0.82)
+        axes[2].set_ylabel("Top-k mean OOD-prop")
+        axes[2].set_xticks(xpos)
+        axes[2].set_xticklabels(labels, rotation=20, ha="right")
+        axes[2].grid(axis="y", alpha=0.25)
+
+        fig.suptitle(f"F7 View Summary: {property_name}", fontsize=16, fontweight="bold")
+        _save_figure_png(fig, output_base)
+        plt.close(fig)
+
+
 def main(args):
     if Chem is None:
         raise RuntimeError("RDKit is required for step7_chem_physics_analysis.py")
@@ -2141,16 +2151,15 @@ def main(args):
             topk_hit_rate = float(np.nanmean(hit_vals)) if hit_vals.notna().any() else np.nan
         elif "prediction" in topk_df.columns and target is not None:
             pred_vals = pd.to_numeric(topk_df["prediction"], errors="coerce").to_numpy(dtype=np.float32)
-            if epsilon is None:
-                epsilon = 0.0
+            epsilon_eval = 0.0 if epsilon is None else float(epsilon)
             if target_mode == "window":
-                hits = np.abs(pred_vals - float(target)) <= float(epsilon)
+                hits = np.abs(pred_vals - float(target)) <= epsilon_eval
             elif target_mode == "ge":
                 hits = pred_vals >= float(target)
             elif target_mode == "le":
                 hits = pred_vals <= float(target)
             else:
-                hits = np.abs(pred_vals - float(target)) <= float(epsilon)
+                hits = np.abs(pred_vals - float(target)) <= epsilon_eval
             topk_hit_rate = float(np.mean(hits)) if hits.size else np.nan
         else:
             topk_hit_rate = np.nan
@@ -2201,6 +2210,68 @@ def main(args):
         metric_rows.append(metric_row)
         save_csv(pd.DataFrame([metric_row]), prop_step_dirs["metrics_dir"] / "metrics_chem_physics.csv", index=False)
 
+        view_summary_df = pd.DataFrame()
+        if "proposal_view" in candidate_df.columns and "proposal_view" in topk_df.columns:
+            view_rows = []
+            candidate_view_series = candidate_df["proposal_view"].astype(str).map(normalize_view_name)
+            topk_view_series = topk_df["proposal_view"].astype(str).map(normalize_view_name)
+            all_views = ordered_views(
+                pd.concat(
+                    [
+                        candidate_view_series,
+                        topk_view_series,
+                    ],
+                    ignore_index=True,
+                ).tolist()
+            )
+            for proposal_view in all_views:
+                cand_view = candidate_df.loc[candidate_view_series == proposal_view].copy()
+                topk_view = topk_df.loc[topk_view_series == proposal_view].copy()
+                if cand_view.empty or topk_view.empty:
+                    continue
+                if "property_hit" in topk_view.columns:
+                    hit_rate_view = float(
+                        pd.to_numeric(topk_view["property_hit"], errors="coerce").fillna(0.0).mean()
+                    )
+                elif "prediction" in topk_view.columns and target is not None:
+                    pred_view = pd.to_numeric(topk_view["prediction"], errors="coerce").to_numpy(dtype=np.float32)
+                    epsilon_eval = 0.0 if epsilon is None else float(epsilon)
+                    if target_mode == "window":
+                        hit_mask_view = np.abs(pred_view - float(target)) <= epsilon_eval
+                    elif target_mode == "ge":
+                        hit_mask_view = pred_view >= float(target)
+                    elif target_mode == "le":
+                        hit_mask_view = pred_view <= float(target)
+                    else:
+                        hit_mask_view = np.abs(pred_view - float(target)) <= epsilon_eval
+                    hit_rate_view = float(np.mean(hit_mask_view)) if hit_mask_view.size else np.nan
+                else:
+                    hit_rate_view = np.nan
+                fair_hit_rate_view = float(
+                    pd.to_numeric(topk_view.get("fair_hit", pd.Series(dtype=float)), errors="coerce").fillna(0.0).mean()
+                ) if "fair_hit" in topk_view.columns else hit_rate_view
+                mean_ood_prop_view = float(
+                    pd.to_numeric(topk_view.get("ood_prop", pd.Series(dtype=float)), errors="coerce").mean()
+                ) if "ood_prop" in topk_view.columns else np.nan
+                mean_obj_view = float(
+                    pd.to_numeric(topk_view.get("conservative_objective", pd.Series(dtype=float)), errors="coerce").mean()
+                ) if "conservative_objective" in topk_view.columns else np.nan
+                view_rows.append(
+                    {
+                        "property": prop,
+                        "proposal_view": proposal_view,
+                        "n_candidates": int(len(cand_view)),
+                        "n_topk": int(len(topk_view)),
+                        "topk_hit_rate": round(hit_rate_view, 4) if np.isfinite(hit_rate_view) else np.nan,
+                        "topk_fair_hit_rate": round(fair_hit_rate_view, 4) if np.isfinite(fair_hit_rate_view) else np.nan,
+                        "topk_mean_ood_prop": round(mean_ood_prop_view, 6) if np.isfinite(mean_ood_prop_view) else np.nan,
+                        "topk_mean_conservative_objective": round(mean_obj_view, 6) if np.isfinite(mean_obj_view) else np.nan,
+                    }
+                )
+            if view_rows:
+                view_summary_df = pd.DataFrame(view_rows)
+                save_csv(view_summary_df, prop_step_dirs["files_dir"] / "view_summary.csv", index=False)
+
         if generate_figures:
             _plot_property_figure_suite(
                 property_name=prop,
@@ -2214,6 +2285,12 @@ def main(args):
                 target_mode=target_mode,
                 figures_dir=prop_step_dirs["figures_dir"],
             )
+            if not view_summary_df.empty:
+                _plot_view_summary_figure(
+                    view_summary_df=view_summary_df,
+                    output_base=prop_step_dirs["figures_dir"] / f"figure_f7_view_summary_{prop}",
+                    property_name=prop,
+                )
 
         save_json(
             {

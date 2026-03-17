@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -25,6 +26,15 @@ from src.data.view_converters import smiles_to_selfies
 from shared.ood_metrics import knn_distances
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
 from src.utils.checkpoint_loading import load_backbone_checkpoint
+from src.utils.visualization import (
+    PUBLICATION_STYLE,
+    ordered_views,
+    save_figure_png,
+    set_publication_style,
+    standardize_figure_text_and_legend,
+    view_color,
+    view_label,
+)
 
 try:
     import joblib
@@ -112,42 +122,29 @@ DEFAULT_POLYMER_PATTERNS = {
 }
 
 DEFAULT_F5_RESAMPLE_SETTINGS = {
-    "property_model_mode": "all",  # single|all
+    "property_model_mode": "single",  # single|all
     "proposal_views": "all",  # all|<comma-separated views>
     "committee_properties": None,  # defaults to property.files
+    "sampling_mode": "fixed_budget",  # fixed_budget|resample
+    "candidate_budget_per_view": 10000,
     "sampling_target": 100,
-    "sampling_num_per_batch": 512,
-    "sampling_batch_size": 128,
+    "sampling_num_per_batch": 100,
+    "sampling_batch_size": 100,
     "sampling_max_batches": 200,
     "sampling_temperature": None,
     "sampling_num_atoms": None,
     "target_class": "",
     "require_validity": True,
     "require_two_stars": True,
-    "require_novel": True,
-    "require_unique": True,
-    "max_sa": 4.5,
+    "require_novel": False,
+    "require_unique": False,
+    "max_sa": 3.6,
     "per_view_min_hits": 0,
     "per_view_quota_relax_after_batches": 0,
 }
 
-
-PUBLICATION_STYLE = {
-    "font.family": "serif",
-    "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 16,
-    "axes.titlesize": 16,
-    "xtick.labelsize": 16,
-    "ytick.labelsize": 16,
-    "legend.fontsize": 16,
-    "axes.linewidth": 0.9,
-    "lines.linewidth": 1.8,
-    "figure.dpi": 300,
-    "savefig.dpi": 600,
-}
-
 if plt is not None:
-    plt.rcParams.update(PUBLICATION_STYLE)
+    set_publication_style()
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -192,22 +189,8 @@ def _to_int_or_none(value: Any) -> Optional[int]:
     return int(float(text))
 
 
-def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: str = "best") -> None:
-    for text_obj in fig.findobj(match=lambda artist: hasattr(artist, "set_fontsize")):
-        try:
-            text_obj.set_fontsize(font_size)
-        except Exception:
-            continue
-    for ax in fig.axes:
-        legend = ax.get_legend()
-        if legend is not None:
-            legend.set_loc(legend_loc)
-
-
 def _save_figure_png(fig, output_base: Path) -> None:
-    output_base.parent.mkdir(parents=True, exist_ok=True)
-    _standardize_figure_text_and_legend(fig, font_size=16, legend_loc="best")
-    fig.savefig(output_base.with_suffix(".png"), dpi=600, bbox_inches="tight")
+    save_figure_png(fig, output_base, font_size=16, dpi=600, legend_loc="best")
 
 
 def _plot_f5_diagnostics(
@@ -2095,6 +2078,10 @@ def _create_generator(view: str, assets: dict, device: str, sampling_temperature
 
 
 def _sample_batch_from_generator(generator: dict, n: int, batch_size: int) -> List[str]:
+    return [row["smiles"] for row in _sample_batch_records_from_generator(generator, n, batch_size) if row.get("smiles")]
+
+
+def _sample_batch_records_from_generator(generator: dict, n: int, batch_size: int) -> List[dict]:
     if n <= 0:
         return []
     view = generator["view"]
@@ -2107,7 +2094,17 @@ def _sample_batch_from_generator(generator: dict, n: int, batch_size: int) -> Li
             temperature=float(generator.get("temperature", 1.0)),
             num_atoms=generator.get("num_atoms"),
         )
-        return [str(x).strip() for x in raw if isinstance(x, str) and str(x).strip()]
+        rows = []
+        for sample in raw:
+            text = str(sample).strip() if isinstance(sample, str) else ""
+            rows.append(
+                {
+                    "raw_output": text,
+                    "smiles": text,
+                    "is_convertible": bool(text),
+                }
+            )
+        return rows
 
     _, outputs = sampler.sample_batch(
         num_samples=int(n),
@@ -2119,15 +2116,32 @@ def _sample_batch_from_generator(generator: dict, n: int, batch_size: int) -> Li
         converter = generator.get("selfies_to_psmiles")
         converted = []
         for text in outputs:
+            raw_text = str(text).strip() if isinstance(text, str) else ""
             try:
-                psmiles = converter(text) if converter is not None else None
+                psmiles = converter(raw_text) if converter is not None and raw_text else None
             except Exception:
                 psmiles = None
-            if psmiles:
-                converted.append(str(psmiles).strip())
-        return [s for s in converted if s]
+            converted_text = str(psmiles).strip() if psmiles else ""
+            converted.append(
+                {
+                    "raw_output": raw_text,
+                    "smiles": converted_text,
+                    "is_convertible": bool(converted_text),
+                }
+            )
+        return converted
 
-    return [str(x).strip() for x in outputs if isinstance(x, str) and str(x).strip()]
+    rows = []
+    for sample in outputs:
+        text = str(sample).strip() if isinstance(sample, str) else ""
+        rows.append(
+            {
+                "raw_output": text,
+                "smiles": text,
+                "is_convertible": bool(text),
+            }
+        )
+    return rows
 
 
 def _resample_candidates_until_target(
@@ -2146,8 +2160,8 @@ def _resample_candidates_until_target(
 ) -> dict:
     f5_cfg = _f5_cfg(config)
     sampling_target = int(args.sampling_target if args.sampling_target is not None else f5_cfg.get("sampling_target", 100))
-    sampling_num_per_batch = int(args.sampling_num_per_batch if args.sampling_num_per_batch is not None else f5_cfg.get("sampling_num_per_batch", 512))
-    sampling_batch_size = int(args.sampling_batch_size if args.sampling_batch_size is not None else f5_cfg.get("sampling_batch_size", 128))
+    sampling_num_per_batch = int(args.sampling_num_per_batch if args.sampling_num_per_batch is not None else f5_cfg.get("sampling_num_per_batch", 100))
+    sampling_batch_size = int(args.sampling_batch_size if args.sampling_batch_size is not None else f5_cfg.get("sampling_batch_size", 100))
     sampling_max_batches = int(args.sampling_max_batches if args.sampling_max_batches is not None else f5_cfg.get("sampling_max_batches", 200))
 
     sampling_temperature = args.sampling_temperature if args.sampling_temperature is not None else f5_cfg.get("sampling_temperature", None)
@@ -2401,6 +2415,7 @@ def _resample_candidates_until_target(
                     "class_match": bool(class_ok) if target_classes else True,
                     "matched_class": matched_class,
                     "sa_score": sa_value,
+                    "sa_pass": bool(sa_value < max_sa) if (max_sa is not None and sa_value is not None) else True,
                     "batch_idx": batch_idx,
                 }
             )
@@ -2572,6 +2587,749 @@ def _resample_candidates_until_target(
     return result
 
 
+def _resolve_sampling_mode(args, f5_cfg: dict) -> str:
+    mode = args.sampling_mode if getattr(args, "sampling_mode", None) is not None else f5_cfg.get("sampling_mode", "fixed_budget")
+    mode = str(mode).strip().lower()
+    if mode not in {"fixed_budget", "resample"}:
+        raise ValueError("sampling_mode must be one of: fixed_budget|resample")
+    return mode
+
+
+def _candidate_scored_mask(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=bool)
+    if "is_scored" in df.columns:
+        return df["is_scored"].fillna(False).astype(bool)
+    if "prediction" in df.columns:
+        return pd.to_numeric(df["prediction"], errors="coerce").notna()
+    return pd.Series([False] * len(df), index=df.index, dtype=bool)
+
+
+def _sample_fixed_budget_candidates(
+    *,
+    config: dict,
+    args,
+    proposal_views: List[str],
+    scoring_view: str,
+    scoring_assets: dict,
+    scoring_device: str,
+    property_model,
+    training_set: set,
+    target_value: float,
+    epsilon: float,
+    target_mode: str,
+) -> dict:
+    f5_cfg = _f5_cfg(config)
+    candidate_budget = int(
+        args.candidate_budget_per_view
+        if getattr(args, "candidate_budget_per_view", None) is not None
+        else f5_cfg.get("candidate_budget_per_view", 10000)
+    )
+    sampling_num_per_batch = int(
+        args.sampling_num_per_batch if args.sampling_num_per_batch is not None else f5_cfg.get("sampling_num_per_batch", 100)
+    )
+    sampling_batch_size = int(
+        args.sampling_batch_size if args.sampling_batch_size is not None else f5_cfg.get("sampling_batch_size", 100)
+    )
+    sampling_max_batches = int(
+        args.sampling_max_batches
+        if args.sampling_max_batches is not None
+        else f5_cfg.get("sampling_max_batches", max(4, math.ceil(candidate_budget / max(sampling_num_per_batch, 1)) + 2))
+    )
+    sampling_temperature = args.sampling_temperature if args.sampling_temperature is not None else f5_cfg.get("sampling_temperature", None)
+    sampling_num_atoms = args.sampling_num_atoms if args.sampling_num_atoms is not None else f5_cfg.get("sampling_num_atoms", None)
+    if sampling_num_atoms in ("", "none", None):
+        sampling_num_atoms = None
+    elif sampling_num_atoms is not None:
+        sampling_num_atoms = int(sampling_num_atoms)
+    if sampling_temperature in ("", "none", None):
+        sampling_temperature = None
+    elif sampling_temperature is not None:
+        sampling_temperature = float(sampling_temperature)
+
+    require_validity = _to_bool(f5_cfg.get("require_validity", True), True)
+    require_two_stars = _to_bool(f5_cfg.get("require_two_stars", True), True)
+    max_sa = args.max_sa if args.max_sa is not None else f5_cfg.get("max_sa", None)
+    if max_sa in ("", "none", None):
+        max_sa = None
+    else:
+        max_sa = float(max_sa)
+
+    if candidate_budget <= 0:
+        raise ValueError("candidate_budget_per_view must be > 0.")
+    if sampling_num_per_batch <= 0 or sampling_batch_size <= 0:
+        raise ValueError("sampling_num_per_batch and sampling_batch_size must both be > 0.")
+    if sampling_max_batches <= 0:
+        raise ValueError("sampling_max_batches must be > 0.")
+    if not proposal_views:
+        raise ValueError("proposal_views must be non-empty.")
+
+    scoring_generator = _create_generator(
+        view=scoring_view,
+        assets=scoring_assets,
+        device=scoring_device,
+        sampling_temperature=sampling_temperature,
+        sampling_num_atoms=sampling_num_atoms,
+    )
+
+    records: List[dict] = []
+    scored_embeddings: List[np.ndarray] = []
+    structural_valid_smiles: List[str] = []
+    generated_smiles_all: List[str] = []
+    stats = Counter()
+    proposal_view_failures: Dict[str, str] = {}
+
+    active_generator_view: Optional[str] = None
+    active_generator_assets: Optional[dict] = None
+    active_generator: Optional[dict] = None
+
+    def _get_proposal_generator(view: str) -> dict:
+        nonlocal active_generator_view, active_generator_assets, active_generator
+        if view == scoring_view:
+            return scoring_generator
+        if active_generator_view == view and active_generator is not None:
+            return active_generator
+        if active_generator_assets is not None:
+            try:
+                active_generator_assets.get("backbone").to("cpu")
+            except Exception:
+                pass
+            active_generator_assets = None
+            active_generator = None
+            active_generator_view = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        proposal_device = _resolve_view_device(config, view)
+        proposal_assets = _load_view_assets(config=config, view=view, device=proposal_device)
+        proposal_generator = _create_generator(
+            view=view,
+            assets=proposal_assets,
+            device=proposal_device,
+            sampling_temperature=sampling_temperature,
+            sampling_num_atoms=sampling_num_atoms,
+        )
+        active_generator_assets = proposal_assets
+        active_generator = proposal_generator
+        active_generator_view = view
+        return proposal_generator
+
+    for proposal_view in proposal_views:
+        try:
+            generator = _get_proposal_generator(proposal_view)
+        except Exception as exc:
+            proposal_view_failures[proposal_view] = str(exc)
+            stats["proposal_view_init_failed"] += 1
+            stats[f"proposal_view_init_failed_{proposal_view}"] += 1
+            print(f"[F5 fixed_budget] skipping view={proposal_view} due to init error: {exc}")
+            continue
+
+        view_record_indices: List[int] = []
+        view_structural_smiles: List[str] = []
+        view_structural_record_indices: List[int] = []
+        view_generated = 0
+        batch_idx = 0
+
+        while view_generated < candidate_budget and batch_idx < sampling_max_batches:
+            request_n = min(sampling_num_per_batch, candidate_budget - view_generated)
+            batch_idx += 1
+            try:
+                batch_records = _sample_batch_records_from_generator(generator, request_n, sampling_batch_size)
+            except Exception as exc:
+                proposal_view_failures[proposal_view] = str(exc)
+                stats["proposal_view_sample_failed"] += 1
+                stats[f"proposal_view_sample_failed_{proposal_view}"] += 1
+                print(f"[F5 fixed_budget] disabling view={proposal_view} due to sample error: {exc}")
+                break
+
+            if not batch_records:
+                stats["empty_batches"] += 1
+                stats[f"empty_batches_{proposal_view}"] += 1
+                continue
+
+            stats["n_batches"] += 1
+            stats[f"n_batches_{proposal_view}"] += 1
+            view_generated += len(batch_records)
+            stats["n_generated_raw"] += len(batch_records)
+            stats[f"n_generated_raw_{proposal_view}"] += len(batch_records)
+
+            for local_idx, sample in enumerate(batch_records):
+                raw_output = str(sample.get("raw_output", "")).strip()
+                smiles_text = str(sample.get("smiles", "")).strip()
+                is_convertible = bool(sample.get("is_convertible", False) and smiles_text)
+                if is_convertible:
+                    stats["n_convertible"] += 1
+                    stats[f"n_convertible_{proposal_view}"] += 1
+                    generated_smiles_all.append(smiles_text)
+
+                is_valid = bool(_check_validity(smiles_text)) if smiles_text else False
+                is_two_star = bool(_count_stars(smiles_text) == 2) if smiles_text else False
+                if is_valid:
+                    stats["n_valid_any"] += 1
+                    stats[f"n_valid_any_{proposal_view}"] += 1
+                if is_valid and is_two_star:
+                    stats["n_structural_valid"] += 1
+                    stats[f"n_structural_valid_{proposal_view}"] += 1
+                    structural_valid_smiles.append(smiles_text)
+                    view_structural_smiles.append(smiles_text)
+
+                canonical_smiles = _canonicalize_smiles(smiles_text) if smiles_text else ""
+                is_novel = bool(smiles_text not in training_set) if smiles_text else False
+                sa_score = _compute_sa_score(smiles_text) if (smiles_text and max_sa is not None) else None
+                sa_pass = bool(sa_score is not None and sa_score < max_sa) if max_sa is not None else bool(smiles_text)
+
+                record = {
+                    "proposal_view": proposal_view,
+                    "scoring_view": scoring_view,
+                    "raw_output": raw_output,
+                    "smiles": smiles_text,
+                    "canonical_smiles": canonical_smiles,
+                    "batch_idx": batch_idx,
+                    "sample_index_within_view": int(view_generated - len(batch_records) + local_idx + 1),
+                    "is_convertible": bool(is_convertible),
+                    "is_valid": bool(is_valid),
+                    "is_two_star": bool(is_two_star),
+                    "is_structural_valid": bool(is_valid and is_two_star),
+                    "is_novel": bool(is_novel),
+                    "sa_score": sa_score,
+                    "sa_pass": bool(sa_pass),
+                    "is_scored": False,
+                    "prediction": np.nan,
+                    "abs_error": np.nan,
+                    "target_excess": np.nan,
+                    "target_violation": np.nan,
+                    "property_hit": False,
+                    "fair_hit": False,
+                    "accepted": False,
+                    "is_unique_within_view": False,
+                    "rerank_selected": False,
+                    "rerank_rank_within_view": np.nan,
+                }
+                records.append(record)
+                record_idx = len(records) - 1
+                view_record_indices.append(record_idx)
+                if record["is_structural_valid"]:
+                    view_structural_record_indices.append(record_idx)
+
+            print(
+                f"[F5 fixed_budget] view={proposal_view} batch={batch_idx} "
+                f"generated={view_generated}/{candidate_budget} structural_valid={len(view_structural_smiles)}"
+            )
+
+        if view_structural_smiles:
+            embeddings, kept_indices = _embed_candidates(
+                view=scoring_view,
+                smiles_list=view_structural_smiles,
+                assets=scoring_assets,
+                device=scoring_device,
+            )
+            kept_index_set = set(int(i) for i in kept_indices)
+            dropped = len(view_structural_smiles) - len(kept_indices)
+            if dropped > 0:
+                stats["reject_embed"] += dropped
+                stats[f"reject_embed_{proposal_view}"] += dropped
+
+            if embeddings.size > 0:
+                preds = np.asarray(property_model.predict(embeddings), dtype=np.float32).reshape(-1)
+                hits = _compute_hits(preds, target_value, epsilon, target_mode)
+                stats["n_scored"] += len(kept_indices)
+                stats[f"n_scored_{proposal_view}"] += len(kept_indices)
+                stats["n_hits"] += int(np.sum(hits))
+                stats[f"n_hits_{proposal_view}"] += int(np.sum(hits))
+                for emb_idx, kept_local_idx in enumerate(kept_indices):
+                    record_idx = view_structural_record_indices[int(kept_local_idx)]
+                    pred_value = float(preds[emb_idx])
+                    hit = bool(hits[emb_idx])
+                    records[record_idx]["is_scored"] = True
+                    records[record_idx]["prediction"] = pred_value
+                    records[record_idx]["abs_error"] = abs(pred_value - target_value)
+                    records[record_idx]["target_excess"] = float(
+                        _compute_target_excess(np.asarray([pred_value], dtype=np.float32), target_value, target_mode)[0]
+                    )
+                    records[record_idx]["target_violation"] = float(
+                        _compute_target_violation(np.asarray([pred_value], dtype=np.float32), target_value, target_mode)[0]
+                    )
+                    records[record_idx]["property_hit"] = hit
+                    scored_embeddings.append(embeddings[emb_idx].astype(np.float32, copy=False))
+
+            for local_idx, record_idx in enumerate(view_structural_record_indices):
+                if local_idx not in kept_index_set:
+                    records[record_idx]["is_scored"] = False
+
+    if active_generator_assets is not None:
+        try:
+            active_generator_assets.get("backbone").to("cpu")
+        except Exception:
+            pass
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    scored_df = pd.DataFrame(records)
+    if scored_df.empty:
+        scored_df = pd.DataFrame(
+            columns=[
+                "proposal_view",
+                "smiles",
+                "prediction",
+                "target_excess",
+                "target_violation",
+                "property_hit",
+                "fair_hit",
+                "accepted",
+            ]
+        )
+
+    scored_embeddings_np = np.stack(scored_embeddings, axis=0) if scored_embeddings else None
+
+    per_view_stats = {}
+    tracked_keys = [
+        "n_generated_raw",
+        "n_batches",
+        "n_convertible",
+        "n_valid_any",
+        "n_structural_valid",
+        "n_scored",
+        "n_hits",
+        "reject_embed",
+    ]
+    for view in proposal_views:
+        row = {}
+        for key in tracked_keys:
+            row[key] = int(stats.get(f"{key}_{view}", 0))
+        per_view_stats[view] = row
+
+    return {
+        "candidate_source": "fixed_budget",
+        "generated_smiles": generated_smiles_all,
+        "structurally_valid_smiles": structural_valid_smiles,
+        "scored_df": scored_df,
+        "accepted_df": pd.DataFrame(),
+        "scored_embeddings": scored_embeddings_np,
+        "sampling_target": candidate_budget,
+        "candidate_budget_per_view": candidate_budget,
+        "sampling_num_per_batch": sampling_num_per_batch,
+        "sampling_batch_size": sampling_batch_size,
+        "sampling_max_batches": sampling_max_batches,
+        "proposal_views": list(proposal_views),
+        "proposal_views_remaining": list(proposal_views),
+        "proposal_views_disabled": dict(proposal_view_failures),
+        "scoring_view": scoring_view,
+        "target_classes": [],
+        "require_validity": require_validity,
+        "require_two_stars": require_two_stars,
+        "require_novel": False,
+        "require_unique": False,
+        "max_sa": max_sa,
+        "per_view_min_hits": 0,
+        "per_view_quota_relax_after_batches": 0,
+        "accepted_by_view": {},
+        "per_view_stats": per_view_stats,
+        "stats": dict(stats),
+        "completed": True,
+    }
+
+
+def _augment_f5_posthoc_flags(scored_df: pd.DataFrame) -> pd.DataFrame:
+    if scored_df.empty:
+        return scored_df
+    df = scored_df.copy()
+    if "proposal_view" not in df.columns:
+        df["proposal_view"] = "all"
+    if "canonical_smiles" not in df.columns:
+        df["canonical_smiles"] = df["smiles"].astype(str).map(_canonicalize_smiles)
+    scored_mask = _candidate_scored_mask(df)
+    df["is_unique_within_view"] = False
+    for view, idx in df.loc[scored_mask].groupby("proposal_view").groups.items():
+        subset = df.loc[list(idx), "canonical_smiles"].astype(str)
+        duplicated = subset.duplicated(keep="first")
+        df.loc[list(idx), "is_unique_within_view"] = ~duplicated.to_numpy(dtype=bool)
+    if "sa_pass" not in df.columns:
+        df["sa_pass"] = False
+    df["property_hit"] = df.get("property_hit", False).fillna(False).astype(bool)
+    df["is_novel"] = df.get("is_novel", False).fillna(False).astype(bool)
+    df["sa_pass"] = df["sa_pass"].fillna(False).astype(bool)
+    df["fair_hit"] = (
+        scored_mask
+        & df["property_hit"]
+        & df["is_novel"]
+        & df["is_unique_within_view"]
+        & df["sa_pass"]
+    )
+    df["accepted"] = df["fair_hit"]
+    return df
+
+
+def _apply_f5_rerank_columns(
+    *,
+    scored_df: pd.DataFrame,
+    proposal_views: List[str],
+    rerank_strategy: str,
+    rerank_top_k: int,
+) -> pd.DataFrame:
+    if scored_df.empty:
+        return scored_df
+    df = scored_df.copy()
+    df["rerank_selected"] = False
+    df["rerank_rank_within_view"] = np.nan
+    if rerank_strategy not in {"ood_prop", "d2_distance"} or int(rerank_top_k) <= 0:
+        return df
+    score_col = "ood_prop" if rerank_strategy == "ood_prop" else "d2_distance"
+    if score_col not in df.columns:
+        return df
+
+    for view in ordered_views(proposal_views):
+        mask = (df.get("proposal_view", "") == view) & _candidate_scored_mask(df)
+        if not bool(mask.any()):
+            continue
+        sub = df.loc[mask, score_col]
+        sub_scores = pd.to_numeric(sub, errors="coerce")
+        finite_idx = sub_scores.dropna().sort_values(kind="mergesort").index.tolist()
+        if not finite_idx:
+            continue
+        ranks = np.arange(1, len(finite_idx) + 1, dtype=np.int64)
+        df.loc[finite_idx, "rerank_rank_within_view"] = ranks
+        top_idx = finite_idx[: min(int(rerank_top_k), len(finite_idx))]
+        df.loc[top_idx, "rerank_selected"] = True
+    return df
+
+
+def _build_f5_process_counts(
+    *,
+    scored_df: pd.DataFrame,
+    proposal_views: List[str],
+    stats: dict,
+) -> pd.DataFrame:
+    rows: List[dict] = []
+    df = scored_df.copy()
+    if df.empty:
+        return pd.DataFrame(columns=["proposal_view", "stage", "count"])
+    df["proposal_view"] = df.get("proposal_view", "all").astype(str)
+    for view in ordered_views(proposal_views):
+        view_df = df[df["proposal_view"] == view].copy()
+        n_generated = int(stats.get(f"n_generated_raw_{view}", stats.get(f"n_generated_{view}", int(len(view_df)))))
+        n_convertible = int(
+            stats.get(
+                f"n_convertible_{view}",
+                stats.get(f"n_generated_{view}", int(view_df.get("is_convertible", pd.Series(dtype=bool)).sum())),
+            )
+        )
+        n_valid = int(stats.get(f"n_valid_any_{view}", int(view_df.get("is_valid", pd.Series(dtype=bool)).sum())))
+        n_two_star = int(stats.get(f"n_structural_valid_{view}", int(view_df.get("is_structural_valid", pd.Series(dtype=bool)).sum())))
+        n_scored = int((_candidate_scored_mask(view_df)).sum())
+        n_property_hits = int(view_df.get("property_hit", pd.Series(dtype=bool)).fillna(False).astype(bool).sum())
+        n_fair_hits = int(view_df.get("fair_hit", pd.Series(dtype=bool)).fillna(False).astype(bool).sum())
+        n_topk = int(view_df.get("rerank_selected", pd.Series(dtype=bool)).fillna(False).astype(bool).sum())
+        n_topk_property_hits = int(
+            (
+                view_df.get("rerank_selected", pd.Series(dtype=bool)).fillna(False).astype(bool)
+                & view_df.get("property_hit", pd.Series(dtype=bool)).fillna(False).astype(bool)
+            ).sum()
+        )
+        n_topk_fair_hits = int(
+            (
+                view_df.get("rerank_selected", pd.Series(dtype=bool)).fillna(False).astype(bool)
+                & view_df.get("fair_hit", pd.Series(dtype=bool)).fillna(False).astype(bool)
+            ).sum()
+        )
+        stage_counts = [
+            ("generated_raw", n_generated),
+            ("convertible", n_convertible),
+            ("valid", n_valid),
+            ("two_star", n_two_star),
+            ("scored", n_scored),
+            ("property_hit", n_property_hits),
+            ("fair_hit", n_fair_hits),
+            ("rerank_topk", n_topk),
+            ("rerank_property_hit", n_topk_property_hits),
+            ("rerank_fair_hit", n_topk_fair_hits),
+        ]
+        for stage, count in stage_counts:
+            rows.append(
+                {
+                    "proposal_view": view,
+                    "stage": stage,
+                    "count": int(count),
+                    "rate_vs_generated": float(count / max(n_generated, 1)) if n_generated > 0 else np.nan,
+                    "rate_vs_scored": float(count / max(n_scored, 1)) if n_scored > 0 else np.nan,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _build_f5_metrics_rows(
+    *,
+    scored_df: pd.DataFrame,
+    process_counts_df: pd.DataFrame,
+    proposal_views: List[str],
+    property_name: str,
+    target_value: float,
+    target_mode: str,
+    epsilon: float,
+    elapsed_sec: float,
+    model_size: str,
+    scoring_view: str,
+    rerank_strategy: str,
+    rerank_top_k: int,
+    candidate_source: str,
+) -> pd.DataFrame:
+    rows: List[dict] = []
+    df = scored_df.copy()
+    if "proposal_view" not in df.columns:
+        df["proposal_view"] = "all"
+    for view in ordered_views(proposal_views):
+        view_df = df[df["proposal_view"] == view].copy()
+        if process_counts_df.empty:
+            continue
+        process_view = process_counts_df[process_counts_df["proposal_view"] == view].copy()
+        if process_view.empty:
+            continue
+        counts = {str(row["stage"]): int(row["count"]) for _, row in process_view.iterrows()}
+        scored_mask = _candidate_scored_mask(view_df)
+        scored_view = view_df.loc[scored_mask].copy()
+        preds = pd.to_numeric(scored_view.get("prediction", pd.Series(dtype=float)), errors="coerce").dropna().to_numpy(dtype=np.float32)
+        target_excess = pd.to_numeric(scored_view.get("target_excess", pd.Series(dtype=float)), errors="coerce")
+        target_violation = pd.to_numeric(scored_view.get("target_violation", pd.Series(dtype=float)), errors="coerce")
+        ood_prop = pd.to_numeric(scored_view.get("ood_prop", pd.Series(dtype=float)), errors="coerce")
+        novelty = float(scored_view.get("is_novel", pd.Series(dtype=bool)).fillna(False).astype(bool).mean()) if len(scored_view) else 0.0
+        uniqueness = float(scored_view.get("is_unique_within_view", pd.Series(dtype=bool)).fillna(False).astype(bool).mean()) if len(scored_view) else 0.0
+        sa_pass_rate = float(scored_view.get("sa_pass", pd.Series(dtype=bool)).fillna(False).astype(bool).mean()) if len(scored_view) else 0.0
+        property_hits = int(counts.get("property_hit", 0))
+        fair_hits = int(counts.get("fair_hit", 0))
+        rerank_hits = int(counts.get("rerank_property_hit", 0))
+        rerank_fair_hits = int(counts.get("rerank_fair_hit", 0))
+        rerank_selected = int(counts.get("rerank_topk", 0))
+        n_generated = int(counts.get("generated_raw", 0))
+        n_valid = int(counts.get("valid", 0))
+        n_two_star = int(counts.get("two_star", 0))
+        n_scored = int(counts.get("scored", 0))
+        fair_hit_mask = scored_view.get("fair_hit", pd.Series([False] * len(scored_view), index=scored_view.index)).fillna(False).astype(bool)
+
+        rows.append(
+            {
+                "method": "Multi_View_Foundation",
+                "representation": _view_to_representation(view),
+                "proposal_view": view,
+                "scoring_view": scoring_view,
+                "model_size": model_size,
+                "property": property_name,
+                "target_value": target_value,
+                "target_mode": target_mode,
+                "epsilon": epsilon,
+                "candidate_source": candidate_source,
+                "rerank_strategy": rerank_strategy,
+                "rerank_top_k": int(rerank_selected),
+                "rerank_top_k_requested": int(rerank_top_k),
+                "n_generated": n_generated,
+                "n_generated_raw": n_generated,
+                "n_convertible": int(counts.get("convertible", 0)),
+                "n_valid": n_valid,
+                "n_two_star": n_two_star,
+                "n_scored": n_scored,
+                "n_hits": property_hits,
+                "n_fair_hits": fair_hits,
+                "rerank_hits": rerank_hits,
+                "rerank_fair_hits": rerank_fair_hits,
+                "success_rate": round(float(property_hits / max(n_scored, 1)), 4) if n_scored else 0.0,
+                "fair_success_rate": round(float(fair_hits / max(n_scored, 1)), 4) if n_scored else 0.0,
+                "rerank_success_rate": round(float(rerank_hits / max(rerank_selected, 1)), 4) if rerank_selected else 0.0,
+                "rerank_fair_success_rate": round(float(rerank_fair_hits / max(rerank_selected, 1)), 4) if rerank_selected else 0.0,
+                "validity": round(float(n_valid / max(n_generated, 1)), 4) if n_generated else 0.0,
+                "validity_two_stars": round(float(n_two_star / max(n_generated, 1)), 4) if n_generated else 0.0,
+                "uniqueness": round(uniqueness, 4),
+                "novelty": round(novelty, 4),
+                "sa_pass_rate": round(sa_pass_rate, 4),
+                "avg_diversity": _compute_pairwise_tanimoto_diversity(scored_view.loc[fair_hit_mask, "smiles"].astype(str).tolist()),
+                "mean_target_excess": round(float(target_excess.mean()), 6) if target_excess.notna().any() else np.nan,
+                "mean_target_violation": round(float(target_violation.mean()), 6) if target_violation.notna().any() else np.nan,
+                "mean_ood_prop": round(float(ood_prop.mean()), 6) if ood_prop.notna().any() else np.nan,
+                **_achievement_rates(preds, target_value),
+                "sampling_time_sec": round(elapsed_sec, 2),
+                "valid_per_compute": round(float(n_scored / max(elapsed_sec, 1e-9)), 4) if n_scored else 0.0,
+                "hits_per_compute": round(float(property_hits / max(elapsed_sec, 1e-9)), 4) if property_hits else 0.0,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    metrics_df = pd.DataFrame(rows)
+    total_generated = int(metrics_df["n_generated"].sum())
+    total_scored = int(metrics_df["n_scored"].sum())
+    total_hits = int(metrics_df["n_hits"].sum())
+    total_fair_hits = int(metrics_df["n_fair_hits"].sum())
+    total_rerank_selected = int(metrics_df["rerank_top_k"].clip(lower=0).sum()) if "rerank_top_k" in metrics_df.columns else 0
+    total_rerank_hits = int(metrics_df["rerank_hits"].sum())
+    total_rerank_fair_hits = int(metrics_df["rerank_fair_hits"].sum())
+    aggregate_row = {
+        "method": "Multi_View_Foundation",
+        "representation": "All_Views",
+        "proposal_view": "all",
+        "scoring_view": scoring_view,
+        "model_size": model_size,
+        "property": property_name,
+        "target_value": target_value,
+        "target_mode": target_mode,
+        "epsilon": epsilon,
+        "candidate_source": candidate_source,
+        "rerank_strategy": rerank_strategy,
+        "rerank_top_k": int(metrics_df["rerank_top_k"].sum()) if "rerank_top_k" in metrics_df.columns else 0,
+        "rerank_top_k_requested": int(metrics_df["rerank_top_k_requested"].max()) if "rerank_top_k_requested" in metrics_df.columns else 0,
+        "rerank_top_k_requested_total": int(metrics_df["rerank_top_k_requested"].sum()) if "rerank_top_k_requested" in metrics_df.columns else 0,
+        "n_generated": total_generated,
+        "n_generated_raw": int(metrics_df["n_generated_raw"].sum()) if "n_generated_raw" in metrics_df.columns else total_generated,
+        "n_convertible": int(metrics_df["n_convertible"].sum()) if "n_convertible" in metrics_df.columns else np.nan,
+        "n_valid": int(metrics_df["n_valid"].sum()),
+        "n_two_star": int(metrics_df["n_two_star"].sum()) if "n_two_star" in metrics_df.columns else np.nan,
+        "n_scored": total_scored,
+        "n_hits": total_hits,
+        "n_fair_hits": total_fair_hits,
+        "rerank_hits": total_rerank_hits,
+        "rerank_fair_hits": total_rerank_fair_hits,
+        "success_rate": round(float(total_hits / max(total_scored, 1)), 4) if total_scored else 0.0,
+        "fair_success_rate": round(float(total_fair_hits / max(total_scored, 1)), 4) if total_scored else 0.0,
+        "rerank_success_rate": round(float(total_rerank_hits / max(total_rerank_selected, 1)), 4) if total_rerank_selected else 0.0,
+        "rerank_fair_success_rate": round(float(total_rerank_fair_hits / max(total_rerank_selected, 1)), 4) if total_rerank_selected else 0.0,
+        "validity": round(float(metrics_df["n_valid"].sum() / max(total_generated, 1)), 4) if total_generated else 0.0,
+        "validity_two_stars": round(float(metrics_df["n_two_star"].sum() / max(total_generated, 1)), 4) if total_generated and "n_two_star" in metrics_df.columns else np.nan,
+        "uniqueness": round(float(metrics_df["uniqueness"].mean()), 4) if "uniqueness" in metrics_df.columns else np.nan,
+        "novelty": round(float(metrics_df["novelty"].mean()), 4) if "novelty" in metrics_df.columns else np.nan,
+        "sa_pass_rate": round(float(metrics_df["sa_pass_rate"].mean()), 4) if "sa_pass_rate" in metrics_df.columns else np.nan,
+        "avg_diversity": round(float(metrics_df["avg_diversity"].mean()), 4) if "avg_diversity" in metrics_df.columns and metrics_df["avg_diversity"].notna().any() else np.nan,
+        "mean_target_excess": round(float(metrics_df["mean_target_excess"].mean()), 6) if "mean_target_excess" in metrics_df.columns and metrics_df["mean_target_excess"].notna().any() else np.nan,
+        "mean_target_violation": round(float(metrics_df["mean_target_violation"].mean()), 6) if "mean_target_violation" in metrics_df.columns and metrics_df["mean_target_violation"].notna().any() else np.nan,
+        "mean_ood_prop": round(float(metrics_df["mean_ood_prop"].mean()), 6) if "mean_ood_prop" in metrics_df.columns and metrics_df["mean_ood_prop"].notna().any() else np.nan,
+        "sampling_time_sec": round(elapsed_sec, 2),
+        "valid_per_compute": round(float(total_scored / max(elapsed_sec, 1e-9)), 4) if total_scored else 0.0,
+        "hits_per_compute": round(float(total_hits / max(elapsed_sec, 1e-9)), 4) if total_hits else 0.0,
+    }
+    for key, value in _achievement_rates(
+        pd.to_numeric(
+            scored_df.loc[_candidate_scored_mask(scored_df), "prediction"] if "prediction" in scored_df.columns else pd.Series(dtype=float),
+            errors="coerce",
+        ).dropna().to_numpy(dtype=np.float32),
+        target_value,
+    ).items():
+        aggregate_row[key] = value
+    return pd.concat([metrics_df, pd.DataFrame([aggregate_row])], ignore_index=True)
+
+
+def _plot_f5_design_process(
+    *,
+    process_counts_df: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+    property_name: str,
+    figures_dir: Path,
+) -> None:
+    if plt is None or process_counts_df.empty or metrics_df.empty:
+        return
+    stages = [
+        "generated_raw",
+        "convertible",
+        "valid",
+        "two_star",
+        "scored",
+        "property_hit",
+        "fair_hit",
+        "rerank_fair_hit",
+    ]
+    stage_labels = {
+        "generated_raw": "Generated",
+        "convertible": "Convertible",
+        "valid": "Valid",
+        "two_star": "Two-star",
+        "scored": "Scored",
+        "property_hit": "Directional hit",
+        "fair_hit": "Novel+unique+SA",
+        "rerank_fair_hit": "Rerank top-k",
+    }
+    metric_rows = metrics_df[metrics_df["proposal_view"].astype(str) != "all"].copy()
+    process_rows = process_counts_df[process_counts_df["stage"].isin(stages)].copy()
+    views = ordered_views(process_rows["proposal_view"].tolist())
+    if not views:
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(22, 6.6))
+    ax0, ax1, ax2 = axes
+    x = np.arange(len(stages), dtype=np.int64)
+
+    for view in views:
+        sub = process_rows[process_rows["proposal_view"] == view].copy()
+        counts = [int(sub.loc[sub["stage"] == stage, "count"].iloc[0]) if (sub["stage"] == stage).any() else 0 for stage in stages]
+        ax0.plot(
+            x,
+            counts,
+            marker="o",
+            linewidth=2.2,
+            markersize=6.0,
+            color=view_color(view),
+            label=view_label(view),
+        )
+        rate_vals = [
+            float(sub.loc[sub["stage"] == stage, "rate_vs_generated"].iloc[0]) if (sub["stage"] == stage).any() else np.nan
+            for stage in stages
+        ]
+        ax1.plot(
+            x,
+            rate_vals,
+            marker="o",
+            linewidth=2.2,
+            markersize=6.0,
+            color=view_color(view),
+            label=view_label(view),
+        )
+
+    ax0.set_xticks(x)
+    ax0.set_xticklabels([stage_labels[stage] for stage in stages], rotation=30, ha="right")
+    ax0.set_ylabel("Candidate count")
+    ax0.set_title("Design process counts")
+    ax0.grid(axis="y", alpha=0.25)
+    ax0.legend(loc="best")
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([stage_labels[stage] for stage in stages], rotation=30, ha="right")
+    ax1.set_ylabel("Fraction of generated")
+    ax1.set_ylim(0.0, 1.05)
+    ax1.set_title("Normalized design process")
+    ax1.grid(axis="y", alpha=0.25)
+
+    summary = metric_rows.copy()
+    if not summary.empty:
+        xpos = np.arange(len(summary), dtype=np.int64)
+        width = 0.36
+        ax2.bar(
+            xpos - width / 2.0,
+            summary["fair_success_rate"].to_numpy(dtype=float),
+            width=width,
+            color=[view_color(v) for v in summary["proposal_view"].tolist()],
+            alpha=0.82,
+            label="F5 fair hit rate",
+        )
+        ax2.bar(
+            xpos + width / 2.0,
+            summary["rerank_fair_success_rate"].to_numpy(dtype=float),
+            width=width,
+            color=[view_color(v) for v in summary["proposal_view"].tolist()],
+            alpha=0.48,
+            hatch="//",
+            label="F5 rerank fair hit rate",
+        )
+        ax2.set_xticks(xpos)
+        ax2.set_xticklabels([view_label(v) for v in summary["proposal_view"].tolist()], rotation=20, ha="right")
+        ax2.set_ylabel("Hit rate")
+        ax2.set_ylim(0.0, max(1.0, float(summary[["fair_success_rate", "rerank_fair_success_rate"]].max().max() + 0.05)))
+        ax2.set_title("Per-view benchmark hit rates")
+        ax2.grid(axis="y", alpha=0.25)
+        ax2.legend(loc="best")
+    else:
+        ax2.text(0.5, 0.5, "No per-view metrics", ha="center", va="center")
+        ax2.set_axis_off()
+
+    fig.suptitle(f"F5 Benchmark Design Process: {property_name}", fontsize=16, fontweight="bold")
+    fig.tight_layout()
+    _save_figure_png(fig, figures_dir / f"figure_f5_design_process_{property_name}")
+    plt.close(fig)
+
+
 def main(args):
     config = load_config(args.config)
     f5_cfg = _f5_cfg(config)
@@ -2623,25 +3381,41 @@ def main(args):
     target_value = _resolve_target_value(args.target, args.property, f5_cfg)
     target_mode = _resolve_target_mode(args.target_mode, args.property, f5_cfg)
     epsilon = _resolve_epsilon(args.epsilon, args.property, f5_cfg)
+    sampling_mode = _resolve_sampling_mode(args, f5_cfg)
 
     train_smiles_path = _resolve_path(config["paths"]["polymer_file"])
     training_set = _load_training_smiles(train_smiles_path)
 
     t0 = time.time()
-    source_meta = {"candidate_source": "resample"}
-    sampled = _resample_candidates_until_target(
-        config=config,
-        args=args,
-        proposal_views=proposal_views,
-        scoring_view=encoder_view,
-        scoring_assets=assets,
-        scoring_device=encoder_device,
-        property_model=model,
-        training_set=training_set,
-        target_value=target_value,
-        epsilon=epsilon,
-        target_mode=target_mode,
-    )
+    source_meta = {"candidate_source": sampling_mode, "sampling_mode": sampling_mode}
+    if sampling_mode == "fixed_budget":
+        sampled = _sample_fixed_budget_candidates(
+            config=config,
+            args=args,
+            proposal_views=proposal_views,
+            scoring_view=encoder_view,
+            scoring_assets=assets,
+            scoring_device=encoder_device,
+            property_model=model,
+            training_set=training_set,
+            target_value=target_value,
+            epsilon=epsilon,
+            target_mode=target_mode,
+        )
+    else:
+        sampled = _resample_candidates_until_target(
+            config=config,
+            args=args,
+            proposal_views=proposal_views,
+            scoring_view=encoder_view,
+            scoring_assets=assets,
+            scoring_device=encoder_device,
+            property_model=model,
+            training_set=training_set,
+            target_value=target_value,
+            epsilon=epsilon,
+            target_mode=target_mode,
+        )
     smiles_list = sampled["generated_smiles"]
     structurally_valid_smiles = sampled["structurally_valid_smiles"]
     scored_df = sampled["scored_df"]
@@ -2799,26 +3573,11 @@ def main(args):
             ]
         )
 
-    scored_smiles = scored_df["smiles"].astype(str).tolist() if "smiles" in scored_df.columns else []
-    preds = scored_df["prediction"].to_numpy(dtype=np.float32) if "prediction" in scored_df.columns else np.array([], dtype=np.float32)
-    hits = scored_df["property_hit"].to_numpy(dtype=bool) if "property_hit" in scored_df.columns else np.array([], dtype=bool)
-    accepted_mask = scored_df["accepted"].to_numpy(dtype=bool) if "accepted" in scored_df.columns else hits
-
-    n_generated = len(smiles_list)
-    n_valid = len(structurally_valid_smiles)
-    n_scored = len(scored_smiles)
-    n_hits = int(np.sum(accepted_mask)) if n_scored else 0
-    success_rate = n_hits / n_valid if n_valid else 0.0
-
-    validity = n_valid / n_generated if n_generated else 0.0
-    uniqueness = len(set(structurally_valid_smiles)) / n_valid if n_valid else 0.0
-    novelty = sum(1 for s in structurally_valid_smiles if s not in training_set) / n_valid if n_valid else 0.0
-
     ood_prop_scores = None
     ood_gen_scores = None
-    rerank_metrics = {
-        "rerank_applied": False,
-    }
+    scored_mask = _candidate_scored_mask(scored_df)
+    scored_only_df = scored_df.loc[scored_mask].copy()
+    scored_smiles = scored_only_df["smiles"].astype(str).tolist() if "smiles" in scored_only_df.columns else []
 
     if args.rerank_strategy in {"ood_prop", "d2_distance"} and scored_embeddings is not None and len(scored_smiles):
         d2_embeddings = _load_d2_embeddings(results_dir, encoder_view)
@@ -2832,67 +3591,63 @@ def main(args):
             ood_gen_scores = d1_distances.mean(axis=1)
         except FileNotFoundError:
             ood_gen_scores = None
-
-        order = np.argsort(ood_prop_scores)
-        top_k = min(int(args.rerank_top_k), len(order))
-        if top_k > 0:
-            top_hits = hits[order[:top_k]]
-            rerank_metrics = {
-                "rerank_applied": True,
-                "rerank_strategy": args.rerank_strategy,
-                "rerank_top_k": top_k,
-                "rerank_hits": int(top_hits.sum()),
-                "rerank_success_rate": round(float(top_hits.sum()) / top_k, 4),
-            }
-        else:
-            rerank_metrics = {"rerank_applied": False}
-
-    # Compute pairwise Tanimoto diversity over accepted candidates
-    accepted_smiles_for_div = scored_df.loc[accepted_mask, "smiles"].astype(str).tolist() if n_hits > 1 else []
-    avg_diversity = _compute_pairwise_tanimoto_diversity(accepted_smiles_for_div)
-    if avg_diversity is not None:
-        avg_diversity = round(avg_diversity, 4)
-
-    target_excess = _compute_target_excess(preds, target_value, target_mode) if preds.size else np.array([], dtype=np.float32)
-    target_violation = _compute_target_violation(preds, target_value, target_mode) if preds.size else np.array([], dtype=np.float32)
-    mean_target_excess = float(np.nanmean(target_excess)) if target_excess.size else np.nan
-    mean_target_violation = float(np.nanmean(target_violation)) if target_violation.size else np.nan
-
-    metrics_row = {
-        "method": "Multi_View_Foundation",
-        "representation": _view_to_representation(encoder_view),
-        "model_size": assets["model_size"],
-        "property": args.property,
-        "target_value": target_value,
-        "target_mode": target_mode,
-        "epsilon": epsilon,
-        "candidate_source": "resample",
-        "n_generated": n_generated,
-        "n_valid": n_valid,
-        "n_scored": n_scored,
-        "n_hits": n_hits,
-        "success_rate": round(success_rate, 4),
-        "validity": round(validity, 4),
-        "validity_two_stars": round(validity, 4),
-        "uniqueness": round(uniqueness, 4),
-        "novelty": round(novelty, 4),
-        "avg_diversity": avg_diversity,
-        "mean_target_excess": round(mean_target_excess, 6) if np.isfinite(mean_target_excess) else np.nan,
-        "mean_target_violation": round(mean_target_violation, 6) if np.isfinite(mean_target_violation) else np.nan,
-        **_achievement_rates(preds, target_value),
-        "sampling_time_sec": round(elapsed_sec, 2),
-        "valid_per_compute": round(n_valid / max(elapsed_sec, 1e-9), 4) if n_valid else 0.0,
-        "hits_per_compute": round(n_hits / max(elapsed_sec, 1e-9), 4) if n_hits else 0.0,
-        **rerank_metrics,
-    }
-
-    if rerank_metrics.get("rerank_applied"):
-        metrics_row["valid_per_compute_rerank"] = round(rerank_metrics.get("rerank_hits", 0) / max(elapsed_sec, 1e-9), 4)
-    else:
-        metrics_row["rerank_strategy"] = args.rerank_strategy
+    if ood_prop_scores is not None and len(scored_only_df) == len(ood_prop_scores):
+        scored_df = scored_df.copy()
+        scored_df["ood_prop"] = np.nan
+        scored_df["d2_distance"] = np.nan
+        scored_df.loc[scored_mask, "ood_prop"] = ood_prop_scores
+        scored_df.loc[scored_mask, "d2_distance"] = ood_prop_scores
+        if ood_gen_scores is not None and len(scored_only_df) == len(ood_gen_scores):
+            scored_df["ood_gen"] = np.nan
+            scored_df.loc[scored_mask, "ood_gen"] = ood_gen_scores
+    if "property" not in scored_df.columns:
+        scored_df = scored_df.copy()
+    scored_df["property"] = args.property
+    scored_df = _augment_f5_posthoc_flags(scored_df)
+    scored_df = _apply_f5_rerank_columns(
+        scored_df=scored_df,
+        proposal_views=proposal_views,
+        rerank_strategy=args.rerank_strategy,
+        rerank_top_k=int(args.rerank_top_k),
+    )
+    process_counts_df = _build_f5_process_counts(
+        scored_df=scored_df,
+        proposal_views=proposal_views,
+        stats=source_meta.get("stats", {}),
+    )
+    metrics_df = _build_f5_metrics_rows(
+        scored_df=scored_df,
+        process_counts_df=process_counts_df,
+        proposal_views=proposal_views,
+        property_name=args.property,
+        target_value=target_value,
+        target_mode=target_mode,
+        epsilon=epsilon,
+        elapsed_sec=elapsed_sec,
+        model_size=str(assets["model_size"]),
+        scoring_view=encoder_view,
+        rerank_strategy=args.rerank_strategy,
+        rerank_top_k=int(args.rerank_top_k),
+        candidate_source=str(source_meta.get("candidate_source", sampling_mode)),
+    )
+    aggregate_metrics = metrics_df[metrics_df["proposal_view"].astype(str) == "all"].copy()
+    if aggregate_metrics.empty:
+        aggregate_metrics = pd.DataFrame(
+            [
+                {
+                    "proposal_view": "all",
+                    "n_generated": len(smiles_list),
+                    "n_valid": len(structurally_valid_smiles),
+                    "n_scored": int(scored_mask.sum()),
+                    "n_hits": int(scored_df.get("property_hit", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()),
+                    "n_fair_hits": int(scored_df.get("fair_hit", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()),
+                }
+            ]
+        )
+    aggregate_row = aggregate_metrics.iloc[0].to_dict()
 
     save_csv(
-        pd.DataFrame([metrics_row]),
+        metrics_df,
         property_step_dirs["metrics_dir"] / "metrics_inverse.csv",
         legacy_paths=[
             step_dirs["metrics_dir"] / "metrics_inverse.csv",
@@ -2904,22 +3659,29 @@ def main(args):
     out_dir = step_dirs["step_dir"]
     files_dir = property_step_dirs["files_dir"]
     legacy_files_dir = step_dirs["files_dir"]
-
-    if ood_prop_scores is not None and len(scored_df) == len(ood_prop_scores):
-        scored_df = scored_df.copy()
-        scored_df["ood_prop"] = ood_prop_scores
-        if ood_gen_scores is not None and len(scored_df) == len(ood_gen_scores):
-            scored_df["ood_gen"] = ood_gen_scores
-        # Backward-compat alias
-        scored_df["d2_distance"] = ood_prop_scores
-    if "property" not in scored_df.columns:
-        scored_df = scored_df.copy()
-    scored_df["property"] = args.property
-
-    accepted_df = scored_df[scored_df["accepted"] == True].copy() if "accepted" in scored_df.columns else scored_df[hits].copy()  # noqa: E712
+    accepted_df = scored_df[scored_df["accepted"] == True].copy() if "accepted" in scored_df.columns else scored_df.iloc[0:0].copy()  # noqa: E712
     if "property" not in accepted_df.columns:
         accepted_df = accepted_df.copy()
     accepted_df["property"] = args.property
+
+    save_csv(
+        process_counts_df,
+        files_dir / f"design_process_counts_{args.property}.csv",
+        legacy_paths=[
+            legacy_files_dir / f"design_process_counts_{args.property}.csv",
+            out_dir / f"design_process_counts_{args.property}.csv",
+        ],
+        index=False,
+    )
+    save_csv(
+        process_counts_df,
+        files_dir / "design_process_counts.csv",
+        legacy_paths=[
+            legacy_files_dir / "design_process_counts.csv",
+            out_dir / "design_process_counts.csv",
+        ],
+        index=False,
+    )
 
     save_csv(
         scored_df,
@@ -3005,16 +3767,19 @@ def main(args):
         {
             **source_meta,
             "encoder_view": encoder_view,
+            "proposal_views": proposal_views,
             "property": args.property,
             "target_value": target_value,
             "target_mode": target_mode,
             "epsilon": epsilon,
+            "sampling_mode": sampling_mode,
             "rerank_strategy": args.rerank_strategy,
             "rerank_top_k": int(args.rerank_top_k),
-            "n_generated": int(n_generated),
-            "n_structurally_valid": int(n_valid),
-            "n_scored": int(n_scored),
-            "n_hits": int(n_hits),
+            "n_generated": int(aggregate_row.get("n_generated", 0)),
+            "n_structurally_valid": int(aggregate_row.get("n_valid", 0)),
+            "n_scored": int(aggregate_row.get("n_scored", 0)),
+            "n_hits": int(aggregate_row.get("n_hits", 0)),
+            "n_fair_hits": int(aggregate_row.get("n_fair_hits", 0)),
         },
         files_dir / "run_meta.json",
         legacy_paths=[
@@ -3026,16 +3791,19 @@ def main(args):
         {
             **source_meta,
             "encoder_view": encoder_view,
+            "proposal_views": proposal_views,
             "property": args.property,
             "target_value": target_value,
             "target_mode": target_mode,
             "epsilon": epsilon,
+            "sampling_mode": sampling_mode,
             "rerank_strategy": args.rerank_strategy,
             "rerank_top_k": int(args.rerank_top_k),
-            "n_generated": int(n_generated),
-            "n_structurally_valid": int(n_valid),
-            "n_scored": int(n_scored),
-            "n_hits": int(n_hits),
+            "n_generated": int(aggregate_row.get("n_generated", 0)),
+            "n_structurally_valid": int(aggregate_row.get("n_valid", 0)),
+            "n_scored": int(aggregate_row.get("n_scored", 0)),
+            "n_hits": int(aggregate_row.get("n_hits", 0)),
+            "n_fair_hits": int(aggregate_row.get("n_fair_hits", 0)),
         },
         files_dir / f"run_meta_{args.property}.json",
         legacy_paths=[
@@ -3058,6 +3826,12 @@ def main(args):
             target_mode=target_mode,
             epsilon=epsilon,
             source_meta=source_meta,
+            figures_dir=property_step_dirs["figures_dir"],
+        )
+        _plot_f5_design_process(
+            process_counts_df=process_counts_df,
+            metrics_df=metrics_df,
+            property_name=args.property,
             figures_dir=property_step_dirs["figures_dir"],
         )
         _plot_f5_accepted_polymer_overview(
@@ -3087,6 +3861,8 @@ if __name__ == "__main__":
     parser.add_argument("--target", type=float, default=None)
     parser.add_argument("--target_mode", type=str, default=None, choices=["window", "ge", "le"])
     parser.add_argument("--epsilon", type=float, default=None)
+    parser.add_argument("--sampling_mode", type=str, default=None, choices=["fixed_budget", "resample"])
+    parser.add_argument("--candidate_budget_per_view", type=int, default=None)
     parser.add_argument("--sampling_target", type=int, default=None)
     parser.add_argument("--sampling_num_per_batch", type=int, default=None)
     parser.add_argument("--sampling_batch_size", type=int, default=None)

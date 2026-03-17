@@ -23,6 +23,7 @@ try:  # pragma: no cover
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except Exception:  # pragma: no cover
+    matplotlib = None
     plt = None
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -30,6 +31,16 @@ REPO_ROOT = BASE_DIR.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from src.utils.config import load_config
+from src.utils.visualization import (
+    COLOR_MUTED,
+    COLOR_TEXT,
+    NATURE_PALETTE,
+    normalize_view_name,
+    ordered_views,
+    set_legend_location,
+    view_color,
+    view_label,
+)
 
 
 DEFAULT_METHOD_DIRS = [
@@ -75,27 +86,12 @@ METHOD_PLOT_COLORS = {
     "Bi_Diffusion_Group_SELFIES": "#E64B35",
     "Bi_Diffusion_graph": "#8491B4",
 }
-NATURE_PALETTE = [
-    "#E64B35",
-    "#4DBBD5",
-    "#00A087",
-    "#3C5488",
-    "#F39B7F",
-    "#8491B4",
-    "#91D1C2",
-    "#DC0000",
-    "#7E6148",
-    "#B09C85",
-]
-COLOR_TEXT = "#1F2937"
-COLOR_MUTED = "#B8BFC9"
-
 MANUSCRIPT_CAPTIONS = [
     "Figure 1. Generation quality of five bidirectional diffusion models across molecular representation types. (a) Valid polymer fraction for each representation at the best-performing model size. (b) Unique fraction among valid generated polymers, reflecting generation diversity. (c) Validity-uniqueness trade-off colored by novelty.",
     "Figure 2. Cross-view molecular alignment in the multi-view foundation model. (a) Recall@1 heatmap: fraction of queries for which the correct paired molecule ranks first under cosine similarity. (b) Recall@10 heatmap: fraction of correct pairs recovered within the top-10 retrieved candidates.",
     "Figure 3. Property prediction with multi-view foundation embeddings across model scales. (a) Test-set R^2 versus model size across configured target properties, comparing the best baseline representation and the best MVF/fusion representation at each size. (b) Fusion gain in R^2 across model sizes.",
     "Figure 4. Out-of-distribution (OOD) shift analysis across model scales. (a) Mean distance between training-set (D1) and target-domain (D2) polymer embeddings as a function of model size for baseline and MVF. (b) Fraction of generated polymers within the D2 neighborhood across model sizes.",
-    "Figure 5. Multi-view foundation model-guided inverse polymer design across model scales. (a) Inverse-design success rate versus model size across configured target properties, comparing baseline and MVF reranking. (b) Absolute success-rate improvement from MVF reranking across model sizes.",
+    "Figure 5. View-aligned inverse polymer design across model scales. (a) F5 fair hit rate versus model size for each proposal view under the shared SMILES scorer. (b) F6 conservative top-k fair hit rate versus model size for each proposal view.",
     "Figure 6. Chemistry and physics analysis of inversely designed polymers. (a) Normalized descriptor shifts of accepted candidates relative to the D1 reference set for key physicochemical features and each target property. (b) Motif enrichment ratios for discriminative polymer substructures in accepted candidates compared to the reference distribution.",
 ]
 
@@ -817,7 +813,7 @@ def _describe_panel(path: Path) -> str:
 
 
 def _set_publication_style(font_size: int) -> None:
-    if plt is None:
+    if plt is None or matplotlib is None:
         return
     plt.rcParams.update(
         {
@@ -1386,7 +1382,7 @@ def _save_plot_figure(fig, output_path: Path, dpi: int) -> bool:
                 continue
         legend = ax.get_legend()
         if legend is not None:
-            legend.set_loc("best")
+            set_legend_location(legend, "best")
             for text in legend.get_texts():
                 text.set_fontsize(16)
         if ax.get_xlabel():
@@ -2324,182 +2320,172 @@ def _fig5_inverse_design(
     dpi: int,
     df_inverse_base: pd.DataFrame,
     df_inverse_mvf: pd.DataFrame,
+    df_inverse_f6: pd.DataFrame,
     fallback_panels: Sequence[Path],
 ) -> tuple[bool, str]:
     caption = MANUSCRIPT_CAPTIONS[4]
     if plt is None:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
-    frames: list[pd.DataFrame] = []
-    for source, src_df in [("baseline", df_inverse_base), ("mvf", df_inverse_mvf)]:
+    def _prepare_view_frame(src_df: pd.DataFrame, value_col_candidates: Sequence[str], label: str) -> Optional[pd.DataFrame]:
         if src_df is None or src_df.empty:
-            continue
+            return None
         df = src_df.copy()
         prop_col = _first_existing_col(df, ["property", "Property"])
-        succ_col = _first_existing_col(df, ["success_rate"])
         size_col = _first_existing_col(df, ["model_size"])
-        if prop_col is None or succ_col is None:
-            continue
+        view_col = _first_existing_col(df, ["proposal_view", "representation", "Representation"])
+        value_col = _first_existing_col(df, list(value_col_candidates))
+        if prop_col is None or size_col is None or view_col is None or value_col is None:
+            print(f"[F8] Warning: Figure 5 missing columns for {label}.")
+            return None
+        df = df.loc[df[prop_col].notna() & df[size_col].notna() & df[view_col].notna()].copy()
+        if df.empty:
+            return None
         df["property"] = df[prop_col].astype(str).str.strip()
-        df["success_rate"] = pd.to_numeric(df[succ_col], errors="coerce")
-        if size_col is not None:
-            df["model_size"] = df[size_col].apply(_normalize_model_size)
-        else:
-            df["model_size"] = "unknown"
-        rerank_col = _first_existing_col(df, ["rerank_success_rate"])
-        if rerank_col is not None:
-            df["rerank_success_rate"] = pd.to_numeric(df[rerank_col], errors="coerce")
-        else:
-            df["rerank_success_rate"] = np.nan
-        flag_col = _first_existing_col(df, ["rerank_applied"])
-        if flag_col is not None:
-            df["rerank_applied"] = df[flag_col].astype(str).str.lower().isin(["1", "true", "yes", "y"])
-        else:
-            df["rerank_applied"] = False
-        df["source_name"] = source
-        frames.append(df[["property", "model_size", "success_rate", "rerank_success_rate", "rerank_applied", "source_name"]])
+        df = df[df["property"].astype(str).str.lower() != "nan"].copy()
+        if df.empty:
+            return None
+        df["model_size"] = df[size_col].apply(_normalize_model_size)
+        df["proposal_view"] = df[view_col].astype(str).map(normalize_view_name)
+        df = df[(df["proposal_view"] != "") & (df["proposal_view"] != "all")].copy()
+        if df.empty:
+            return None
+        df["value"] = pd.to_numeric(df[value_col], errors="coerce")
+        df = df.dropna(subset=["value"])
+        if df.empty:
+            return None
+        return (
+            df.groupby(["property", "proposal_view", "model_size"], as_index=False)["value"]
+            .mean(numeric_only=True)
+            .reset_index(drop=True)
+        )
 
-    if not frames:
+    f5 = _prepare_view_frame(df_inverse_mvf, ["fair_success_rate"], "F5")
+    f6 = _prepare_view_frame(df_inverse_f6, ["top_k_fair_hit_rate"], "F6")
+
+    if f5 is None or f5.empty or f6 is None or f6.empty:
+        base = _prepare_view_frame(df_inverse_base, ["success_rate"], "baseline inverse")
+        if base is None or base.empty:
+            return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        target_prop = _ordered_properties(base["property"].tolist())[0]
+        base = base[base["property"] == target_prop].copy()
+        size_order = [s for s in MODEL_SIZE_ORDER if s in set(base["model_size"].astype(str))]
+        for s in sorted(set(base["model_size"].astype(str))):
+            if s not in size_order:
+                size_order.append(s)
+        size_to_x = {s: i for i, s in enumerate(size_order)}
+        fig, ax = plt.subplots(1, 1, figsize=(8.2, 6.0))
+        for proposal_view in ordered_views(base["proposal_view"].tolist()):
+            sub = base[base["proposal_view"] == proposal_view].copy()
+            sub["x"] = sub["model_size"].map(size_to_x)
+            sub = sub.dropna(subset=["x"]).sort_values("x")
+            if sub.empty:
+                continue
+            ax.plot(
+                sub["x"].to_numpy(dtype=float),
+                sub["value"].to_numpy(dtype=float),
+                linestyle="-",
+                marker="o",
+                linewidth=2.0,
+                markersize=6.0,
+                color=view_color(proposal_view),
+                alpha=0.95,
+                label=view_label(proposal_view),
+            )
+        ax.set_xticks(np.arange(len(size_order)))
+        ax.set_xticklabels([s.upper() for s in size_order])
+        ax.set_xlabel("Model Size")
+        ax.set_ylabel("Baseline Success Rate")
+        ax.set_ylim(0.0, 1.0)
+        ax.grid(True, axis="y", linestyle="--", alpha=0.4)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, labels, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
+        _panel_mark(ax, "(a)", font_size)
+        return _save_plot_figure(fig, output_path, dpi), caption
+
+    common_props = sorted(set(f5["property"].dropna().astype(str)) & set(f6["property"].dropna().astype(str)))
+    if not common_props:
+        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+    target_prop = _ordered_properties(common_props)[0]
+    f5 = f5[f5["property"] == target_prop].copy()
+    f6 = f6[f6["property"] == target_prop].copy()
+    if f5.empty or f6.empty:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
-    data = pd.concat(frames, ignore_index=True)
-    data = data.dropna(subset=["property", "model_size"])
-    if data.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
-
-    size_order = [s for s in MODEL_SIZE_ORDER if s in set(data["model_size"].astype(str))]
-    for s in sorted(set(data["model_size"].astype(str))):
+    size_order = [s for s in MODEL_SIZE_ORDER if s in set(pd.concat([f5["model_size"], f6["model_size"]]).astype(str))]
+    for s in sorted(set(pd.concat([f5["model_size"], f6["model_size"]]).astype(str))):
         if s not in size_order:
             size_order.append(s)
     if not size_order:
         size_order = ["unknown"]
     size_to_x = {s: i for i, s in enumerate(size_order)}
 
-    prop_order = _ordered_properties(data["property"].tolist())
-
-    rows: list[dict[str, object]] = []
-    for prop in prop_order:
-        for size in size_order:
-            baseline_vals = data[
-                (data["property"] == prop)
-                & (data["model_size"] == size)
-                & (data["source_name"] == "baseline")
-            ]["success_rate"]
-            mvf_block = data[
-                (data["property"] == prop)
-                & (data["model_size"] == size)
-                & (data["source_name"] == "mvf")
-            ]
-            if baseline_vals.dropna().empty and mvf_block.empty:
-                continue
-            mvf_plain = mvf_block["success_rate"]
-            mvf_rerank = mvf_block.loc[mvf_block["rerank_success_rate"].notna(), "rerank_success_rate"]
-            base_mean = float(baseline_vals.mean()) if not baseline_vals.dropna().empty else np.nan
-            mvf_mean = float(mvf_plain.mean()) if not mvf_plain.dropna().empty else np.nan
-            mvf_rerank_mean = float(mvf_rerank.mean()) if not mvf_rerank.dropna().empty else mvf_mean
-            gain = mvf_rerank_mean - base_mean if np.isfinite(mvf_rerank_mean) and np.isfinite(base_mean) else np.nan
-            rows.append(
-                {
-                    "property": prop,
-                    "model_size": size,
-                    "baseline_success": base_mean,
-                    "mvf_success": mvf_mean,
-                    "mvf_rerank_success": mvf_rerank_mean,
-                    "rerank_gain": gain,
-                }
-            )
-
-    comp = pd.DataFrame(rows)
-    if comp.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
-
     fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.3), squeeze=False)
     ax0, ax1 = axes[0]
 
-    for idx, prop in enumerate(prop_order):
-        sub = comp[comp["property"] == prop].copy()
+    all_views = ordered_views(pd.concat([f5["proposal_view"], f6["proposal_view"]], ignore_index=True).tolist())
+    for proposal_view in all_views:
+        sub = f5[f5["proposal_view"] == proposal_view].copy()
         if sub.empty:
             continue
         sub["x"] = sub["model_size"].map(size_to_x)
         sub = sub.dropna(subset=["x"]).sort_values("x")
         if sub.empty:
             continue
-        color = NATURE_PALETTE[idx % len(NATURE_PALETTE)]
+        color = view_color(proposal_view)
         x_vals = sub["x"].to_numpy(dtype=float)
         ax0.plot(
             x_vals,
-            sub["baseline_success"].to_numpy(dtype=float),
-            linestyle="--",
+            sub["value"].to_numpy(dtype=float),
+            linestyle="-",
             marker="o",
             linewidth=2.0,
             markersize=6.3,
             color=color,
-            alpha=0.65,
-            label=f"{prop} baseline",
+            alpha=0.95,
+            label=view_label(proposal_view),
         )
-        ax0.plot(
-            x_vals,
-            sub["mvf_rerank_success"].to_numpy(dtype=float),
+    ax0.set_xticks(np.arange(len(size_order)))
+    ax0.set_xticklabels([s.upper() for s in size_order])
+    ax0.set_xlabel("Model Size")
+    ax0.set_ylabel("F5 Fair Hit Rate")
+    ax0.set_ylim(0.0, 1.0)
+    ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+    handles0, labels0 = ax0.get_legend_handles_labels()
+    if handles0:
+        ax0.legend(handles0, labels0, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
+    _panel_mark(ax0, "(a)", font_size)
+
+    for proposal_view in all_views:
+        sub = f6[f6["proposal_view"] == proposal_view].copy()
+        if sub.empty:
+            continue
+        sub["x"] = sub["model_size"].map(size_to_x)
+        sub = sub.dropna(subset=["x"])
+        if sub.empty:
+            continue
+        color = view_color(proposal_view)
+        ax1.plot(
+            sub["x"].to_numpy(dtype=float),
+            sub["value"].to_numpy(dtype=float),
             linestyle="-",
             marker="s",
             linewidth=2.2,
             markersize=6.3,
             color=color,
             alpha=0.95,
-            label=f"{prop} MVF rerank",
+            label=view_label(proposal_view),
         )
-    ax0.set_xticks(np.arange(len(size_order)))
-    ax0.set_xticklabels([s.upper() for s in size_order])
-    ax0.set_xlabel("Model Size")
-    ax0.set_ylabel("Success Rate")
-    ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
-    handles0, labels0 = ax0.get_legend_handles_labels()
-    if handles0:
-        max_props = 6
-        max_entries = max_props * 2
-        ax0.legend(
-            handles0[:max_entries],
-            labels0[:max_entries],
-            loc="best",
-            ncol=2,
-            frameon=False,
-            fontsize=max(8, font_size - 4),
-        )
-    _panel_mark(ax0, "(a)", font_size)
-
-    gain_by_size = comp.groupby("model_size", as_index=False)["rerank_gain"].mean(numeric_only=True)
-    gain_by_size["x"] = gain_by_size["model_size"].map(size_to_x)
-    gain_by_size = gain_by_size.dropna(subset=["x"]).sort_values("x")
-    ax1.bar(
-        gain_by_size["x"].to_numpy(dtype=float),
-        gain_by_size["rerank_gain"].to_numpy(dtype=float),
-        color=NATURE_PALETTE[2],
-        edgecolor=COLOR_TEXT,
-        linewidth=0.7,
-    )
-    for idx, prop in enumerate(prop_order):
-        sub = comp[comp["property"] == prop].copy()
-        if sub.empty:
-            continue
-        sub["x"] = sub["model_size"].map(size_to_x)
-        sub = sub.dropna(subset=["x", "rerank_gain"])
-        if sub.empty:
-            continue
-        ax1.plot(
-            sub["x"].to_numpy(dtype=float),
-            sub["rerank_gain"].to_numpy(dtype=float),
-            linestyle="",
-            marker="o",
-            markersize=4.8,
-            color=NATURE_PALETTE[idx % len(NATURE_PALETTE)],
-            alpha=0.8,
-        )
-    ax1.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, alpha=0.75)
     ax1.set_xticks(np.arange(len(size_order)))
     ax1.set_xticklabels([s.upper() for s in size_order])
     ax1.set_xlabel("Model Size")
-    ax1.set_ylabel("MVF Rerank Improvement")
+    ax1.set_ylabel("F6 Top-k Fair Hit Rate")
+    ax1.set_ylim(0.0, 1.0)
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+    handles1, labels1 = ax1.get_legend_handles_labels()
+    if handles1:
+        ax1.legend(handles1, labels1, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
     _panel_mark(ax1, "(b)", font_size)
 
     return _save_plot_figure(fig, output_path, dpi), caption
@@ -3194,6 +3180,13 @@ def main(args):
                 "metrics_inverse.csv",
                 include_property_scopes=True,
             )
+            df_mvf_inverse_f6 = _load_mvf_csv_multi(
+                mvf_results_dirs,
+                "step6_ood_aware_inverse",
+                "metrics_inverse_ood_objective.csv",
+                include_property_scopes=True,
+                suffixed_filename_regex=r"^metrics_inverse_ood_objective_(.+)\.csv$",
+            )
             df_mvf_desc = _load_mvf_csv_multi(
                 mvf_results_dirs,
                 "step7_chem_physics_analysis",
@@ -3246,6 +3239,7 @@ def main(args):
                     "kwargs": {
                         "df_inverse_base": df_agg_inverse,
                         "df_inverse_mvf": df_mvf_inverse,
+                        "df_inverse_f6": df_mvf_inverse_f6,
                     },
                 },
                 {

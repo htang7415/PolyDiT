@@ -31,6 +31,14 @@ from src.evaluation.foundation_inverse import (
 )
 from src.utils.config import load_config, save_config
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
+from src.utils.visualization import (
+    normalize_view_name,
+    ordered_views,
+    save_figure_png,
+    set_publication_style,
+    view_color,
+    view_label,
+)
 from shared.ood_metrics import knn_distances
 
 try:  # pragma: no cover
@@ -64,23 +72,8 @@ SUPPORTED_DESCRIPTOR_CONSTRAINTS = {
     "sa_score",
 }
 
-
-PUBLICATION_STYLE = {
-    "font.family": "serif",
-    "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 16,
-    "axes.titlesize": 16,
-    "xtick.labelsize": 16,
-    "ytick.labelsize": 16,
-    "legend.fontsize": 16,
-    "axes.linewidth": 0.9,
-    "lines.linewidth": 1.8,
-    "figure.dpi": 300,
-    "savefig.dpi": 600,
-}
-
 if plt is not None:
-    plt.rcParams.update(PUBLICATION_STYLE)
+    set_publication_style()
 
 _STEP5_MODULE = None
 
@@ -123,23 +116,8 @@ def _to_float_or_none(value):
         return None
     return float(text)
 
-
-def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: str = "best") -> None:
-    for text_obj in fig.findobj(match=lambda artist: hasattr(artist, "set_fontsize")):
-        try:
-            text_obj.set_fontsize(font_size)
-        except Exception:
-            continue
-    for ax in fig.axes:
-        legend = ax.get_legend()
-        if legend is not None:
-            legend.set_loc(legend_loc)
-
-
 def _save_figure_png(fig, output_base: Path) -> None:
-    output_base.parent.mkdir(parents=True, exist_ok=True)
-    _standardize_figure_text_and_legend(fig, font_size=16, legend_loc="best")
-    fig.savefig(output_base.with_suffix(".png"), dpi=600, bbox_inches="tight")
+    save_figure_png(fig, output_base, font_size=16, dpi=600, legend_loc="best")
 
 
 def _plot_f6_objective_diagnostics(
@@ -212,7 +190,7 @@ def _plot_f6_objective_diagnostics(
     # (C) OOD-prop vs OOD-gen scatter for candidates.
     _ood_gen_col = "ood_gen" if "ood_gen" in valid_df.columns else None
     _ood_prop_col = "ood_prop" if "ood_prop" in valid_df.columns else "d2_distance"
-    if _ood_gen_col and _ood_prop_col in valid_df.columns:
+    if (_ood_gen_col is not None) and (_ood_prop_col in valid_df.columns):
         x_c = pd.to_numeric(valid_df[_ood_prop_col], errors="coerce")
         y_c = pd.to_numeric(valid_df[_ood_gen_col], errors="coerce")
         mask_c = x_c.notna() & y_c.notna()
@@ -335,6 +313,61 @@ def _plot_f6_objective_diagnostics(
     fig.suptitle(f"F6 OOD-Aware Inverse Objective: {property_name}", fontsize=16, fontweight="bold")
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / f"figure_f6_ood_objective_diagnostics_{property_name}")
+    plt.close(fig)
+
+
+def _plot_f6_view_summary(
+    *,
+    metrics_df: pd.DataFrame,
+    property_name: str,
+    figures_dir: Path,
+) -> None:
+    if plt is None or metrics_df.empty:
+        return
+    df = metrics_df.copy()
+    if "proposal_view" not in df.columns:
+        return
+    df["proposal_view"] = df["proposal_view"].astype(str).map(normalize_view_name)
+    df = df[df["proposal_view"] != "all"].copy()
+    if df.empty:
+        return
+    views = ordered_views(df["proposal_view"].tolist())
+    if not views:
+        return
+    plot_df = df.set_index("proposal_view").reindex(views).reset_index()
+    xpos = np.arange(len(plot_df), dtype=np.int64)
+    colors = [view_color(v) for v in plot_df["proposal_view"].tolist()]
+
+    fig, axes = plt.subplots(1, 3, figsize=(20.0, 6.2))
+    ax0, ax1, ax2 = axes
+
+    ax0.bar(xpos, plot_df["top_k_hit_rate"].to_numpy(dtype=float), color=colors, alpha=0.82)
+    ax0.set_xticks(xpos)
+    ax0.set_xticklabels([view_label(v) for v in plot_df["proposal_view"].tolist()], rotation=20, ha="right")
+    ax0.set_ylabel("Top-k property hit rate")
+    ax0.set_title("Per-view property hit rate")
+    ax0.grid(axis="y", alpha=0.25)
+
+    fair_col = "top_k_fair_hit_rate" if "top_k_fair_hit_rate" in plot_df.columns else "top_k_hit_rate"
+    ax1.bar(xpos, plot_df[fair_col].to_numpy(dtype=float), color=colors, alpha=0.82)
+    ax1.set_xticks(xpos)
+    ax1.set_xticklabels([view_label(v) for v in plot_df["proposal_view"].tolist()], rotation=20, ha="right")
+    ax1.set_ylabel("Top-k fair hit rate")
+    ax1.set_title("Per-view fair hit rate")
+    ax1.grid(axis="y", alpha=0.25)
+
+    ax2.plot(xpos, plot_df["top_k_mean_ood_prop"].to_numpy(dtype=float), color="#222222", linewidth=2.0, marker="o")
+    for idx, row in plot_df.iterrows():
+        ax2.scatter(idx, row["top_k_mean_ood_prop"], s=110, color=view_color(row["proposal_view"]), alpha=0.9)
+    ax2.set_xticks(xpos)
+    ax2.set_xticklabels([view_label(v) for v in plot_df["proposal_view"].tolist()], rotation=20, ha="right")
+    ax2.set_ylabel("Top-k mean OOD-prop")
+    ax2.set_title("Conservative selection profile")
+    ax2.grid(axis="y", alpha=0.25)
+
+    fig.suptitle(f"F6 View-Aligned Conservative Reranking: {property_name}", fontsize=16, fontweight="bold")
+    fig.tight_layout()
+    _save_figure_png(fig, figures_dir / f"figure_f6_view_summary_{property_name}")
     plt.close(fig)
 
 
@@ -1361,12 +1394,13 @@ def main(args):
         objective += float(normalized_term_weights[name]) * np.asarray(values, dtype=np.float32).reshape(-1)
     order = np.argsort(objective, kind="mergesort")
     objective_rank = np.empty_like(order, dtype=np.int64)
-    objective_rank[order] = np.arange(objective.shape[0], dtype=np.int64)
+    objective_rank[order] = np.arange(1, objective.shape[0] + 1, dtype=np.int64)
 
     valid_df["property_hit"] = hit_mask.astype(bool)
     valid_df["target_excess"] = target_excess
     valid_df["target_violation"] = target_violation_raw
-    valid_df["property_error_normed"] = property_error_raw
+    valid_df["property_error_raw"] = property_error_raw
+    valid_df["property_error_normed"] = property_error_obj
     valid_df["property_error_objective"] = property_error_obj
     valid_df["d2_distance_objective"] = d2_obj
     valid_df["prediction_uncertainty"] = pred_unc
@@ -1382,79 +1416,181 @@ def main(args):
     valid_df["ood_aware_objective"] = objective
     valid_df["ood_aware_rank"] = objective_rank
     valid_df["property"] = property_name
+    if "proposal_view" not in valid_df.columns:
+        valid_df["proposal_view"] = encoder_view
 
-    order = np.argsort(valid_df["conservative_objective"].to_numpy(dtype=np.float32))
-    k = min(top_k, len(order))
-    top_idx = order[:k]
-    top_df = valid_df.iloc[top_idx].copy()
-    top_df["property"] = property_name
-
-    # Baselines for comparison: property-only and OOD-only ranking.
-    prop_order = np.argsort(valid_df["property_error_objective"].to_numpy(dtype=np.float32))
-    ood_order = np.argsort(valid_df["d2_distance_objective"].to_numpy(dtype=np.float32))
-    top_prop = valid_df.iloc[prop_order[:k]]
-    top_ood = valid_df.iloc[ood_order[:k]]
+    valid_df["proposal_view"] = valid_df["proposal_view"].astype(str).map(lambda x: normalize_view_name(x) or normalize_view_name(encoder_view))
+    valid_df["conservative_rank_within_view"] = np.nan
+    valid_df["ood_aware_rank_within_view"] = np.nan
+    valid_df["topk_selected_within_view"] = False
+    valid_df["fair_hit"] = (
+        valid_df.get("fair_hit", pd.Series([False] * len(valid_df), index=valid_df.index))
+        .fillna(False)
+        .astype(bool)
+    )
 
     model_size = config.get(f"{encoder_view}_encoder", {}).get("model_size", "base")
-    top_hits = int(top_df["property_hit"].sum()) if k > 0 else 0
-    top_hit_rate = float(top_hits / max(k, 1))
-    representation = "MultiView" if len(set(ood_views_used)) > 1 else _view_to_representation(encoder_view)
+    metrics_rows: list[dict] = []
+    top_frames: list[pd.DataFrame] = []
+    views_in_pool = ordered_views(valid_df["proposal_view"].tolist())
+    df = df.copy()
+    if "proposal_view" not in df.columns:
+        df["proposal_view"] = normalize_view_name(encoder_view)
+    else:
+        df["proposal_view"] = df["proposal_view"].astype(str).map(lambda x: normalize_view_name(x) or normalize_view_name(encoder_view))
+    dropped_mask = ~valid_mask
 
-    metrics_row = {
-        "method": "Multi_View_Foundation",
-        "representation": representation,
-        "model_size": model_size,
-        "property": property_name,
-        "target_value": float(target),
-        "target_mode": target_mode,
-        "epsilon": float(epsilon),
-        "normalization": normalization,
-        "prediction_column": target_pred_col,
-        "prediction_uncertainty_column": target_unc_col or "",
-        "prediction_n_models_column": target_n_models_col or "",
-        "objective_property_weight": float(normalized_term_weights.get("property", 0.0)),
-        "objective_ood_weight": float(normalized_term_weights.get("ood", 0.0)),
-        "objective_uncertainty_weight": float(normalized_term_weights.get("uncertainty", 0.0)),
-        "objective_constraint_weight": float(normalized_term_weights.get("constraint", 0.0)),
-        "objective_sa_weight": float(normalized_term_weights.get("sa", 0.0)),
-        "objective_descriptor_weight": float(normalized_term_weights.get("descriptor", 0.0)),
-        "n_constraint_properties": int(len(active_constraint_props)),
-        "constraint_properties": ",".join(active_constraint_props),
-        "n_descriptor_constraints": int(len(active_descriptor_constraints)),
-        "descriptor_constraints": ",".join(active_descriptor_constraints),
-        "ood_views_requested": ",".join(ood_views),
-        "ood_views_used": ",".join(ood_views_used),
-        "ood_view_aggregation": "mean",
-        "ood_k": int(ood_k),
+    for proposal_view in views_in_pool:
+        view_df = valid_df[valid_df["proposal_view"] == proposal_view].copy()
+        if view_df.empty:
+            continue
+        order_view = np.argsort(view_df["conservative_objective"].to_numpy(dtype=np.float32), kind="mergesort")
+        ranked_idx = view_df.index.to_numpy()[order_view]
+        valid_df.loc[ranked_idx, "conservative_rank_within_view"] = np.arange(1, len(ranked_idx) + 1, dtype=np.int64)
+        valid_df.loc[ranked_idx, "ood_aware_rank_within_view"] = np.arange(1, len(ranked_idx) + 1, dtype=np.int64)
 
-        "d2_distance_source": d2_source,
-        "candidate_scores_path": str(candidate_scores_path),
-        "n_candidates_total": int(len(df)),
-        "n_candidates_scored": int(len(valid_df)),
-        "n_candidates_dropped": int(dropped),
-        "top_k": int(k),
-        "top_k_hits": int(top_hits),
-        "top_k_hit_rate": round(top_hit_rate, 4),
-        "top_k_hit_rate_property_only": round(float(top_prop["property_hit"].mean()) if len(top_prop) else 0.0, 4),
-        "top_k_hit_rate_ood_only": round(float(top_ood["property_hit"].mean()) if len(top_ood) else 0.0, 4),
-        "top_k_mean_prediction": round(float(top_df["prediction"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_prediction_uncertainty": round(float(top_df["prediction_uncertainty"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_abs_error": round(float(top_df["target_violation"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_target_excess": round(float(top_df["target_excess"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_target_violation": round(float(top_df["target_violation"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_ood_prop": round(float(top_df["ood_prop"].mean()) if len(top_df) and "ood_prop" in top_df.columns else 0.0, 6),
-        "top_k_mean_ood_gen": round(float(top_df["ood_gen"].mean()) if len(top_df) and "ood_gen" in top_df.columns and top_df["ood_gen"].notna().any() else float("nan"), 6),
-        "top_k_mean_d2_distance": round(float(top_df["d2_distance"].mean()) if len(top_df) and "d2_distance" in top_df.columns else 0.0, 6),
-        "mean_ood_prop": round(float(valid_df["ood_prop"].mean()) if "ood_prop" in valid_df.columns and valid_df["ood_prop"].notna().any() else float("nan"), 6),
-        "mean_ood_gen": round(float(valid_df["ood_gen"].mean()) if "ood_gen" in valid_df.columns and valid_df["ood_gen"].notna().any() else float("nan"), 6),
-        "top_k_mean_constraint_violation": round(float(top_df["constraint_violation_total"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_descriptor_violation": round(float(top_df["descriptor_violation_total"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_objective": round(float(top_df["ood_aware_objective"].mean()) if len(top_df) else 0.0, 6),
-        "top_k_mean_conservative_objective": round(float(top_df["conservative_objective"].mean()) if len(top_df) else 0.0, 6),
-    }
+        k_view = min(top_k, len(ranked_idx))
+        top_idx = ranked_idx[:k_view]
+        valid_df.loc[top_idx, "topk_selected_within_view"] = True
+        top_view = valid_df.loc[top_idx].copy()
+        top_view["property"] = property_name
+        top_frames.append(top_view)
+
+        prop_order = np.argsort(view_df["property_error_objective"].to_numpy(dtype=np.float32), kind="mergesort")
+        ood_order = np.argsort(view_df["d2_distance_objective"].to_numpy(dtype=np.float32), kind="mergesort")
+        top_prop = view_df.iloc[prop_order[:k_view]]
+        top_ood = view_df.iloc[ood_order[:k_view]]
+        top_hits = int(top_view["property_hit"].sum()) if k_view > 0 else 0
+        top_fair_hits = int(top_view["fair_hit"].sum()) if k_view > 0 else 0
+        total_candidates_view = int((df["proposal_view"] == proposal_view).sum())
+        dropped_view = int(((df["proposal_view"] == proposal_view) & dropped_mask).sum())
+        topk_mean_ood_prop = float(top_view["ood_prop"].mean()) if len(top_view) and "ood_prop" in top_view.columns and top_view["ood_prop"].notna().any() else float("nan")
+        topk_mean_ood_gen = float(top_view["ood_gen"].mean()) if len(top_view) and "ood_gen" in top_view.columns and top_view["ood_gen"].notna().any() else float("nan")
+        topk_mean_d2 = float(top_view["d2_distance"].mean()) if len(top_view) and "d2_distance" in top_view.columns and top_view["d2_distance"].notna().any() else float("nan")
+
+        metrics_rows.append(
+            {
+                "method": "Multi_View_Foundation",
+                "representation": _view_to_representation(proposal_view),
+                "proposal_view": proposal_view,
+                "scoring_view": encoder_view,
+                "model_size": model_size,
+                "property": property_name,
+                "target_value": float(target),
+                "target_mode": target_mode,
+                "epsilon": float(epsilon),
+                "normalization": normalization,
+                "prediction_column": target_pred_col,
+                "prediction_uncertainty_column": target_unc_col or "",
+                "prediction_n_models_column": target_n_models_col or "",
+                "objective_property_weight": float(normalized_term_weights.get("property", 0.0)),
+                "objective_ood_weight": float(normalized_term_weights.get("ood", 0.0)),
+                "objective_uncertainty_weight": float(normalized_term_weights.get("uncertainty", 0.0)),
+                "objective_constraint_weight": float(normalized_term_weights.get("constraint", 0.0)),
+                "objective_sa_weight": float(normalized_term_weights.get("sa", 0.0)),
+                "objective_descriptor_weight": float(normalized_term_weights.get("descriptor", 0.0)),
+                "n_constraint_properties": int(len(active_constraint_props)),
+                "constraint_properties": ",".join(active_constraint_props),
+                "n_descriptor_constraints": int(len(active_descriptor_constraints)),
+                "descriptor_constraints": ",".join(active_descriptor_constraints),
+                "ood_views_requested": ",".join(ood_views),
+                "ood_views_used": ",".join(ood_views_used),
+                "ood_view_aggregation": "mean",
+                "ood_k": int(ood_k),
+                "d2_distance_source": d2_source,
+                "candidate_scores_path": str(candidate_scores_path),
+                "n_candidates_total": total_candidates_view,
+                "n_candidates_scored": int(len(view_df)),
+                "n_candidates_dropped": dropped_view,
+                "top_k": int(k_view),
+                "top_k_per_view_requested": int(top_k),
+                "top_k_hits": int(top_hits),
+                "top_k_fair_hits": int(top_fair_hits),
+                "top_k_hit_rate": round(float(top_hits / max(k_view, 1)), 4) if k_view else 0.0,
+                "top_k_fair_hit_rate": round(float(top_fair_hits / max(k_view, 1)), 4) if k_view else 0.0,
+                "top_k_hit_rate_property_only": round(float(top_prop["property_hit"].mean()) if len(top_prop) else 0.0, 4),
+                "top_k_hit_rate_ood_only": round(float(top_ood["property_hit"].mean()) if len(top_ood) else 0.0, 4),
+                "top_k_mean_prediction": round(float(top_view["prediction"].mean()) if len(top_view) else 0.0, 6),
+                "top_k_mean_prediction_uncertainty": round(float(top_view["prediction_uncertainty"].mean()) if len(top_view) else 0.0, 6),
+                "top_k_mean_abs_error": round(float(top_view["target_violation"].mean()) if len(top_view) else 0.0, 6),
+                "top_k_mean_target_excess": round(float(top_view["target_excess"].mean()) if len(top_view) else 0.0, 6),
+                "top_k_mean_target_violation": round(float(top_view["target_violation"].mean()) if len(top_view) else 0.0, 6),
+                "top_k_mean_ood_prop": round(topk_mean_ood_prop, 6) if np.isfinite(topk_mean_ood_prop) else np.nan,
+                "top_k_mean_ood_gen": round(topk_mean_ood_gen, 6) if np.isfinite(topk_mean_ood_gen) else np.nan,
+                "top_k_mean_d2_distance": round(topk_mean_d2, 6) if np.isfinite(topk_mean_d2) else np.nan,
+                "mean_ood_prop": round(float(view_df["ood_prop"].mean()) if "ood_prop" in view_df.columns and view_df["ood_prop"].notna().any() else float("nan"), 6),
+                "mean_ood_gen": round(float(view_df["ood_gen"].mean()) if "ood_gen" in view_df.columns and view_df["ood_gen"].notna().any() else float("nan"), 6),
+                "top_k_mean_constraint_violation": round(float(top_view["constraint_violation_total"].mean()) if len(top_view) else 0.0, 6),
+                "top_k_mean_descriptor_violation": round(float(top_view["descriptor_violation_total"].mean()) if len(top_view) else 0.0, 6),
+                "top_k_mean_objective": round(float(top_view["ood_aware_objective"].mean()) if len(top_view) else 0.0, 6),
+                "top_k_mean_conservative_objective": round(float(top_view["conservative_objective"].mean()) if len(top_view) else 0.0, 6),
+            }
+        )
+
+    top_df = pd.concat(top_frames, ignore_index=False).copy() if top_frames else valid_df.iloc[0:0].copy()
+    top_df["property"] = property_name
+    metrics_df = pd.DataFrame(metrics_rows)
+    if not metrics_df.empty:
+        agg_row = {
+            "method": "Multi_View_Foundation",
+            "representation": "All_Views",
+            "proposal_view": "all",
+            "scoring_view": encoder_view,
+            "model_size": model_size,
+            "property": property_name,
+            "target_value": float(target),
+            "target_mode": target_mode,
+            "epsilon": float(epsilon),
+            "normalization": normalization,
+            "prediction_column": target_pred_col,
+            "prediction_uncertainty_column": target_unc_col or "",
+            "prediction_n_models_column": target_n_models_col or "",
+            "objective_property_weight": float(normalized_term_weights.get("property", 0.0)),
+            "objective_ood_weight": float(normalized_term_weights.get("ood", 0.0)),
+            "objective_uncertainty_weight": float(normalized_term_weights.get("uncertainty", 0.0)),
+            "objective_constraint_weight": float(normalized_term_weights.get("constraint", 0.0)),
+            "objective_sa_weight": float(normalized_term_weights.get("sa", 0.0)),
+            "objective_descriptor_weight": float(normalized_term_weights.get("descriptor", 0.0)),
+            "n_constraint_properties": int(len(active_constraint_props)),
+            "constraint_properties": ",".join(active_constraint_props),
+            "n_descriptor_constraints": int(len(active_descriptor_constraints)),
+            "descriptor_constraints": ",".join(active_descriptor_constraints),
+            "ood_views_requested": ",".join(ood_views),
+            "ood_views_used": ",".join(ood_views_used),
+            "ood_view_aggregation": "mean",
+            "ood_k": int(ood_k),
+            "d2_distance_source": d2_source,
+            "candidate_scores_path": str(candidate_scores_path),
+            "n_candidates_total": int(len(df)),
+            "n_candidates_scored": int(len(valid_df)),
+            "n_candidates_dropped": int(dropped),
+            "top_k": int(metrics_df["top_k_per_view_requested"].max()) if "top_k_per_view_requested" in metrics_df.columns else int(top_k),
+            "top_k_total_selected": int(metrics_df["top_k"].sum()),
+            "top_k_hits": int(metrics_df["top_k_hits"].sum()),
+            "top_k_fair_hits": int(metrics_df["top_k_fair_hits"].sum()),
+            "top_k_hit_rate": round(float(metrics_df["top_k_hits"].sum() / max(metrics_df["top_k"].sum(), 1)), 4),
+            "top_k_fair_hit_rate": round(float(metrics_df["top_k_fair_hits"].sum() / max(metrics_df["top_k"].sum(), 1)), 4),
+            "top_k_hit_rate_property_only": round(float(metrics_df["top_k_hit_rate_property_only"].mean()), 4),
+            "top_k_hit_rate_ood_only": round(float(metrics_df["top_k_hit_rate_ood_only"].mean()), 4),
+            "top_k_mean_prediction": round(float(top_df["prediction"].mean()) if len(top_df) else 0.0, 6),
+            "top_k_mean_prediction_uncertainty": round(float(top_df["prediction_uncertainty"].mean()) if len(top_df) else 0.0, 6),
+            "top_k_mean_abs_error": round(float(top_df["target_violation"].mean()) if len(top_df) else 0.0, 6),
+            "top_k_mean_target_excess": round(float(top_df["target_excess"].mean()) if len(top_df) else 0.0, 6),
+            "top_k_mean_target_violation": round(float(top_df["target_violation"].mean()) if len(top_df) else 0.0, 6),
+            "top_k_mean_ood_prop": round(float(top_df["ood_prop"].mean()), 6) if len(top_df) and "ood_prop" in top_df.columns and top_df["ood_prop"].notna().any() else np.nan,
+            "top_k_mean_ood_gen": round(float(top_df["ood_gen"].mean()), 6) if len(top_df) and "ood_gen" in top_df.columns and top_df["ood_gen"].notna().any() else np.nan,
+            "top_k_mean_d2_distance": round(float(top_df["d2_distance"].mean()), 6) if len(top_df) and "d2_distance" in top_df.columns and top_df["d2_distance"].notna().any() else np.nan,
+            "mean_ood_prop": round(float(valid_df["ood_prop"].mean()) if "ood_prop" in valid_df.columns and valid_df["ood_prop"].notna().any() else float("nan"), 6),
+            "mean_ood_gen": round(float(valid_df["ood_gen"].mean()) if "ood_gen" in valid_df.columns and valid_df["ood_gen"].notna().any() else float("nan"), 6),
+            "top_k_mean_constraint_violation": round(float(top_df["constraint_violation_total"].mean()) if len(top_df) else 0.0, 6),
+            "top_k_mean_descriptor_violation": round(float(top_df["descriptor_violation_total"].mean()) if len(top_df) else 0.0, 6),
+            "top_k_mean_objective": round(float(top_df["ood_aware_objective"].mean()) if len(top_df) else 0.0, 6),
+            "top_k_mean_conservative_objective": round(float(top_df["conservative_objective"].mean()) if len(top_df) else 0.0, 6),
+        }
+        metrics_df = pd.concat([metrics_df, pd.DataFrame([agg_row])], ignore_index=True)
 
     save_csv(
-        valid_df.sort_values("ood_aware_rank"),
+        valid_df.sort_values(["proposal_view", "ood_aware_rank_within_view", "ood_aware_rank"], kind="mergesort"),
         property_step_dirs["files_dir"] / "ood_objective_scores.csv",
         legacy_paths=[
             step_dirs["files_dir"] / "ood_objective_scores.csv",
@@ -1463,7 +1599,7 @@ def main(args):
         index=False,
     )
     save_csv(
-        valid_df.sort_values("ood_aware_rank"),
+        valid_df.sort_values(["proposal_view", "ood_aware_rank_within_view", "ood_aware_rank"], kind="mergesort"),
         property_step_dirs["files_dir"] / f"ood_objective_scores_{property_name}.csv",
         legacy_paths=[
             step_dirs["files_dir"] / f"ood_objective_scores_{property_name}.csv",
@@ -1472,7 +1608,7 @@ def main(args):
         index=False,
     )
     save_csv(
-        top_df.sort_values("ood_aware_rank"),
+        top_df.sort_values(["proposal_view", "ood_aware_rank_within_view", "ood_aware_rank"], kind="mergesort"),
         property_step_dirs["files_dir"] / "ood_objective_topk.csv",
         legacy_paths=[
             step_dirs["files_dir"] / "ood_objective_topk.csv",
@@ -1481,7 +1617,7 @@ def main(args):
         index=False,
     )
     save_csv(
-        top_df.sort_values("ood_aware_rank"),
+        top_df.sort_values(["proposal_view", "ood_aware_rank_within_view", "ood_aware_rank"], kind="mergesort"),
         property_step_dirs["files_dir"] / f"ood_objective_topk_{property_name}.csv",
         legacy_paths=[
             step_dirs["files_dir"] / f"ood_objective_topk_{property_name}.csv",
@@ -1490,7 +1626,7 @@ def main(args):
         index=False,
     )
     save_csv(
-        pd.DataFrame([metrics_row]),
+        metrics_df,
         property_step_dirs["metrics_dir"] / "metrics_inverse_ood_objective.csv",
         legacy_paths=[
             step_dirs["metrics_dir"] / "metrics_inverse_ood_objective.csv",
@@ -1499,7 +1635,7 @@ def main(args):
         index=False,
     )
     save_csv(
-        pd.DataFrame([metrics_row]),
+        metrics_df,
         property_step_dirs["metrics_dir"] / f"metrics_inverse_ood_objective_{property_name}.csv",
         legacy_paths=[
             step_dirs["metrics_dir"] / f"metrics_inverse_ood_objective_{property_name}.csv",
@@ -1507,13 +1643,15 @@ def main(args):
         ],
         index=False,
     )
+    aggregate_metrics = metrics_df[metrics_df["proposal_view"].astype(str) == "all"].copy()
+    aggregate_row = aggregate_metrics.iloc[0].to_dict() if not aggregate_metrics.empty else {}
     _run_meta_dict = {
         "encoder_view": encoder_view,
         "property": property_name,
         "target_value": float(target),
         "target_mode": target_mode,
         "epsilon": float(epsilon),
-        "top_k": int(k),
+        "top_k": int(aggregate_row.get("top_k", top_k)),
         "normalization": normalization,
         "prediction_column": target_pred_col,
         "prediction_uncertainty_column": target_unc_col or "",
@@ -1526,12 +1664,13 @@ def main(args):
         "objective_descriptor_weight": float(normalized_term_weights.get("descriptor", 0.0)),
         "constraint_properties": active_constraint_props,
         "descriptor_constraints": active_descriptor_constraints,
+        "proposal_views_in_pool": views_in_pool,
         "ood_views_requested": ood_views,
         "ood_views_used": ood_views_used,
         "ood_view_aggregation": "mean",
         "ood_k": int(ood_k),
-        "mean_ood_prop": metrics_row.get("mean_ood_prop"),
-        "mean_ood_gen": metrics_row.get("mean_ood_gen"),
+        "mean_ood_prop": aggregate_row.get("mean_ood_prop"),
+        "mean_ood_gen": aggregate_row.get("mean_ood_gen"),
         "candidate_scores_path": str(candidate_scores_path),
         "d2_distance_source": d2_source,
     }
@@ -1560,7 +1699,7 @@ def main(args):
     _save_augmented_ood_metrics(
         results_dir=results_dir,
         property_name=property_name,
-        representation=representation,
+        representation="All_Views",
         model_size=str(model_size),
         generated_d2_distance=pd.to_numeric(
             df.get("ood_prop", df.get("d2_distance", pd.Series(dtype=float))), errors="coerce"
@@ -1582,6 +1721,11 @@ def main(args):
             property_name=property_name,
             target_mode=target_mode,
             normalized_term_weights=normalized_term_weights,
+            figures_dir=property_step_dirs["figures_dir"],
+        )
+        _plot_f6_view_summary(
+            metrics_df=metrics_df,
+            property_name=property_name,
             figures_dir=property_step_dirs["figures_dir"],
         )
 

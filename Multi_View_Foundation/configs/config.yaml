@@ -136,11 +136,13 @@ foundation_inverse:
     ionization_energy: 0.0
   target_mode: "ge"  # window: |pred-target|<=epsilon, ge: pred>=target, le: pred<=target
   epsilon: 0.0
+  sampling_mode: "fixed_budget"   # fixed_budget: compare proposal views fairly; resample: discovery mode
+  candidate_budget_per_view: 10000
   sampling_target: 100
-  sampling_num_per_batch: 512
-  sampling_batch_size: 128
+  sampling_num_per_batch: 100
+  sampling_batch_size: 100
   sampling_max_batches: 10000
-  proposal_views: ["smiles"]    # which diffusion backbone(s) generate candidate molecules; list of views or "all"
+  proposal_views: "all"         # compare proposal views under one shared smiles property scorer
   sampling_temperature: null
   sampling_num_atoms: null
   # Optional comma-separated class filter. Supported classes:
@@ -149,11 +151,11 @@ foundation_inverse:
   target_class: ""                  # empty string disables class filter
   require_validity: true
   require_two_stars: true
-  require_novel: true               # candidate_source="novel" relative to training polymers
-  require_unique: true
+  require_novel: false              # benchmark: compute novelty post hoc, do not filter online
+  require_unique: false             # benchmark: compute uniqueness post hoc, do not filter online
   max_sa: 3.6
-  per_view_min_hits: 2
-  per_view_quota_relax_after_batches: 12
+  per_view_min_hits: 0
+  per_view_quota_relax_after_batches: 0
   property_model_mode: "single"     # single: use one MLP (encoder_view's); all: ensemble all view MLPs (committee)
   property_model_path: ""           # explicit MLP path; auto-resolved from step3 results if empty (single mode only)
   rerank_strategy: "ood_prop"
@@ -192,16 +194,7 @@ ood_aware_inverse:
 # F7 chemistry/physics analysis args
 chem_physics_analysis:
   enabled: true
-  properties: [
-    "Tg",
-    "Tm",
-    "Td",
-    "Eg",
-    "cohesive_energy_density",
-    "electron_affinity",
-    "electron_injection_barrier",
-    "ionization_energy",
-  ]
+  properties: ["Tg"]
   # Optional path templates with {property}, e.g.:
   # "results/step5_foundation_inverse/files/candidate_scores_{property}.csv"
   candidate_scores_template: ""
