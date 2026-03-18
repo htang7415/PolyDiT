@@ -862,6 +862,209 @@ def _filter_property_rows_if_available(
     return pd.DataFrame(columns=df.columns), msg
 
 
+def _first_existing_path(paths: Iterable[Path]) -> Optional[Path]:
+    return next((path for path in paths if path.exists()), None)
+
+
+def _read_existing_step7_csv(
+    path: Optional[Path],
+    *,
+    label: str,
+    property_name: Optional[str] = None,
+    required: bool = False,
+) -> pd.DataFrame:
+    if path is None:
+        if required:
+            raise FileNotFoundError(f"No {label} CSV found.")
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"{label} is unreadable or empty: {path}. "
+            "Run F7 first to generate chemistry/physics analysis artifacts before regenerating figures."
+        ) from exc
+    if df.empty:
+        raise RuntimeError(
+            f"{label} is empty: {path}. "
+            "Run F7 first to generate chemistry/physics analysis artifacts before regenerating figures."
+        )
+    if property_name is not None:
+        df, property_msg = _filter_property_rows_if_available(
+            df,
+            property_name=property_name,
+            source_path=path,
+        )
+        if property_msg is not None:
+            raise RuntimeError(property_msg)
+        if df.empty:
+            raise RuntimeError(
+                f"{label} has no usable rows for property={property_name}: {path}."
+            )
+    return df
+
+
+def _discover_existing_step7_properties(step_dirs: dict) -> List[str]:
+    names: List[str] = []
+    step_dir = Path(step_dirs["step_dir"])
+    if step_dir.exists():
+        for child in sorted(step_dir.iterdir()):
+            if not child.is_dir() or child.name in {"files", "figures", "metrics"}:
+                continue
+            name = _normalize_property_name(child.name)
+            if name and name not in names:
+                names.append(name)
+    metrics_path = step_dirs["metrics_dir"] / "metrics_chem_physics.csv"
+    if metrics_path.exists():
+        try:
+            metrics_df = pd.read_csv(metrics_path)
+        except Exception:
+            metrics_df = pd.DataFrame()
+        if "property" in metrics_df.columns:
+            for value in metrics_df["property"].dropna().astype(str).tolist():
+                name = _normalize_property_name(value)
+                if name and name not in names:
+                    names.append(name)
+    return names
+
+
+def _load_existing_f7_property_artifacts(
+    *,
+    results_dir: Path,
+    step_dirs: dict,
+    property_name: str,
+) -> dict:
+    prop = _normalize_property_name(property_name)
+    prop_step_dirs = ensure_step_dirs(results_dir, "step7_chem_physics_analysis", prop)
+    shift_df = _read_existing_step7_csv(
+        _first_existing_path(
+            [
+                prop_step_dirs["files_dir"] / "descriptor_shifts.csv",
+                step_dirs["files_dir"] / "descriptor_shifts.csv",
+            ]
+        ),
+        label="descriptor_shifts",
+        property_name=prop,
+        required=True,
+    )
+    motif_df = _read_existing_step7_csv(
+        _first_existing_path(
+            [
+                prop_step_dirs["files_dir"] / "motif_enrichment.csv",
+                step_dirs["files_dir"] / "motif_enrichment.csv",
+            ]
+        ),
+        label="motif_enrichment",
+        property_name=prop,
+        required=True,
+    )
+    physics_df = _read_existing_step7_csv(
+        _first_existing_path(
+            [
+                prop_step_dirs["files_dir"] / "physics_consistency.csv",
+                step_dirs["files_dir"] / "physics_consistency.csv",
+            ]
+        ),
+        label="physics_consistency",
+        property_name=prop,
+        required=True,
+    )
+    nn_df = _read_existing_step7_csv(
+        _first_existing_path(
+            [
+                prop_step_dirs["files_dir"] / "nearest_neighbor_explanations.csv",
+                step_dirs["files_dir"] / "nearest_neighbor_explanations.csv",
+            ]
+        ),
+        label="nearest_neighbor_explanations",
+        property_name=prop,
+        required=True,
+    )
+    view_summary_df = _read_existing_step7_csv(
+        _first_existing_path(
+            [
+                prop_step_dirs["files_dir"] / "view_summary.csv",
+                step_dirs["files_dir"] / "view_summary.csv",
+            ]
+        ),
+        label="view_summary",
+        property_name=prop,
+        required=False,
+    )
+
+    run_meta = _load_json_dict(prop_step_dirs["files_dir"] / "run_meta.json")
+    input_files_df = _read_existing_step7_csv(
+        _first_existing_path(
+            [
+                prop_step_dirs["files_dir"] / "property_input_files.csv",
+                step_dirs["files_dir"] / "property_input_files.csv",
+            ]
+        ),
+        label="property_input_files",
+        property_name=prop,
+        required=False,
+    )
+
+    candidate_path = None
+    topk_path = None
+    candidate_value = str(run_meta.get("candidate_scores_path", "")).strip()
+    topk_value = str(run_meta.get("topk_scores_path", "")).strip()
+    if candidate_value:
+        candidate_path = Path(candidate_value)
+    if topk_value:
+        topk_path = Path(topk_value)
+    if (candidate_path is None or not candidate_path.exists()) and not input_files_df.empty:
+        candidate_text = str(input_files_df.iloc[0].get("candidate_scores_path", "")).strip()
+        if candidate_text:
+            candidate_path = Path(candidate_text)
+    if (topk_path is None or not topk_path.exists()) and not input_files_df.empty:
+        topk_text = str(input_files_df.iloc[0].get("topk_scores_path", "")).strip()
+        if topk_text:
+            topk_path = Path(topk_text)
+
+    candidate_df = _read_existing_step7_csv(
+        candidate_path if candidate_path is not None and candidate_path.exists() else None,
+        label="candidate_scores",
+        property_name=prop,
+        required=True,
+    )
+    topk_df = _read_existing_step7_csv(
+        topk_path if topk_path is not None and topk_path.exists() else None,
+        label="topk_scores",
+        property_name=prop,
+        required=True,
+    )
+    metric_df = _read_existing_step7_csv(
+        _first_existing_path(
+            [
+                prop_step_dirs["metrics_dir"] / "metrics_chem_physics.csv",
+                step_dirs["metrics_dir"] / "metrics_chem_physics.csv",
+            ]
+        ),
+        label="metrics_chem_physics",
+        property_name=prop,
+        required=False,
+    )
+    target = _to_float_or_none(run_meta.get("target_value"))
+    target_mode = str(run_meta.get("target_mode", "")).strip().lower() or "window"
+    epsilon = _to_float_or_none(run_meta.get("epsilon"))
+    return {
+        "property_step_dirs": prop_step_dirs,
+        "descriptor_shift_df": shift_df,
+        "motif_df": motif_df,
+        "physics_df": physics_df,
+        "nn_df": nn_df,
+        "view_summary_df": view_summary_df,
+        "candidate_df": candidate_df,
+        "topk_df": topk_df,
+        "metric_df": metric_df,
+        "run_meta": run_meta,
+        "target": target,
+        "target_mode": target_mode,
+        "epsilon": epsilon,
+    }
+
+
 def _descriptor_and_motif_rows(
     smiles_list: List[str],
     property_name: str,
@@ -1877,7 +2080,7 @@ def _plot_view_summary_figure(view_summary_df: pd.DataFrame, output_base: Path, 
 
 
 def main(args):
-    if Chem is None:
+    if Chem is None and not args.figures_only:
         raise RuntimeError("RDKit is required for step7_chem_physics_analysis.py")
 
     config = load_config(args.config)
@@ -1925,6 +2128,76 @@ def main(args):
     if generate_figures is None:
         generate_figures = _to_bool(cfg_step7.get("generate_figures", True), True)
     generate_figures = bool(generate_figures and plt is not None)
+
+    if args.figures_only:
+        properties = _parse_properties(args, cfg_step7) if args.properties else _discover_existing_step7_properties(step_dirs)
+        if not properties:
+            properties = _parse_properties(args, cfg_step7)
+        metrics_path = _first_existing_path(
+            [
+                step_dirs["metrics_dir"] / "metrics_chem_physics.csv",
+                results_dir / "metrics_chem_physics.csv",
+            ]
+        )
+        metrics_df = _read_existing_step7_csv(
+            metrics_path,
+            label="metrics_chem_physics",
+            required=False,
+        )
+        copy_property_figures_to_top_level = _to_bool(
+            cfg_step7.get("copy_property_figures_to_top_level", True),
+            True,
+        )
+        rendered = []
+        for prop in properties:
+            artifacts = _load_existing_f7_property_artifacts(
+                results_dir=results_dir,
+                step_dirs=step_dirs,
+                property_name=prop,
+            )
+            prop_step_dirs = artifacts["property_step_dirs"]
+            if generate_figures:
+                _plot_property_figure_suite(
+                    property_name=prop,
+                    descriptor_shift_df=artifacts["descriptor_shift_df"],
+                    motif_df=artifacts["motif_df"],
+                    physics_df=artifacts["physics_df"],
+                    candidate_df=artifacts["candidate_df"],
+                    topk_df=artifacts["topk_df"],
+                    nn_df=artifacts["nn_df"],
+                    target=artifacts["target"],
+                    target_mode=artifacts["target_mode"],
+                    figures_dir=prop_step_dirs["figures_dir"],
+                )
+                if not artifacts["view_summary_df"].empty:
+                    _plot_view_summary_figure(
+                        view_summary_df=artifacts["view_summary_df"],
+                        output_base=prop_step_dirs["figures_dir"] / f"figure_f7_view_summary_{prop}",
+                        property_name=prop,
+                    )
+                if copy_property_figures_to_top_level:
+                    figure_bases = [
+                        prop_step_dirs["figures_dir"] / f"figure_f7_chem_physics_{prop}",
+                        prop_step_dirs["figures_dir"] / f"figure_f7_descriptors_{prop}",
+                        prop_step_dirs["figures_dir"] / f"figure_f7_motif_enrichment_{prop}",
+                        prop_step_dirs["figures_dir"] / f"figure_f7_physics_rules_{prop}",
+                        prop_step_dirs["figures_dir"] / f"figure_f7_property_ood_landscape_{prop}",
+                        prop_step_dirs["figures_dir"] / f"figure_f7_nearest_neighbor_{prop}",
+                        prop_step_dirs["figures_dir"] / f"figure_f7_view_summary_{prop}",
+                    ]
+                    for src_base in figure_bases:
+                        _copy_png_if_exists(
+                            src_base,
+                            step_dirs["figures_dir"] / src_base.name,
+                        )
+            rendered.append(prop)
+        if generate_figures and not metrics_df.empty:
+            _plot_summary_figure(
+                metrics_df=metrics_df,
+                output_base=step_dirs["figures_dir"] / "figure_f7_chem_physics_all_properties",
+            )
+        print(f"Saved F7 figures for {','.join(rendered)} to {step_dirs['figures_dir']}")
+        return
 
     skip_missing = args.skip_missing_property
     if skip_missing is None:
@@ -2476,6 +2749,7 @@ if __name__ == "__main__":
     parser.add_argument("--generate_figures", dest="generate_figures", action="store_true")
     parser.add_argument("--no_figures", dest="generate_figures", action="store_false")
     parser.set_defaults(generate_figures=None)
+    parser.add_argument("--figures_only", action="store_true", help="Regenerate F7 figures from existing chemistry/physics artifacts.")
     parser.add_argument("--skip_missing_property", dest="skip_missing_property", action="store_true")
     parser.add_argument("--strict", dest="skip_missing_property", action="store_false")
     parser.set_defaults(skip_missing_property=None)

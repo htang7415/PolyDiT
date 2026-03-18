@@ -594,12 +594,39 @@ def _plot_embedding_research(metrics_df: pd.DataFrame, figures_dir: Path, datase
     plt.close(fig)
 
 
+def _load_existing_f4_metrics(results_dir: Path, step_dirs: dict) -> pd.DataFrame:
+    candidates = [
+        step_dirs["metrics_dir"] / "metrics_embedding_research.csv",
+        step_dirs["step_dir"] / "metrics_embedding_research.csv",
+        results_dir / "metrics_embedding_research.csv",
+    ]
+    metrics_path = next((p for p in candidates if p.exists()), None)
+    if metrics_path is None:
+        raise FileNotFoundError(
+            "No metrics_embedding_research.csv found. Run F4 first or provide the expected metrics file."
+        )
+    try:
+        metrics_df = pd.read_csv(metrics_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"metrics_embedding_research.csv is unreadable or empty: {metrics_path}. "
+            "Run F4 first to generate analysis metrics before regenerating figures."
+        ) from exc
+    if metrics_df.empty:
+        raise RuntimeError(
+            f"metrics_embedding_research.csv is empty: {metrics_path}. "
+            "Run F4 first to generate analysis metrics before regenerating figures."
+        )
+    return metrics_df
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--generate_figures", dest="generate_figures", action="store_true")
     parser.add_argument("--no_figures", dest="generate_figures", action="store_false")
     parser.set_defaults(generate_figures=None)
+    parser.add_argument("--figures_only", action="store_true", help="Regenerate F4 figures from an existing metrics_embedding_research.csv.")
     return parser
 
 
@@ -620,6 +647,15 @@ def main(args) -> None:
         generate_figures = False
     if plt is not None:
         set_publication_style()
+
+    if args.figures_only:
+        metrics_df = _load_existing_f4_metrics(results_dir, step_dirs)
+        dataset_series = metrics_df.get("dataset", pd.Series(dtype=str)).dropna().astype(str)
+        dataset = dataset_series.iloc[0] if not dataset_series.empty else str(f4_cfg.get("analysis_dataset", "d2"))
+        if generate_figures:
+            _plot_embedding_research(metrics_df, step_dirs["figures_dir"], dataset)
+        print(f"Saved F4 figures to {step_dirs['figures_dir']}")
+        return
 
     dataset = str(f4_cfg.get("analysis_dataset", "d2")).strip().lower() or "d2"
     max_samples_per_view = f4_cfg.get("max_samples_per_view", 3000)

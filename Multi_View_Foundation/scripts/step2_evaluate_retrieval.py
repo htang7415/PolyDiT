@@ -309,6 +309,32 @@ def _plot_f2_recall_bars(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
     plt.close(fig)
 
 
+def _load_existing_f2_metrics(results_dir: Path, step_dirs: dict) -> pd.DataFrame:
+    candidates = [
+        step_dirs["metrics_dir"] / "metrics_alignment.csv",
+        step_dirs["step_dir"] / "metrics_alignment.csv",
+        results_dir / "metrics_alignment.csv",
+    ]
+    metrics_path = next((p for p in candidates if p.exists()), None)
+    if metrics_path is None:
+        raise FileNotFoundError(
+            "No metrics_alignment.csv found. Run F2 first or provide the expected metrics file."
+        )
+    try:
+        metrics_df = pd.read_csv(metrics_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"metrics_alignment.csv is unreadable or empty: {metrics_path}. "
+            "Run F1/F2 first to generate retrieval metrics before regenerating figures."
+        ) from exc
+    if metrics_df.empty:
+        raise RuntimeError(
+            f"metrics_alignment.csv is empty: {metrics_path}. "
+            "Run F1/F2 first to generate retrieval metrics before regenerating figures."
+        )
+    return metrics_df
+
+
 def main(args):
     config = load_config(args.config)
     results_dir = _resolve_path(config["paths"]["results_dir"])
@@ -317,9 +343,24 @@ def main(args):
     save_config(config, results_dir / "config_used.yaml")
     save_config(config, step_dirs["files_dir"] / "config_used.yaml")
 
+    eval_cfg = config.get("evaluation", {}) or {}
+    generate_figures = args.generate_figures
+    if generate_figures is None:
+        generate_figures = _to_bool(eval_cfg.get("generate_figures", True), True)
+    if generate_figures and plt is None:
+        print("Warning: matplotlib unavailable; skipping F2 figures.")
+        generate_figures = False
+    if args.figures_only:
+        metrics_df = _load_existing_f2_metrics(results_dir, step_dirs)
+        if generate_figures:
+            _plot_f2_retrieval_heatmaps(metrics_df, step_dirs["figures_dir"])
+            _plot_f2_cosine_sim_bars(metrics_df, step_dirs["figures_dir"])
+            _plot_f2_recall_bars(metrics_df, step_dirs["figures_dir"])
+        print(f"Saved F2 figures to {step_dirs['figures_dir']}")
+        return
+
     views = config.get("alignment_views", ["smiles"])
     ks = config.get("evaluation", {}).get("recall_ks", [1, 5, 10])
-    eval_cfg = config.get("evaluation", {}) or {}
     max_eval_d1 = _to_int_or_none(eval_cfg.get("max_samples_d1"))
     max_eval_d2 = _to_int_or_none(eval_cfg.get("max_samples_d2"))
 
@@ -381,14 +422,6 @@ def main(args):
         legacy_paths=[results_dir / "metrics_alignment.csv"],
         index=False,
     )
-
-    eval_cfg = config.get("evaluation", {}) or {}
-    generate_figures = args.generate_figures
-    if generate_figures is None:
-        generate_figures = _to_bool(eval_cfg.get("generate_figures", True), True)
-    if generate_figures and plt is None:
-        print("Warning: matplotlib unavailable; skipping F2 figures.")
-        generate_figures = False
     if generate_figures:
         _plot_f2_retrieval_heatmaps(metrics_df, step_dirs["figures_dir"])
         _plot_f2_cosine_sim_bars(metrics_df, step_dirs["figures_dir"])
@@ -403,4 +436,5 @@ if __name__ == "__main__":
     parser.add_argument("--generate_figures", dest="generate_figures", action="store_true")
     parser.add_argument("--no_figures", dest="generate_figures", action="store_false")
     parser.set_defaults(generate_figures=None)
+    parser.add_argument("--figures_only", action="store_true", help="Regenerate F2 figures from an existing metrics_alignment.csv.")
     main(parser.parse_args())

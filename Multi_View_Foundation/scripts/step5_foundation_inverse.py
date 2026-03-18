@@ -2935,6 +2935,230 @@ def _plot_f5_design_process(
     plt.close(fig)
 
 
+def _load_json_dict(path: Optional[Path]) -> dict:
+    if path is None or not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _first_existing_path(candidates: List[Path]) -> Optional[Path]:
+    return next((path for path in candidates if path.exists()), None)
+
+
+def _safe_float_or_none(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _safe_int_or_none(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _filter_property_rows_if_available(
+    df: pd.DataFrame,
+    *,
+    property_name: str,
+    source_path: Path,
+    label: str,
+) -> pd.DataFrame:
+    if "property" not in df.columns:
+        return df
+    prop = _normalize_property_name(property_name)
+    prop_series = df["property"].astype(str).map(_normalize_property_name)
+    match_mask = prop_series == prop
+    if bool(match_mask.any()):
+        return df.loc[match_mask].copy()
+    seen = [x for x in sorted(prop_series.unique().tolist()) if x]
+    seen_preview = ",".join(seen[:6]) if seen else "(empty)"
+    raise RuntimeError(
+        f"{label} does not contain rows for property={property_name}: {source_path}. "
+        f"Found properties={seen_preview}."
+    )
+
+
+def _read_required_csv(path: Path, *, label: str, property_name: Optional[str] = None) -> pd.DataFrame:
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"{label} is unreadable or empty: {path}. "
+            "Run F5 first to generate inverse-design artifacts before regenerating figures."
+        ) from exc
+    if df.empty:
+        raise RuntimeError(
+            f"{label} is empty: {path}. "
+            "Run F5 first to generate inverse-design artifacts before regenerating figures."
+        )
+    if property_name is not None:
+        df = _filter_property_rows_if_available(
+            df,
+            property_name=property_name,
+            source_path=path,
+            label=label,
+        )
+        if df.empty:
+            raise RuntimeError(
+                f"{label} has no usable rows for property={property_name}: {path}."
+            )
+    return df
+
+
+def _read_optional_csv(path: Optional[Path], *, label: str, property_name: Optional[str] = None) -> pd.DataFrame:
+    if path is None or not path.exists():
+        return pd.DataFrame()
+    return _read_required_csv(path, label=label, property_name=property_name)
+
+
+def _parse_view_list(value) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = [item.strip() for item in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw = [str(item).strip() for item in value]
+    else:
+        raw = [str(value).strip()]
+    views = []
+    for item in raw:
+        if item and item not in views:
+            views.append(item)
+    return views
+
+
+def _infer_f5_model_size(metrics_df: pd.DataFrame, *, scoring_view: str, config: dict) -> str:
+    if not metrics_df.empty and "model_size" in metrics_df.columns:
+        values = metrics_df["model_size"].dropna().astype(str).map(str.strip)
+        values = values[values != ""]
+        if not values.empty:
+            return values.iloc[0]
+    encoder_key = VIEW_SPECS.get(scoring_view, VIEW_SPECS["smiles"])["encoder_key"]
+    return str(config.get(encoder_key, {}).get("model_size", "base"))
+
+
+def _load_existing_f5_artifacts(
+    *,
+    results_dir: Path,
+    step_dirs: dict,
+    property_step_dirs: dict,
+    property_name: str,
+) -> dict:
+    prop = _normalize_property_name(property_name)
+    run_meta = {}
+    run_meta_path = ""
+    for candidate in [
+        property_step_dirs["files_dir"] / f"run_meta_{prop}.json",
+        property_step_dirs["files_dir"] / "run_meta.json",
+        step_dirs["files_dir"] / f"run_meta_{prop}.json",
+        step_dirs["files_dir"] / "run_meta.json",
+        step_dirs["step_dir"] / f"run_meta_{prop}.json",
+        step_dirs["step_dir"] / "run_meta.json",
+    ]:
+        payload = _load_json_dict(candidate)
+        if payload:
+            run_meta = payload
+            run_meta_path = str(candidate)
+            break
+
+    scored_path = _first_existing_path(
+        [
+            property_step_dirs["files_dir"] / f"candidate_scores_{prop}.csv",
+            property_step_dirs["files_dir"] / "candidate_scores.csv",
+            step_dirs["files_dir"] / f"candidate_scores_{prop}.csv",
+            step_dirs["files_dir"] / "candidate_scores.csv",
+            step_dirs["step_dir"] / f"candidate_scores_{prop}.csv",
+            step_dirs["step_dir"] / "candidate_scores.csv",
+        ]
+    )
+    if scored_path is None:
+        raise FileNotFoundError(
+            f"No candidate_scores CSV found for property={property_name}. "
+            "Run F5 first or provide the expected inverse-design outputs."
+        )
+    scored_df = _read_required_csv(
+        scored_path,
+        label="candidate_scores",
+        property_name=property_name,
+    )
+
+    process_counts_df = _read_optional_csv(
+        _first_existing_path(
+            [
+                property_step_dirs["files_dir"] / f"design_process_counts_{prop}.csv",
+                property_step_dirs["files_dir"] / "design_process_counts.csv",
+                step_dirs["files_dir"] / f"design_process_counts_{prop}.csv",
+                step_dirs["files_dir"] / "design_process_counts.csv",
+                step_dirs["step_dir"] / f"design_process_counts_{prop}.csv",
+                step_dirs["step_dir"] / "design_process_counts.csv",
+            ]
+        ),
+        label="design_process_counts",
+        property_name=property_name,
+    )
+    metrics_df = _read_optional_csv(
+        _first_existing_path(
+            [
+                property_step_dirs["metrics_dir"] / "metrics_inverse.csv",
+                step_dirs["metrics_dir"] / "metrics_inverse.csv",
+                results_dir / "metrics_inverse.csv",
+            ]
+        ),
+        label="metrics_inverse",
+        property_name=property_name,
+    )
+    report_df = _read_optional_csv(
+        _first_existing_path(
+            [
+                property_step_dirs["files_dir"] / f"accepted_polymer_report_{prop}.csv",
+                property_step_dirs["files_dir"] / "accepted_polymer_report.csv",
+                step_dirs["files_dir"] / f"accepted_polymer_report_{prop}.csv",
+                step_dirs["files_dir"] / "accepted_polymer_report.csv",
+                step_dirs["step_dir"] / f"accepted_polymer_report_{prop}.csv",
+                step_dirs["step_dir"] / "accepted_polymer_report.csv",
+            ]
+        ),
+        label="accepted_polymer_report",
+        property_name=property_name,
+    )
+    accepted_df = _read_optional_csv(
+        _first_existing_path(
+            [
+                property_step_dirs["files_dir"] / f"accepted_candidates_{prop}.csv",
+                property_step_dirs["files_dir"] / "accepted_candidates.csv",
+                step_dirs["files_dir"] / f"accepted_candidates_{prop}.csv",
+                step_dirs["files_dir"] / "accepted_candidates.csv",
+                step_dirs["step_dir"] / f"accepted_candidates_{prop}.csv",
+                step_dirs["step_dir"] / "accepted_candidates.csv",
+            ]
+        ),
+        label="accepted_candidates",
+        property_name=property_name,
+    )
+
+    return {
+        "run_meta": run_meta,
+        "run_meta_path": run_meta_path,
+        "scored_df": scored_df,
+        "process_counts_df": process_counts_df,
+        "metrics_df": metrics_df,
+        "report_df": report_df,
+        "accepted_df": accepted_df,
+    }
+
+
 def main(args):
     args.property = _normalize_property_name(args.property)
     config = load_config(args.config)
@@ -2948,6 +3172,169 @@ def main(args):
     save_config(config, results_dir / "config_used.yaml")
     save_config(config, step_dirs["files_dir"] / "config_used.yaml")
     save_config(config, property_step_dirs["files_dir"] / "config_used.yaml")
+
+    generate_figures = args.generate_figures
+    if generate_figures is None:
+        generate_figures = _to_bool(f5_cfg.get("generate_figures", True), True)
+    if generate_figures and plt is None:
+        print("Warning: matplotlib unavailable; skipping F5 figures.")
+        generate_figures = False
+    if args.figures_only:
+        artifacts = _load_existing_f5_artifacts(
+            results_dir=results_dir,
+            step_dirs=step_dirs,
+            property_step_dirs=property_step_dirs,
+            property_name=args.property,
+        )
+        source_meta = dict(artifacts["run_meta"])
+        target_value = _safe_float_or_none(args.target)
+        if target_value is None:
+            target_value = _safe_float_or_none(source_meta.get("target_value"))
+        if target_value is None:
+            target_value = _resolve_target_value(None, args.property, f5_cfg)
+        target_mode = str(args.target_mode or source_meta.get("target_mode") or "").strip().lower()
+        if not target_mode:
+            target_mode = _resolve_target_mode(None, args.property, f5_cfg)
+        epsilon = _safe_float_or_none(args.epsilon)
+        if epsilon is None:
+            epsilon = _safe_float_or_none(source_meta.get("epsilon"))
+        if epsilon is None:
+            epsilon = _resolve_epsilon(None, args.property, f5_cfg)
+
+        scored_df = artifacts["scored_df"].copy()
+        process_counts_df = artifacts["process_counts_df"].copy()
+        metrics_df = artifacts["metrics_df"].copy()
+        accepted_df = artifacts["accepted_df"].copy()
+        report_df = artifacts["report_df"].copy()
+
+        scoring_view = str(
+            args.encoder_view
+            or source_meta.get("encoder_view")
+            or f5_cfg.get("encoder_view")
+            or "smiles"
+        ).strip() or "smiles"
+        proposal_views = _parse_view_list(source_meta.get("proposal_views"))
+        if not proposal_views and "proposal_view" in scored_df.columns:
+            proposal_views = scored_df["proposal_view"].dropna().astype(str).unique().tolist()
+        proposal_views = ordered_views(proposal_views or [scoring_view])
+        source_meta.setdefault("proposal_views", proposal_views)
+        source_meta.setdefault("encoder_view", scoring_view)
+
+        if process_counts_df.empty:
+            process_counts_df = _build_f5_process_counts(
+                scored_df=scored_df,
+                proposal_views=proposal_views,
+                stats=source_meta.get("stats", {}) or {},
+            )
+        if metrics_df.empty:
+            metrics_df = _build_f5_metrics_rows(
+                scored_df=scored_df,
+                process_counts_df=process_counts_df,
+                proposal_views=proposal_views,
+                property_name=args.property,
+                target_value=float(target_value),
+                target_mode=target_mode,
+                epsilon=float(epsilon),
+                elapsed_sec=_safe_float_or_none(source_meta.get("sampling_time_sec")) or 0.0,
+                model_size=_infer_f5_model_size(
+                    metrics_df,
+                    scoring_view=scoring_view,
+                    config=config,
+                ),
+                scoring_view=scoring_view,
+                candidate_source=str(
+                    source_meta.get("candidate_source")
+                    or source_meta.get("sampling_mode")
+                    or "resample"
+                ),
+            )
+
+        if accepted_df.empty:
+            if "accepted" in scored_df.columns:
+                accepted_df = scored_df.loc[
+                    scored_df["accepted"].fillna(False).astype(bool)
+                ].copy()
+            else:
+                accepted_df = scored_df.iloc[0:0].copy()
+        if report_df.empty:
+            report_df, report_summary = _build_f5_accepted_polymer_report(
+                accepted_df=accepted_df,
+                property_name=args.property,
+                target_value=float(target_value),
+                target_mode=target_mode,
+                epsilon=float(epsilon),
+                sampling_target=int(source_meta.get("sampling_target", len(accepted_df))),
+                sampling_target_total=int(
+                    source_meta.get(
+                        "sampling_target_total",
+                        source_meta.get("sampling_target", len(accepted_df)),
+                    )
+                ),
+            )
+            source_meta.setdefault("accepted_polymer_summary", report_summary)
+
+        if generate_figures:
+            _plot_f5_diagnostics(
+                scored_df=scored_df,
+                property_name=args.property,
+                target_value=float(target_value),
+                target_mode=target_mode,
+                epsilon=float(epsilon),
+                source_meta=source_meta,
+                figures_dir=property_step_dirs["figures_dir"],
+            )
+            _plot_f5_design_process(
+                process_counts_df=process_counts_df,
+                metrics_df=metrics_df,
+                property_name=args.property,
+                figures_dir=property_step_dirs["figures_dir"],
+            )
+            view_compare_top_k = _safe_int_or_none(args.top_k)
+            if view_compare_top_k is None:
+                view_compare_top_k = _safe_int_or_none(source_meta.get("view_compare_top_k"))
+            if view_compare_top_k is None:
+                view_compare_top_k = _safe_int_or_none(f5_cfg.get("top_k"))
+            if view_compare_top_k is None:
+                view_compare_top_k = 100
+            try:
+                view_compare_outputs = analyze_view_compare(
+                    candidate_df=scored_df,
+                    property_name=args.property,
+                    target=float(target_value),
+                    target_mode=target_mode,
+                    epsilon=float(epsilon),
+                    top_k=max(int(view_compare_top_k), 1),
+                    model_size=_infer_f5_model_size(
+                        metrics_df,
+                        scoring_view=scoring_view,
+                        config=config,
+                    ),
+                    scoring_view=scoring_view,
+                )
+                plot_view_compare(
+                    analysis=view_compare_outputs,
+                    property_name=args.property,
+                    figures_dir=property_step_dirs["figures_dir"],
+                    figure_prefix="figure_f5_view_compare",
+                )
+            except Exception as exc:
+                print(f"[F5] Warning: view comparison figure regeneration skipped for {args.property}: {exc}")
+            _plot_f5_accepted_polymer_overview(
+                report_df=report_df,
+                property_name=args.property,
+                target_value=float(target_value),
+                target_mode=target_mode,
+                epsilon=float(epsilon),
+                figures_dir=property_step_dirs["figures_dir"],
+            )
+            _plot_f5_accepted_polymer_gallery(
+                report_df=report_df,
+                property_name=args.property,
+                figures_dir=property_step_dirs["figures_dir"],
+                top_n=min(36, int(source_meta.get("sampling_target", 100))),
+            )
+        print(f"Saved F5 figures to {property_step_dirs['figures_dir']}")
+        return
 
     encoder_view = _select_encoder_view(config, args.encoder_view)
     proposal_views = _select_proposal_views(config, args.proposal_views, fallback_view=encoder_view)
@@ -3497,6 +3884,7 @@ if __name__ == "__main__":
     parser.add_argument("--property_model_mode", type=str, default=None, choices=["single", "all"])
     parser.add_argument("--committee_properties", type=str, default=None, help="Comma list for committee property exports; defaults to property.files.")
     parser.add_argument("--property_model_path", type=str, default=None)
+    parser.add_argument("--figures_only", action="store_true", help="Regenerate F5 figures from existing inverse-design artifacts.")
     parser.add_argument("--generate_figures", dest="generate_figures", action="store_true")
     parser.add_argument("--no_figures", dest="generate_figures", action="store_false")
     parser.set_defaults(generate_figures=None)

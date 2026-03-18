@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import math
 import re
 import shutil
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -111,6 +113,71 @@ SI_CAPTIONS = [
     "Figure S8. F6 DiT interpretability diagnostics: integrated gradients, gradient-times-hidden, and attention-rollout analyses of the shared SMILES scorer, with faithfulness summaries across proposal views and outcome groups.",
     "Figure S9. Chemistry/physics analysis: per-property descriptor distributions, physics consistency checks, and nearest-neighbor explanations.",
 ]
+
+STEP_EXPORT_SPECS = {
+    "F1": {
+        "step_name": "alignment_embeddings",
+        "step_subdir": "step1_alignment_embeddings",
+        "theme": "mvf_f1",
+        "core_patterns": ["embedding_meta*.json", "embedding_index_*.csv", "embeddings_*.npy", "figure_f1*.png"],
+        "expected_outputs": ["embedding_meta_*.json", "embedding_index_*.csv", "embeddings_*.npy", "figure_f1_*.png"],
+        "label": "MVF F1 embedding extraction",
+    },
+    "F2": {
+        "step_name": "retrieval",
+        "step_subdir": "step2_retrieval",
+        "theme": "mvf_f2",
+        "core_patterns": ["metrics_alignment.csv", "figure_f2*.png"],
+        "expected_outputs": ["metrics_alignment.csv", "figure_f2_*.png"],
+        "label": "MVF F2 retrieval evaluation",
+    },
+    "F3": {
+        "step_name": "property_heads",
+        "step_subdir": "step3_property",
+        "theme": "mvf_f3",
+        "core_patterns": ["metrics_property.csv", "figure_f3*.png"],
+        "expected_outputs": ["metrics_property.csv", "figure_f3_*.png"],
+        "label": "MVF F3 property-head training",
+    },
+    "F4": {
+        "step_name": "embedding_research",
+        "step_subdir": "step4_embedding_research",
+        "theme": "mvf_f4",
+        "core_patterns": ["metrics_embedding_research.csv", "view_*summary.csv", "figure_f4*.png"],
+        "expected_outputs": ["metrics_embedding_research.csv", "view_*summary.csv", "figure_f4_*.png"],
+        "label": "MVF F4 embedding research",
+    },
+    "F5": {
+        "step_name": "foundation_inverse",
+        "step_subdir": "step5_foundation_inverse",
+        "theme": "mvf_f5",
+        "core_patterns": [
+            "metrics_inverse.csv",
+            "metrics_view_compare*.csv",
+            "accepted_candidates*.csv",
+            "candidate_scores*.csv",
+            "figure_f5*.png",
+        ],
+        "expected_outputs": ["metrics_inverse.csv", "metrics_view_compare*.csv", "accepted_candidates*.csv", "figure_f5_*.png"],
+        "label": "MVF F5 inverse design",
+    },
+    "F6": {
+        "step_name": "dit_interpretability",
+        "step_subdir": "step6_dit_interpretability",
+        "theme": "mvf_f6",
+        "core_patterns": ["metrics_dit_interpretability*.csv", "dit_*summary*.csv", "figure_f6*.png"],
+        "expected_outputs": ["metrics_dit_interpretability*.csv", "dit_*summary*.csv", "figure_f6_*.png"],
+        "label": "MVF F6 interpretability",
+    },
+    "F7": {
+        "step_name": "chem_physics_analysis",
+        "step_subdir": "step7_chem_physics_analysis",
+        "theme": "mvf_f7",
+        "core_patterns": ["metrics_chem_physics.csv", "descriptor_shifts*.csv", "motif_enrichment*.csv", "figure_f7*.png"],
+        "expected_outputs": ["metrics_chem_physics.csv", "descriptor_shifts*.csv", "motif_enrichment*.csv", "figure_f7_*.png"],
+        "label": "MVF F7 chemistry/physics analysis",
+    },
+}
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -1066,6 +1133,310 @@ def _copy_tree_files(
         )
 
 
+def _path_matches_patterns(path: Path, patterns: Sequence[str]) -> bool:
+    path_name = path.name
+    path_text = str(path).replace("\\", "/")
+    for pattern in patterns:
+        norm = str(pattern).replace("\\", "/")
+        if fnmatch.fnmatch(path_name, norm):
+            return True
+        if fnmatch.fnmatch(path_text, f"*{norm}"):
+            return True
+    return False
+
+
+def _file_has_substance(path: Path) -> bool:
+    try:
+        size = int(path.stat().st_size)
+    except Exception:
+        return False
+    if size <= 0:
+        return False
+
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            return size > 1
+        return not df.empty
+    if suffix == ".json":
+        try:
+            payload = _read_json(path)
+        except Exception:
+            return size > 2
+        if isinstance(payload, dict):
+            return bool(payload)
+        if isinstance(payload, list):
+            return bool(payload)
+        return True
+    return True
+
+
+def _inventory_step_artifacts(
+    *,
+    results_dirs: Sequence[Path],
+    step_id: str,
+    output_dir: Path,
+    results_dir: Path,
+) -> dict:
+    spec = STEP_EXPORT_SPECS[step_id]
+    step_subdir = spec["step_subdir"]
+    step_roots: list[Path] = []
+    all_files: list[Path] = []
+    for res_dir in _unique_paths(list(results_dirs)):
+        step_root = res_dir / step_subdir
+        if not step_root.exists() or not step_root.is_dir():
+            step_root = None
+        else:
+            step_roots.append(step_root)
+            for path in sorted(step_root.rglob("*")):
+                if not path.is_file():
+                    continue
+                if _is_relative_to(path, output_dir):
+                    continue
+                all_files.append(path)
+
+        for path in sorted(res_dir.glob("*")):
+            if not path.is_file():
+                continue
+            if _is_relative_to(path, output_dir):
+                continue
+            if path.name == "config_used.yaml" or _path_matches_patterns(path, spec["core_patterns"]):
+                all_files.append(path)
+
+    config_files = [p for p in all_files if p.name == "config_used.yaml"]
+    non_config_files = [p for p in all_files if p.name != "config_used.yaml"]
+    figure_files = [p for p in non_config_files if p.suffix.lower() == ".png"]
+    core_files = [p for p in non_config_files if _path_matches_patterns(p, spec["core_patterns"])]
+    nonempty_core_files = [p for p in core_files if _file_has_substance(p)]
+
+    if nonempty_core_files or figure_files:
+        status = "completed"
+    elif step_roots and (config_files or non_config_files):
+        status = "partial"
+    else:
+        status = "missing"
+
+    sample_paths = [
+        _safe_rel(p, results_dir)
+        for p in sorted(non_config_files, key=lambda x: str(x))[:6]
+    ]
+    primary_artifact = _safe_rel(nonempty_core_files[0], results_dir) if nonempty_core_files else ""
+    return {
+        "step_id": step_id,
+        "step_name": spec["step_name"],
+        "step_subdir": step_subdir,
+        "label": spec["label"],
+        "theme": spec["theme"],
+        "status": status,
+        "artifact_roots": [_safe_rel(p, results_dir) for p in step_roots],
+        "config_file_count": len(config_files),
+        "non_config_file_count": len(non_config_files),
+        "figure_file_count": len(figure_files),
+        "core_file_count": len(core_files),
+        "nonempty_core_file_count": len(nonempty_core_files),
+        "sample_artifacts": sample_paths,
+        "source_metric": primary_artifact,
+        "expected_outputs": list(spec["expected_outputs"]),
+    }
+
+
+def _build_step_status_rows(
+    *,
+    results_dirs: Sequence[Path],
+    output_dir: Path,
+    results_dir: Path,
+    paper_table_map: dict[str, str],
+) -> list[dict]:
+    rows: list[dict] = []
+    for step_id in ["F1", "F2", "F3", "F4", "F5", "F6", "F7"]:
+        inventory = _inventory_step_artifacts(
+            results_dirs=results_dirs,
+            step_id=step_id,
+            output_dir=output_dir,
+            results_dir=results_dir,
+        )
+        inventory["paper_table"] = paper_table_map.get(step_id, "")
+        rows.append(inventory)
+    return rows
+
+
+def _placeholder_lines_for_step_ids(step_ids: Sequence[str], step_status_rows: dict[str, dict]) -> list[str]:
+    if not step_ids:
+        return ["No source panels or non-empty metrics were available during F8 export."]
+    if len(step_ids) == 1:
+        step_id = step_ids[0]
+        summary = step_status_rows.get(step_id, {})
+        spec = STEP_EXPORT_SPECS.get(step_id, {})
+        return [
+            f"No non-empty {spec.get('label', step_id)} outputs were found.",
+            f"Observed status: {summary.get('status', 'missing')}.",
+            "Expected one of: " + ", ".join(spec.get("expected_outputs", [])),
+            (
+                "Observed artifacts: "
+                f"non-config={summary.get('non_config_file_count', 0)}, "
+                f"png={summary.get('figure_file_count', 0)}, "
+                f"nonempty_core={summary.get('nonempty_core_file_count', 0)}."
+            ),
+        ]
+
+    lines = ["Required MVF artifacts were incomplete for this figure."]
+    for step_id in step_ids:
+        summary = step_status_rows.get(step_id, {})
+        spec = STEP_EXPORT_SPECS.get(step_id, {})
+        lines.append(
+            f"{step_id}: {spec.get('label', step_id)} status={summary.get('status', 'missing')}, "
+            f"nonempty_core={summary.get('nonempty_core_file_count', 0)}, png={summary.get('figure_file_count', 0)}."
+        )
+    return lines
+
+
+def _render_placeholder_figure(
+    *,
+    output_path: Path,
+    font_size: int,
+    dpi: int,
+    title: str,
+    lines: Sequence[str],
+) -> bool:
+    if plt is None:
+        return False
+
+    wrapped_lines: list[str] = []
+    for line in lines:
+        wrapped_lines.extend(textwrap.wrap(str(line), width=62) or [""])
+
+    fig, ax = plt.subplots(figsize=(10.8, 6.8), constrained_layout=True)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_frame_on(False)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.text(0.03, 0.93, title, ha="left", va="top", fontsize=font_size + 2, fontweight="bold", color=COLOR_TEXT)
+    y = 0.82
+    for line in wrapped_lines:
+        ax.text(0.05, y, line, ha="left", va="top", fontsize=max(10, font_size - 2), color=COLOR_TEXT)
+        y -= 0.075
+        if y < 0.10:
+            break
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def _render_panels_or_placeholder(
+    *,
+    output_path: Path,
+    fallback_panels: Sequence[Path],
+    font_size: int,
+    dpi: int,
+    empty_title: str,
+    empty_lines: Sequence[str],
+) -> tuple[bool, str]:
+    panels = [Path(p) for p in fallback_panels if Path(p).exists()]
+    if panels:
+        ok = _compose_multi_panel_figure(
+            panel_paths=panels,
+            output_path=output_path,
+            font_size=font_size,
+            dpi=dpi,
+        )
+        return ok, "panels"
+    ok = _render_placeholder_figure(
+        output_path=output_path,
+        font_size=font_size,
+        dpi=dpi,
+        title=empty_title,
+        lines=empty_lines,
+    )
+    return ok, "placeholder"
+
+
+def _caption_with_render_note(caption: str, render_mode: str, render_note: str) -> str:
+    if render_mode != "placeholder" or not render_note:
+        return caption
+    return f"{caption} Placeholder export note: {render_note}"
+
+
+def _build_f1_summary_panel(
+    *,
+    output_path: Path,
+    font_size: int,
+    dpi: int,
+    f1_df: pd.DataFrame,
+) -> bool:
+    if plt is None or f1_df is None or f1_df.empty:
+        return False
+
+    df = f1_df.copy()
+    if "view" not in df.columns:
+        return False
+    df["view"] = df["view"].astype(str).map(normalize_view_name)
+    df["embedding_dim"] = pd.to_numeric(df.get("embedding_dim"), errors="coerce")
+    df["d1_samples"] = pd.to_numeric(df.get("d1_samples"), errors="coerce")
+    df["d2_samples"] = pd.to_numeric(df.get("d2_samples"), errors="coerce")
+    agg = (
+        df.groupby("view", as_index=False)[["embedding_dim", "d1_samples", "d2_samples"]]
+        .mean(numeric_only=True)
+        .dropna(subset=["embedding_dim", "d1_samples", "d2_samples"], how="all")
+    )
+    if agg.empty:
+        return False
+
+    views = ordered_views(agg["view"].tolist())
+    agg = agg.set_index("view").reindex(views).reset_index()
+    labels = [view_label(v) for v in agg["view"].tolist()]
+    x = np.arange(len(agg))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14.8, 6.0), squeeze=False)
+    ax0, ax1 = axes[0]
+
+    ax0.bar(
+        x,
+        agg["embedding_dim"].to_numpy(dtype=float),
+        color=[view_color(v) for v in agg["view"].tolist()],
+        edgecolor=COLOR_TEXT,
+        linewidth=0.7,
+    )
+    ax0.set_xticks(x)
+    ax0.set_xticklabels(labels, rotation=30, ha="right")
+    ax0.set_ylabel("Embedding Dimension")
+    ax0.grid(True, axis="y", linestyle="--", alpha=0.35)
+    _wrap_ticklabels(ax0, axis="x", width=12, rotation=30)
+    _panel_mark(ax0, "(a)", font_size)
+
+    width = 0.38
+    ax1.bar(
+        x - width / 2.0,
+        agg["d1_samples"].to_numpy(dtype=float),
+        width=width,
+        color=NATURE_PALETTE[3],
+        edgecolor=COLOR_TEXT,
+        linewidth=0.7,
+        label="D1",
+    )
+    ax1.bar(
+        x + width / 2.0,
+        agg["d2_samples"].to_numpy(dtype=float),
+        width=width,
+        color=NATURE_PALETTE[0],
+        edgecolor=COLOR_TEXT,
+        linewidth=0.7,
+        label="D2",
+    )
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels, rotation=30, ha="right")
+    ax1.set_ylabel("Embedded Samples")
+    ax1.grid(True, axis="y", linestyle="--", alpha=0.35)
+    ax1.legend(loc="best", frameon=False)
+    _wrap_ticklabels(ax1, axis="x", width=12, rotation=30)
+    _panel_mark(ax1, "(b)", font_size)
+
+    return _save_plot_figure(fig, output_path, dpi)
+
+
 def _property_from_suffixed_filename(filename: str) -> str:
     m = re.match(
         r"^(?:candidate_scores|accepted_candidates|accepted_polymer_report|accepted_polymer_summary|"
@@ -1791,21 +2162,6 @@ def _generate_step12_scale_panels(
     return generated
 
 
-def _render_fallback_panels(
-    *,
-    output_path: Path,
-    fallback_panels: Sequence[Path],
-    font_size: int,
-    dpi: int,
-) -> bool:
-    return _compose_multi_panel_figure(
-        panel_paths=fallback_panels,
-        output_path=output_path,
-        font_size=font_size,
-        dpi=dpi,
-    )
-
-
 def _fig1_baseline_generation(
     *,
     output_path: Path,
@@ -1815,7 +2171,10 @@ def _fig1_baseline_generation(
     df_step12: pd.DataFrame,
     primary_panels: Sequence[Path],
     fallback_panels: Sequence[Path],
-) -> tuple[bool, str]:
+    fallback_title: str,
+    fallback_lines: Sequence[str],
+    fallback_note: str,
+) -> tuple[bool, str, str]:
     caption = MANUSCRIPT_CAPTIONS[0]
 
     # Highest priority for Figure 1 storyline: aggregate_step12 fig_01..03 panels.
@@ -1827,10 +2186,18 @@ def _fig1_baseline_generation(
             font_size=font_size,
             dpi=dpi,
         )
-        return ok, caption
+        return ok, caption, "panels"
 
     if plt is None:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     use_df = pd.DataFrame()
     if not df_generation.empty:
@@ -1871,7 +2238,15 @@ def _fig1_baseline_generation(
 
     metric_cols = ["validity", "uniqueness", "novelty", "avg_diversity"]
     if use_df.empty or not any(col in use_df.columns for col in metric_cols):
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     agg = (
         use_df.groupby(["representation_label", "model_size"], as_index=False)[metric_cols]
@@ -1879,26 +2254,40 @@ def _fig1_baseline_generation(
     )
     agg = agg.dropna(subset=["validity", "uniqueness"], how="all")
     if agg.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     best_idx = agg.groupby("representation_label")["validity"].idxmax()
     best_idx = pd.to_numeric(best_idx, errors="coerce").dropna().astype(int)
     if best_idx.empty:
-        return _render_fallback_panels(
+        ok, render_mode = _render_panels_or_placeholder(
             output_path=output_path,
             fallback_panels=fallback_panels,
             font_size=font_size,
             dpi=dpi,
-        ), caption
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
     best = agg.loc[best_idx].copy()
     best = best.dropna(subset=["validity"], how="any")
     if best.empty:
-        return _render_fallback_panels(
+        ok, render_mode = _render_panels_or_placeholder(
             output_path=output_path,
             fallback_panels=fallback_panels,
             font_size=font_size,
             dpi=dpi,
-        ), caption
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
     best = best.sort_values("validity", ascending=False).reset_index(drop=True)
     scatter_df = agg.copy()
 
@@ -1944,7 +2333,7 @@ def _fig1_baseline_generation(
     cbar.set_label("Novelty")
     _panel_mark(ax2, "(c)", font_size)
 
-    return _save_plot_figure(fig, output_path, dpi), caption
+    return _save_plot_figure(fig, output_path, dpi), caption, "data"
 
 
 def _fig2_mvf_alignment(
@@ -1954,16 +2343,35 @@ def _fig2_mvf_alignment(
     dpi: int,
     df_alignment: pd.DataFrame,
     fallback_panels: Sequence[Path],
-) -> tuple[bool, str]:
+    fallback_title: str,
+    fallback_lines: Sequence[str],
+    fallback_note: str,
+) -> tuple[bool, str, str]:
     caption = MANUSCRIPT_CAPTIONS[1]
     if plt is None or df_alignment.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     df = df_alignment.copy()
     r1_col = _first_existing_col(df, ["recall_at_1", "r1"])
     r10_col = _first_existing_col(df, ["recall_at_10", "r10"])
     if r1_col is None or r10_col is None:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     df = _coerce_numeric(df, [r1_col, r10_col])
     if {"source_view", "target_view"}.issubset(df.columns):
@@ -1974,17 +2382,41 @@ def _fig2_mvf_alignment(
         df["source_label"] = [p[0] for p in pairs]
         df["target_label"] = [p[1] for p in pairs]
     else:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     df = df.dropna(subset=["source_label", "target_label"])
     if df.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     views = sorted(set(df["source_label"]).union(set(df["target_label"])))
     p1 = df.pivot_table(index="source_label", columns="target_label", values=r1_col, aggfunc="mean").reindex(index=views, columns=views)
     p10 = df.pivot_table(index="source_label", columns="target_label", values=r10_col, aggfunc="mean").reindex(index=views, columns=views)
     if p1.isna().all().all() and p10.isna().all().all():
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     fig, axes = plt.subplots(1, 2, figsize=(14.2, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
@@ -2011,7 +2443,7 @@ def _fig2_mvf_alignment(
         _wrap_ticklabels(ax, axis="x", width=12, rotation=35)
         _wrap_ticklabels(ax, axis="y", width=12, rotation=0)
 
-    return _save_plot_figure(fig, output_path, dpi), caption
+    return _save_plot_figure(fig, output_path, dpi), caption, "data"
 
 
 def _fig3_property_prediction(
@@ -2022,10 +2454,21 @@ def _fig3_property_prediction(
     df_property_base: pd.DataFrame,
     df_property_mvf: pd.DataFrame,
     fallback_panels: Sequence[Path],
-) -> tuple[bool, str]:
+    fallback_title: str,
+    fallback_lines: Sequence[str],
+    fallback_note: str,
+) -> tuple[bool, str, str]:
     caption = MANUSCRIPT_CAPTIONS[2]
     if plt is None:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     frames: list[pd.DataFrame] = []
     for src_name, src_df in [("baseline", df_property_base), ("mvf", df_property_mvf)]:
@@ -2053,12 +2496,28 @@ def _fig3_property_prediction(
         frames.append(df[["property", "representation_label", "model_size", "r2", "source_name"]])
 
     if not frames:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     data = pd.concat(frames, ignore_index=True)
     data = data.dropna(subset=["property", "representation_label", "model_size", "r2"])
     if data.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     size_order = [s for s in MODEL_SIZE_ORDER if s in set(data["model_size"].astype(str))]
     for s in sorted(set(data["model_size"].astype(str))):
@@ -2071,7 +2530,15 @@ def _fig3_property_prediction(
 
     agg = data.groupby(["property", "model_size", "representation_label", "source_name"], as_index=False)["r2"].mean(numeric_only=True)
     if agg.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     fusion_tokens = ("mvf", "multiview", "multi view", "fusion", "mean")
     comp_rows: list[dict[str, object]] = []
@@ -2106,7 +2573,15 @@ def _fig3_property_prediction(
 
     comp = pd.DataFrame(comp_rows)
     if comp.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     size_to_x = {s: i for i, s in enumerate(size_order)}
     fig, axes = plt.subplots(1, 2, figsize=(15.8, 6.2), squeeze=False)
@@ -2199,7 +2674,7 @@ def _fig3_property_prediction(
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
     _panel_mark(ax1, "(b)", font_size)
 
-    return _save_plot_figure(fig, output_path, dpi), caption
+    return _save_plot_figure(fig, output_path, dpi), caption, "data"
 
 
 def _fig4_embedding_research(
@@ -2209,13 +2684,32 @@ def _fig4_embedding_research(
     dpi: int,
     df_embedding_mvf: pd.DataFrame,
     fallback_panels: Sequence[Path],
-) -> tuple[bool, str]:
+    fallback_title: str,
+    fallback_lines: Sequence[str],
+    fallback_note: str,
+) -> tuple[bool, str, str]:
     caption = MANUSCRIPT_CAPTIONS[3]
     if plt is None:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     if df_embedding_mvf is None or df_embedding_mvf.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     data = df_embedding_mvf.copy()
     view_col = _first_existing_col(data, ["view", "proposal_view", "representation"])
@@ -2223,7 +2717,15 @@ def _fig4_embedding_research(
     recall_col = _first_existing_col(data, ["mean_recall_at_10"])
     smooth_col = _first_existing_col(data, ["property_smoothness_mean"])
     if view_col is None or size_col is None or (recall_col is None and smooth_col is None):
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     data["proposal_view"] = data[view_col].astype(str).map(normalize_view_name)
     data = data[data["proposal_view"] != "all"].copy()
@@ -2236,7 +2738,15 @@ def _fig4_embedding_research(
     )
     data = data.dropna(subset=["mean_recall_at_10", "property_smoothness_mean"], how="all")
     if data.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     size_order = [s for s in MODEL_SIZE_ORDER if s in set(data["model_size"].astype(str))]
     for s in sorted(set(data["model_size"].astype(str))):
@@ -2299,7 +2809,7 @@ def _fig4_embedding_research(
     ax1.legend(loc="best", frameon=False)
     _panel_mark(ax1, "(b)", font_size)
 
-    return _save_plot_figure(fig, output_path, dpi), caption
+    return _save_plot_figure(fig, output_path, dpi), caption, "data"
 
 
 def _fig5_inverse_design(
@@ -2311,10 +2821,21 @@ def _fig5_inverse_design(
     df_inverse_mvf: pd.DataFrame,
     df_inverse_topk: pd.DataFrame,
     fallback_panels: Sequence[Path],
-) -> tuple[bool, str]:
+    fallback_title: str,
+    fallback_lines: Sequence[str],
+    fallback_note: str,
+) -> tuple[bool, str, str]:
     caption = MANUSCRIPT_CAPTIONS[4]
     if plt is None:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     def _prepare_view_frame(src_df: pd.DataFrame, value_col_candidates: Sequence[str], label: str) -> Optional[pd.DataFrame]:
         if src_df is None or src_df.empty:
@@ -2355,7 +2876,15 @@ def _fig5_inverse_design(
     if f5 is None or f5.empty or f5_topk is None or f5_topk.empty:
         base = _prepare_view_frame(df_inverse_base, ["success_rate"], "baseline inverse")
         if base is None or base.empty:
-            return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+            ok, render_mode = _render_panels_or_placeholder(
+                output_path=output_path,
+                fallback_panels=fallback_panels,
+                font_size=font_size,
+                dpi=dpi,
+                empty_title=fallback_title,
+                empty_lines=fallback_lines,
+            )
+            return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
         target_prop = _ordered_properties(base["property"].tolist())[0]
         base = base[base["property"] == target_prop].copy()
         size_order = [s for s in MODEL_SIZE_ORDER if s in set(base["model_size"].astype(str))]
@@ -2391,16 +2920,32 @@ def _fig5_inverse_design(
         if handles:
             ax.legend(handles, labels, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
         _panel_mark(ax, "(a)", font_size)
-        return _save_plot_figure(fig, output_path, dpi), caption
+        return _save_plot_figure(fig, output_path, dpi), caption, "data"
 
     common_props = sorted(set(f5["property"].dropna().astype(str)) & set(f5_topk["property"].dropna().astype(str)))
     if not common_props:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
     target_prop = _ordered_properties(common_props)[0]
     f5 = f5[f5["property"] == target_prop].copy()
     f5_topk = f5_topk[f5_topk["property"] == target_prop].copy()
     if f5.empty or f5_topk.empty:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     size_order = [s for s in MODEL_SIZE_ORDER if s in set(pd.concat([f5["model_size"], f5_topk["model_size"]]).astype(str))]
     for s in sorted(set(pd.concat([f5["model_size"], f5_topk["model_size"]]).astype(str))):
@@ -2477,7 +3022,7 @@ def _fig5_inverse_design(
         ax1.legend(handles1, labels1, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
     _panel_mark(ax1, "(b)", font_size)
 
-    return _save_plot_figure(fig, output_path, dpi), caption
+    return _save_plot_figure(fig, output_path, dpi), caption, "data"
 
 
 def _fig6_chem_physics(
@@ -2488,10 +3033,21 @@ def _fig6_chem_physics(
     df_descriptor: pd.DataFrame,
     df_motif: pd.DataFrame,
     fallback_panels: Sequence[Path],
-) -> tuple[bool, str]:
+    fallback_title: str,
+    fallback_lines: Sequence[str],
+    fallback_note: str,
+) -> tuple[bool, str, str]:
     caption = MANUSCRIPT_CAPTIONS[5]
     if plt is None:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     desc = df_descriptor.copy() if df_descriptor is not None else pd.DataFrame()
     motif = df_motif.copy() if df_motif is not None else pd.DataFrame()
@@ -2513,7 +3069,15 @@ def _fig6_chem_physics(
     has_desc = prop_col is not None and desc_col is not None and desc_val_col is not None and not desc.empty
     has_motif = motif_prop_col is not None and motif_col is not None and motif_val_col is not None and not motif.empty
     if not has_desc and not has_motif:
-        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     layout_properties: list[str] = []
     if has_desc and prop_col in desc.columns:
@@ -2628,7 +3192,7 @@ def _fig6_chem_physics(
     _panel_mark(ax1, "(b)", font_size)
 
     fig.subplots_adjust(left=left_margin, right=0.985, bottom=0.22, top=0.94, wspace=0.34)
-    return _save_plot_figure(fig, output_path, dpi), caption
+    return _save_plot_figure(fig, output_path, dpi), caption, "data"
 
 
 def main(args):
@@ -2733,6 +3297,7 @@ def main(args):
     copied: list[dict] = []
     missing: list[dict] = []
     step_rows: list[dict] = []
+    paper_table_map: dict[str, str] = {}
 
     source_config_candidates = [
         results_dir / "config_used.yaml",
@@ -2778,19 +3343,9 @@ def main(args):
                 "destination": _safe_rel(manuscript_results_dir / "table_f1_embedding_summary.csv", output_dir),
             }
         )
-        f1_status = "completed"
     else:
         missing.append({"category": "table_main", "name": "table_f1_embedding_summary.csv"})
-        f1_status = "missing"
-    step_rows.append(
-        {
-            "step_id": "F1",
-            "step_name": "alignment_embeddings",
-            "status": f1_status,
-            "source_metric": "embedding_meta_*.json",
-            "paper_table": _safe_rel(f1_table_path, output_dir),
-        }
-    )
+    paper_table_map["F1"] = _safe_rel(f1_table_path, output_dir)
 
     step_metric_map = [
         ("F2", "retrieval", "step2_retrieval", "metrics_alignment.csv", "table_f2_retrieval.csv"),
@@ -2816,6 +3371,7 @@ def main(args):
     step_metric_sources: dict[str, Optional[Path]] = {}
     for step_id, step_name, step_subdir, filename, out_name in step_metric_map:
         main_dst = tables_main_dir / out_name
+        paper_table_map[step_id] = _safe_rel(main_dst, output_dir)
         include_property_scopes = step_id in {"F5", "F6", "F7"}
         suffix_regex = r"^metrics_dit_interpretability_(.+)\.csv$" if step_id == "F6" else None
         df_step = _load_mvf_csv_multi(
@@ -2828,15 +3384,6 @@ def main(args):
         if df_step.empty:
             missing.append({"category": "table_main", "name": out_name})
             step_metric_sources[step_id] = None
-            step_rows.append(
-                {
-                    "step_id": step_id,
-                    "step_name": step_name,
-                    "status": "missing",
-                    "source_metric": "",
-                    "paper_table": _safe_rel(main_dst, output_dir),
-                }
-            )
             continue
 
         main_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -2858,16 +3405,6 @@ def main(args):
                 "category": "table_main",
                 "source": f"generated_from_{step_subdir}/{filename}_across_sizes",
                 "destination": _safe_rel(manuscript_dst, output_dir),
-            }
-        )
-
-        step_rows.append(
-            {
-                "step_id": step_id,
-                "step_name": step_name,
-                "status": "completed",
-                "source_metric": f"{step_subdir}/{filename} across {len(mvf_results_dirs)} runs",
-                "paper_table": _safe_rel(main_dst, output_dir),
             }
         )
 
@@ -3106,10 +3643,20 @@ def main(args):
             }
         )
 
+    step_rows = _build_step_status_rows(
+        results_dirs=mvf_results_dirs,
+        output_dir=output_dir,
+        results_dir=results_dir,
+        paper_table_map=paper_table_map,
+    )
+    step_status_map = {row["step_id"]: row for row in step_rows}
+
     generated_manuscript_figures: list[str] = []
     generated_si_figures: list[str] = []
     manuscript_caption_lines: list[str] = []
     si_caption_lines: list[str] = []
+    manuscript_figure_records: list[dict] = []
+    si_figure_records: list[dict] = []
 
     if include_figures:
         step_figure_roots: list[Path] = []
@@ -3244,9 +3791,35 @@ def main(args):
                 include_property_scopes=True,
             )
 
+            def _append_theme_panel(theme: str, panel: Path, *, prepend: bool = False) -> None:
+                bucket = themed_panels.setdefault(theme, [])
+                key = str(panel.resolve())
+                seen_bucket = {str(p.resolve()) for p in bucket if p.exists()}
+                if key in seen_bucket:
+                    return
+                if prepend:
+                    bucket.insert(0, panel)
+                else:
+                    bucket.append(panel)
+
+            derived_panel_dir = figures_dir / "derived_step_panels"
+            derived_panel_dir.mkdir(parents=True, exist_ok=True)
+            f1_panel_path = derived_panel_dir / "figure_f1_embedding_summary_f8.png"
+            if _build_f1_summary_panel(
+                output_path=f1_panel_path,
+                font_size=figure_fontsize,
+                dpi=figure_dpi,
+                f1_df=f1_df,
+            ):
+                _append_theme_panel("mvf_f1", f1_panel_path, prepend=True)
+
             manuscript_specs = [
                 {
                     "themes": ["base_step0", "base_step12"],
+                    "panel_fallback_order": ["base_step0", "base_step12"],
+                    "step_ids": [],
+                    "fallback_title": "Figure 1 unavailable",
+                    "fallback_note": "No baseline generation metrics or baseline source panels were available during F8 export.",
                     "fn": _fig1_baseline_generation,
                     "kwargs": {
                         "df_generation": df_agg_generation,
@@ -3255,7 +3828,12 @@ def main(args):
                     },
                 },
                 {
-                    "themes": ["mvf_f1", "mvf_f2"],
+                    "themes": ["mvf_f2"],
+                    "panel_fallback_order": ["mvf_f2"],
+                    "step_ids": ["F2"],
+                    "fallback_title": "Figure 2 unavailable",
+                    "fallback_note": "No non-empty MVF F2 retrieval outputs were available during F8 export.",
+                    "si_seed_theme": "mvf_f2",
                     "fn": _fig2_mvf_alignment,
                     "kwargs": {
                         "df_alignment": df_mvf_alignment if not df_mvf_alignment.empty else df_agg_alignment,
@@ -3263,6 +3841,11 @@ def main(args):
                 },
                 {
                     "themes": ["mvf_f3"],
+                    "panel_fallback_order": ["mvf_f3"],
+                    "step_ids": ["F3"],
+                    "fallback_title": "Figure 3 unavailable",
+                    "fallback_note": "No non-empty MVF F3 property-head outputs were available during F8 export.",
+                    "si_seed_theme": "mvf_f3",
                     "fn": _fig3_property_prediction,
                     "kwargs": {
                         "df_property_base": df_agg_property,
@@ -3271,13 +3854,23 @@ def main(args):
                 },
                 {
                     "themes": ["mvf_f4"],
+                    "panel_fallback_order": ["mvf_f4"],
+                    "step_ids": ["F4"],
+                    "fallback_title": "Figure 4 unavailable",
+                    "fallback_note": "No non-empty MVF F4 embedding-research outputs were available during F8 export.",
+                    "si_seed_theme": "mvf_f4",
                     "fn": _fig4_embedding_research,
                     "kwargs": {
                         "df_embedding_mvf": df_mvf_embedding,
                     },
                 },
                 {
-                    "themes": ["mvf_f5", "mvf_f6"],
+                    "themes": ["mvf_f5"],
+                    "panel_fallback_order": ["mvf_f5"],
+                    "step_ids": ["F5"],
+                    "fallback_title": "Figure 5 unavailable",
+                    "fallback_note": "No non-empty MVF F5 inverse-design outputs were available during F8 export.",
+                    "si_seed_theme": "mvf_f5",
                     "fn": _fig5_inverse_design,
                     "kwargs": {
                         "df_inverse_base": df_agg_inverse,
@@ -3286,7 +3879,12 @@ def main(args):
                     },
                 },
                 {
-                    "themes": ["mvf_f7", "misc"],
+                    "themes": ["mvf_f7"],
+                    "panel_fallback_order": ["mvf_f7"],
+                    "step_ids": ["F7"],
+                    "fallback_title": "Figure 6 unavailable",
+                    "fallback_note": "No non-empty MVF F7 chemistry/physics outputs were available during F8 export.",
+                    "si_seed_theme": "mvf_f7",
                     "fn": _fig6_chem_physics,
                     "kwargs": {
                         "df_descriptor": df_mvf_desc,
@@ -3304,18 +3902,32 @@ def main(args):
                     used=manuscript_used_keys,
                     max_panels=max_panels_per_figure,
                     allow_reuse=False,
-                    fallback_order=FIGURE_FALLBACK_ORDER,
+                    fallback_order=spec["panel_fallback_order"],
                 )
                 for panel in fallback_panels:
                     manuscript_used_keys.add(str(panel.resolve()))
 
                 fig_path = manuscript_figures_dir / f"Figure_{figure_num}.png"
-                ok, caption_text = spec["fn"](
+                fallback_lines = _placeholder_lines_for_step_ids(spec["step_ids"], step_status_map)
+                ok, caption_text, render_mode = spec["fn"](
                     output_path=fig_path,
                     font_size=figure_fontsize,
                     dpi=figure_dpi,
                     fallback_panels=fallback_panels,
+                    fallback_title=spec["fallback_title"],
+                    fallback_lines=fallback_lines,
+                    fallback_note=spec["fallback_note"],
                     **spec["kwargs"],
+                )
+                manuscript_figure_records.append(
+                    {
+                        "figure_id": f"Figure_{figure_num}",
+                        "themes": list(spec["themes"]),
+                        "step_ids": list(spec["step_ids"]),
+                        "render_mode": render_mode,
+                        "fallback_panel_count": len(fallback_panels),
+                        "output_path": _safe_rel(fig_path, output_dir),
+                    }
                 )
                 if ok:
                     generated_manuscript_figures.append(_safe_rel(fig_path, output_dir))
@@ -3326,6 +3938,9 @@ def main(args):
                             "destination": _safe_rel(fig_path, output_dir),
                         }
                     )
+                    seed_theme = spec.get("si_seed_theme")
+                    if render_mode == "data" and isinstance(seed_theme, str) and seed_theme:
+                        _append_theme_panel(seed_theme, fig_path)
                 else:
                     missing.append({"category": "figure_manuscript", "name": str(fig_path.name)})
 
@@ -3358,81 +3973,123 @@ def main(args):
             si_specs = [
                 {
                     "themes": ["base_step0"],
+                    "step_ids": [],
+                    "fallback_title": "Figure S1 unavailable",
+                    "fallback_note": "No baseline Step0 panels were available during F8 export.",
+                    "fallback_lines": [
+                        "No baseline Step0 source panels were found.",
+                        "Expected one of: step0_data_prep/figures/*.png from the five baseline methods.",
+                    ],
                 },
                 {
                     "themes": ["base_step12"],
+                    "step_ids": [],
+                    "fallback_title": "Figure S2 unavailable",
+                    "fallback_note": "No baseline Step1/Step2 panels were available during F8 export.",
+                    "fallback_lines": [
+                        "No baseline Step1/Step2 source panels were found.",
+                        "Expected one of: aggregate_step12 figures or step1_backbone/step2_sampling panels.",
+                    ],
                 },
                 {
                     "themes": ["mvf_f1"],
+                    "step_ids": ["F1"],
+                    "fallback_title": "Figure S3 unavailable",
+                    "fallback_note": "No non-empty MVF F1 embedding-extraction outputs were available during F8 export.",
                 },
                 {
                     "themes": ["mvf_f2"],
+                    "step_ids": ["F2"],
+                    "fallback_title": "Figure S4 unavailable",
+                    "fallback_note": "No non-empty MVF F2 retrieval outputs were available during F8 export.",
                 },
                 {
                     "themes": ["mvf_f3"],
+                    "step_ids": ["F3"],
+                    "fallback_title": "Figure S5 unavailable",
+                    "fallback_note": "No non-empty MVF F3 property-head outputs were available during F8 export.",
                 },
                 {
                     "themes": ["mvf_f4"],
+                    "step_ids": ["F4"],
+                    "fallback_title": "Figure S6 unavailable",
+                    "fallback_note": "No non-empty MVF F4 embedding-research outputs were available during F8 export.",
                 },
                 {
                     "themes": ["mvf_f5"],
+                    "step_ids": ["F5"],
+                    "fallback_title": "Figure S7 unavailable",
+                    "fallback_note": "No non-empty MVF F5 inverse-design outputs were available during F8 export.",
                 },
                 {
                     "themes": ["mvf_f6"],
+                    "step_ids": ["F6"],
+                    "fallback_title": "Figure S8 unavailable",
+                    "fallback_note": "No non-empty MVF F6 interpretability outputs were available during F8 export.",
                 },
                 {
-                    "themes": ["mvf_f7", "misc"],
+                    "themes": ["mvf_f7"],
+                    "step_ids": ["F7"],
+                    "fallback_title": "Figure S9 unavailable",
+                    "fallback_note": "No non-empty MVF F7 chemistry/physics outputs were available during F8 export.",
                 },
             ]
             si_specs = si_specs[:SUPPORTING_INFORMATION_FIGURE_COUNT]
-            if not all_panels:
-                si_specs = [
-                    {
-                        "themes": ["misc"],
-                    }
-                ]
 
             si_used_keys: set[str] = set()
-            si_reuse_cursor = 0
             for si_idx, spec in enumerate(si_specs, start=1):
-                pre_used_keys = set(si_used_keys)
                 chunk = _pick_panels(
                     themed=themed_panels,
                     theme_group=spec["themes"],
                     used=si_used_keys,
                     max_panels=max_panels_per_figure,
-                    allow_reuse=True,
-                    fallback_order=FIGURE_FALLBACK_ORDER,
+                    allow_reuse=False,
+                    fallback_order=spec["themes"],
                 )
-                if all_panels and (
-                    not chunk
-                    or all(str(panel.resolve()) in pre_used_keys for panel in chunk)
-                ):
-                    chunk = _rolling_panel_window(all_panels, si_reuse_cursor, max_panels_per_figure)
-                    si_reuse_cursor += max_panels_per_figure
                 for panel in chunk:
                     si_used_keys.add(str(panel.resolve()))
 
                 fig_path = si_figures_dir / f"Figure_S{si_idx}.png"
-                ok = _compose_multi_panel_figure(
-                    panel_paths=chunk,
+                fallback_lines = list(spec.get("fallback_lines") or _placeholder_lines_for_step_ids(spec["step_ids"], step_status_map))
+                ok, render_mode = _render_panels_or_placeholder(
                     output_path=fig_path,
+                    fallback_panels=chunk,
                     font_size=figure_fontsize,
                     dpi=figure_dpi,
+                    empty_title=spec["fallback_title"],
+                    empty_lines=fallback_lines,
+                )
+                si_figure_records.append(
+                    {
+                        "figure_id": f"Figure_S{si_idx}",
+                        "themes": list(spec["themes"]),
+                        "step_ids": list(spec["step_ids"]),
+                        "render_mode": render_mode,
+                        "fallback_panel_count": len(chunk),
+                        "output_path": _safe_rel(fig_path, output_dir),
+                    }
                 )
                 if ok:
                     generated_si_figures.append(_safe_rel(fig_path, output_dir))
                     copied.append(
                         {
                             "category": "figure_supporting_information",
-                            "source": "generated_composite",
+                            "source": "generated_theme_composite_or_placeholder",
                             "destination": _safe_rel(fig_path, output_dir),
                         }
                     )
-                if si_idx <= len(SI_CAPTIONS):
-                    si_caption_lines.append(SI_CAPTIONS[si_idx - 1])
                 else:
-                    si_caption_lines.append(f"Figure S{si_idx}. Supporting-information diagnostic panel.")
+                    missing.append({"category": "figure_supporting_information", "name": str(fig_path.name)})
+                if si_idx <= len(SI_CAPTIONS):
+                    si_caption_lines.append(_caption_with_render_note(SI_CAPTIONS[si_idx - 1], render_mode, spec["fallback_note"]))
+                else:
+                    si_caption_lines.append(
+                        _caption_with_render_note(
+                            f"Figure S{si_idx}. Supporting-information diagnostic panel.",
+                            render_mode,
+                            spec["fallback_note"],
+                        )
+                    )
 
             manuscript_caption_path = manuscript_captions_dir / "figure_captions.txt"
             si_caption_path = si_captions_dir / "figure_captions.txt"
@@ -3486,6 +4143,8 @@ def main(args):
         "step12_scale_rows": int(len(step12_scale_summary_df)),
         "generated_manuscript_figures": generated_manuscript_figures,
         "generated_supporting_information_figures": generated_si_figures,
+        "manuscript_figure_records": manuscript_figure_records,
+        "supporting_information_figure_records": si_figure_records,
         "steps": step_rows,
         "copied_artifacts": copied_summary,
         "copy_operations": copied,

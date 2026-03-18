@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import math
 from pathlib import Path
 import sys
@@ -752,6 +753,150 @@ def _plot_faithfulness_summary(
     plt.close(fig)
 
 
+def _load_json_dict(path: Optional[Path]) -> dict:
+    if path is None or not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _first_existing_path(candidates: Sequence[Path]) -> Optional[Path]:
+    return next((path for path in candidates if path.exists()), None)
+
+
+def _filter_property_rows_if_available(
+    df: pd.DataFrame,
+    *,
+    property_name: str,
+    source_path: Path,
+    label: str,
+) -> pd.DataFrame:
+    if "property" not in df.columns:
+        return df
+    prop = _normalize_property_name(property_name)
+    prop_series = df["property"].astype(str).map(_normalize_property_name)
+    match_mask = prop_series == prop
+    if bool(match_mask.any()):
+        return df.loc[match_mask].copy()
+    seen = [x for x in sorted(prop_series.unique().tolist()) if x]
+    seen_preview = ",".join(seen[:6]) if seen else "(empty)"
+    raise RuntimeError(
+        f"{label} does not contain rows for property={property_name}: {source_path}. "
+        f"Found properties={seen_preview}."
+    )
+
+
+def _read_required_csv(path: Path, *, label: str, property_name: str) -> pd.DataFrame:
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"{label} is unreadable or empty: {path}. "
+            "Run F6 first to generate interpretability artifacts before regenerating figures."
+        ) from exc
+    if df.empty:
+        raise RuntimeError(
+            f"{label} is empty: {path}. "
+            "Run F6 first to generate interpretability artifacts before regenerating figures."
+        )
+    return _filter_property_rows_if_available(
+        df,
+        property_name=property_name,
+        source_path=path,
+        label=label,
+    )
+
+
+def _load_existing_f6_artifacts(
+    *,
+    step_dirs: dict,
+    property_step_dirs: dict,
+    property_name: str,
+) -> dict:
+    prop = _normalize_property_name(property_name)
+    token_summary_path = _first_existing_path(
+        [
+            property_step_dirs["files_dir"] / f"dit_token_summary_{prop}.csv",
+            step_dirs["files_dir"] / f"dit_token_summary_{prop}.csv",
+        ]
+    )
+    if token_summary_path is None:
+        raise FileNotFoundError(
+            f"No dit_token_summary CSV found for property={property_name}. "
+            "Run F6 first or provide the expected interpretability outputs."
+        )
+    case_path = _first_existing_path(
+        [
+            property_step_dirs["files_dir"] / f"dit_case_attributions_{prop}.csv",
+            step_dirs["files_dir"] / f"dit_case_attributions_{prop}.csv",
+        ]
+    )
+    if case_path is None:
+        raise FileNotFoundError(
+            f"No dit_case_attributions CSV found for property={property_name}. "
+            "Run F6 first or provide the expected interpretability outputs."
+        )
+
+    run_meta = {}
+    run_meta_path = ""
+    for candidate in [
+        property_step_dirs["files_dir"] / f"run_meta_{prop}.json",
+        property_step_dirs["files_dir"] / "run_meta.json",
+        step_dirs["files_dir"] / f"run_meta_{prop}.json",
+        step_dirs["files_dir"] / "run_meta.json",
+    ]:
+        payload = _load_json_dict(candidate)
+        if payload:
+            run_meta = payload
+            run_meta_path = str(candidate)
+            break
+
+    token_summary_df = _read_required_csv(
+        token_summary_path,
+        label="dit_token_summary",
+        property_name=property_name,
+    )
+    case_df = _read_required_csv(
+        case_path,
+        label="dit_case_attributions",
+        property_name=property_name,
+    )
+    return {
+        "token_summary_df": token_summary_df,
+        "case_df": case_df,
+        "run_meta": run_meta,
+        "run_meta_path": run_meta_path,
+    }
+
+
+def _resolve_existing_f6_methods(
+    *,
+    args_methods: Optional[str],
+    run_meta: dict,
+    token_summary_df: pd.DataFrame,
+    case_df: pd.DataFrame,
+) -> List[str]:
+    if args_methods is not None:
+        return _parse_methods(args_methods)
+    if run_meta.get("methods") is not None:
+        return _parse_methods(run_meta.get("methods"))
+    if run_meta.get("attribution_method") is not None:
+        return _parse_methods(run_meta.get("attribution_method"))
+    discovered = []
+    for df in [token_summary_df, case_df]:
+        if "method" not in df.columns:
+            continue
+        for method in df["method"].dropna().astype(str).tolist():
+            key = method.strip().lower()
+            if key in METHOD_LABELS and key not in discovered:
+                discovered.append(key)
+    return discovered or list(METHODS_DEFAULT)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
@@ -763,6 +908,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--faithfulness_top_k", type=int, default=None)
     parser.add_argument("--max_samples_per_group", type=int, default=None)
     parser.add_argument("--max_tokens_in_figure", type=int, default=None)
+    parser.add_argument("--figures_only", action="store_true", help="Regenerate F6 figures from existing interpretability artifacts.")
     parser.add_argument("--generate_figures", dest="generate_figures", action="store_true")
     parser.add_argument("--no_figures", dest="generate_figures", action="store_false")
     parser.set_defaults(generate_figures=None)
@@ -809,6 +955,46 @@ def main(args) -> None:
         max_tokens_in_figure = _to_int_or_none(cfg_f6.get("max_tokens_in_figure"))
     if max_tokens_in_figure is None:
         max_tokens_in_figure = 16
+
+    generate_figures = args.generate_figures
+    if generate_figures is None:
+        generate_figures = _to_bool(cfg_f6.get("generate_figures", True), True)
+    if args.figures_only:
+        artifacts = _load_existing_f6_artifacts(
+            step_dirs=step_dirs,
+            property_step_dirs=property_step_dirs,
+            property_name=property_name,
+        )
+        token_summary_df = artifacts["token_summary_df"]
+        case_df = artifacts["case_df"]
+        run_meta = artifacts["run_meta"]
+        methods = _resolve_existing_f6_methods(
+            args_methods=args.methods,
+            run_meta=run_meta,
+            token_summary_df=token_summary_df,
+            case_df=case_df,
+        )
+        max_tokens_for_figures = _to_int_or_none(args.max_tokens_in_figure)
+        if max_tokens_for_figures is None:
+            max_tokens_for_figures = _to_int_or_none(run_meta.get("max_tokens_in_figure"))
+        if max_tokens_for_figures is None:
+            max_tokens_for_figures = int(max_tokens_in_figure)
+        if generate_figures and plt is not None:
+            _plot_token_heatmaps(
+                token_summary_df,
+                property_name=property_name,
+                figures_dir=property_step_dirs["figures_dir"],
+                max_tokens_in_figure=int(max_tokens_for_figures),
+                methods=methods,
+            )
+            _plot_faithfulness_summary(
+                case_df,
+                property_name=property_name,
+                figures_dir=property_step_dirs["figures_dir"],
+                methods=methods,
+            )
+        print(f"Saved F6 figures to {property_step_dirs['figures_dir']}")
+        return
 
     candidate_scores_path = _resolve_view_compare_scores_path(results_dir, property_name)
     df = pd.read_csv(candidate_scores_path)
@@ -930,9 +1116,6 @@ def main(args) -> None:
         legacy_paths=[step_dirs["files_dir"] / f"run_meta_{property_name}.json"],
     )
 
-    generate_figures = args.generate_figures
-    if generate_figures is None:
-        generate_figures = _to_bool(cfg_f6.get("generate_figures", True), True)
     if generate_figures and plt is not None:
         _plot_token_heatmaps(
             token_summary_df,
