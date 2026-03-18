@@ -110,16 +110,35 @@ def set_publication_style() -> None:
     plt.rcParams.update(style)
 
 
-def standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: str = "best") -> None:
+def standardize_figure_text_and_legend(
+    fig,
+    font_size: int = 16,
+    legend_loc: str = "best",
+    strip_titles: bool = True,
+) -> None:
     for text_obj in fig.findobj(match=lambda artist: hasattr(artist, "set_fontsize")):
         try:
             text_obj.set_fontsize(font_size)
         except Exception:
             continue
     for ax in fig.axes:
+        if strip_titles:
+            try:
+                ax.set_title("")
+                ax.set_title("", loc="left")
+                ax.set_title("", loc="right")
+            except Exception:
+                pass
         legend = ax.get_legend()
         if legend is not None:
             set_legend_location(legend, legend_loc)
+    if strip_titles:
+        try:
+            suptitle = getattr(fig, "_suptitle", None)
+            if suptitle is not None:
+                suptitle.set_text("")
+        except Exception:
+            pass
 
 
 def set_legend_location(legend, legend_loc: str = "best") -> None:
@@ -143,7 +162,20 @@ def set_legend_location(legend, legend_loc: str = "best") -> None:
         pass
 
 
-def save_figure_png(fig, output_base: Path, *, font_size: int = 16, dpi: int = 600, legend_loc: str = "best") -> None:
+def save_figure_png(
+    fig,
+    output_base: Path,
+    *,
+    font_size: int = 16,
+    dpi: int = 600,
+    legend_loc: str = "best",
+    strip_titles: bool = True,
+) -> None:
     output_base.parent.mkdir(parents=True, exist_ok=True)
-    standardize_figure_text_and_legend(fig, font_size=font_size, legend_loc=legend_loc)
+    standardize_figure_text_and_legend(
+        fig,
+        font_size=font_size,
+        legend_loc=legend_loc,
+        strip_titles=strip_titles,
+    )
     fig.savefig(output_base.with_suffix(".png"), dpi=dpi, bbox_inches="tight")

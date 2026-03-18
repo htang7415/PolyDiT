@@ -31,6 +31,10 @@ REPO_ROOT = BASE_DIR.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from src.utils.config import load_config
+from src.utils.property_names import (
+    normalize_property_name as shared_normalize_property_name,
+    ordered_properties,
+)
 from src.utils.visualization import (
     COLOR_MUTED,
     COLOR_TEXT,
@@ -73,10 +77,10 @@ PROPERTY_PRIORITY = [
     "Tm",
     "Td",
     "Eg",
-    "cohesive_energy_density",
-    "electron_affinity",
-    "electron_injection_barrier",
-    "ionization_energy",
+    "Ced",
+    "Ea",
+    "Eib",
+    "In",
 ]
 STEP2_METRIC_COLUMNS = ["step2_validity", "step2_uniqueness", "step2_novelty", "step2_diversity"]
 METHOD_PLOT_COLORS = {
@@ -91,7 +95,7 @@ MANUSCRIPT_CAPTIONS = [
     "Figure 2. Cross-view molecular alignment in the multi-view foundation model. (a) Recall@1 heatmap: fraction of queries for which the correct paired molecule ranks first under cosine similarity. (b) Recall@10 heatmap: fraction of correct pairs recovered within the top-10 retrieved candidates.",
     "Figure 3. Property prediction with multi-view foundation embeddings across model scales. (a) Test-set R^2 versus model size across configured target properties, comparing the best baseline representation and the best MVF/fusion representation at each size. (b) Fusion gain in R^2 across model sizes.",
     "Figure 4. Out-of-distribution (OOD) shift analysis across model scales. (a) Mean distance between training-set (D1) and target-domain (D2) polymer embeddings as a function of model size for baseline and MVF. (b) Fraction of generated polymers within the D2 neighborhood across model sizes.",
-    "Figure 5. View-aligned inverse polymer design across model scales. (a) F5 fair hit rate versus model size for each proposal view under the shared SMILES scorer. (b) F6 conservative top-k fair hit rate versus model size for each proposal view.",
+    "Figure 5. View-aligned inverse polymer design across model scales. (a) F5 fair hit rate versus model size for each proposal view under the shared SMILES scorer. (b) F5 per-view top-k fair hit rate versus model size for each proposal view.",
     "Figure 6. Chemistry and physics analysis of inversely designed polymers. (a) Normalized descriptor shifts of accepted candidates relative to the D1 reference set for key physicochemical features and each target property. (b) Motif enrichment ratios for discriminative polymer substructures in accepted candidates compared to the reference distribution.",
 ]
 
@@ -103,7 +107,7 @@ SI_CAPTIONS = [
     "Figure S5. Property head training diagnostics: per-split metrics, head leaderboard, and coverage.",
     "Figure S6. OOD diagnostics: distance distributions between D1/D2 and generated embedding sets.",
     "Figure S7. Foundation-guided inverse design diagnostics: candidate score distributions and accepted-candidate profiles by view.",
-    "Figure S8. OOD-aware objective diagnostics: conservative reranking score distributions and top-k candidate selection.",
+    "Figure S8. F6 DiT interpretability diagnostics: integrated gradients, gradient-times-hidden, and attention-rollout analyses of the shared SMILES scorer, with faithfulness summaries across proposal views and outcome groups.",
     "Figure S9. Chemistry/physics analysis: per-property descriptor distributions, physics consistency checks, and nearest-neighbor explanations.",
 ]
 
@@ -138,13 +142,7 @@ def _to_int(value, default: int) -> int:
 
 
 def _normalize_property_name(value) -> str:
-    text = str(value).strip()
-    if not text:
-        return ""
-    p = Path(text)
-    if p.suffix.lower() == ".csv":
-        text = p.stem
-    return text.strip()
+    return shared_normalize_property_name(value)
 
 
 def _safe_rel(path: Path, root: Path) -> str:
@@ -438,6 +436,10 @@ def _discover_properties(
     regexes = [
         re.compile(r"^candidate_scores_(.+)\.csv$"),
         re.compile(r"^accepted_candidates_(.+)\.csv$"),
+        re.compile(r"^view_compare_topk_(.+)\.csv$"),
+        re.compile(r"^view_compare_scores_(.+)\.csv$"),
+        re.compile(r"^metrics_view_compare_(.+)\.csv$"),
+        re.compile(r"^metrics_dit_interpretability_(.+)\.csv$"),
         re.compile(r"^ood_objective_topk_(.+)\.csv$"),
         re.compile(r"^ood_objective_scores_(.+)\.csv$"),
         re.compile(r"^metrics_inverse_ood_objective_(.+)\.csv$"),
@@ -539,6 +541,8 @@ def _has_mvf_step_artifacts(results_dir: Path) -> bool:
         "step3_property",
         "step4_ood",
         "step5_foundation_inverse",
+        "step6_dit_interpretability",
+        "step6_view_compare_analysis",
         "step6_ood_aware_inverse",
         "step7_chem_physics_analysis",
     ]:
@@ -793,7 +797,7 @@ def _describe_panel(path: Path) -> str:
         step_hint = "MVF F4"
     elif "step5_foundation_inverse" in lower_rel:
         step_hint = "MVF F5"
-    elif "step6_ood_aware_inverse" in lower_rel:
+    elif "step6_dit_interpretability" in lower_rel or "step6_view_compare_analysis" in lower_rel or "step6_ood_aware_inverse" in lower_rel:
         step_hint = "MVF F6"
     elif "step7_chem_physics_analysis" in lower_rel:
         step_hint = "MVF F7"
@@ -1073,6 +1077,7 @@ def _copy_tree_files(
 def _property_from_suffixed_filename(filename: str) -> str:
     m = re.match(
         r"^(?:candidate_scores|accepted_candidates|accepted_polymer_report|accepted_polymer_summary|"
+        r"view_compare_scores|view_compare_topk|metrics_view_compare|metrics_dit_interpretability|"
         r"ood_objective_scores|ood_objective_topk|metrics_inverse_ood_objective|"
         r"descriptor_shifts|motif_enrichment|physics_consistency|nearest_neighbor_explanations|design_filter_audit|"
         r"property_input_files|run_meta)_(.+)\.(?:csv|json)$",
@@ -1087,6 +1092,8 @@ def _extract_property_scope_from_path(path: Path) -> str:
     parts = list(path.parts)
     for step_name in [
         "step5_foundation_inverse",
+        "step6_dit_interpretability",
+        "step6_view_compare_analysis",
         "step6_ood_aware_inverse",
         "step7_chem_physics_analysis",
     ]:
@@ -1368,9 +1375,16 @@ def _panel_mark(ax, label: str, font_size: int) -> None:
 
 def _save_plot_figure(fig, output_path: Path, dpi: int) -> bool:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    for text_obj in fig.findobj(match=lambda artist: hasattr(artist, "set_fontsize")):
+        try:
+            text_obj.set_fontsize(16)
+        except Exception:
+            continue
     for ax in fig.axes:
         try:
-            ax.title.set_fontsize(16)
+            ax.set_title("")
+            ax.set_title("", loc="left")
+            ax.set_title("", loc="right")
             ax.xaxis.label.set_fontsize(16)
             ax.yaxis.label.set_fontsize(16)
         except Exception:
@@ -1389,6 +1403,12 @@ def _save_plot_figure(fig, output_path: Path, dpi: int) -> bool:
             ax.xaxis.label.set_color(COLOR_TEXT)
         if ax.get_ylabel():
             ax.yaxis.label.set_color(COLOR_TEXT)
+    try:
+        suptitle = getattr(fig, "_suptitle", None)
+        if suptitle is not None:
+            suptitle.set_text("")
+    except Exception:
+        pass
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     return True
@@ -2320,7 +2340,7 @@ def _fig5_inverse_design(
     dpi: int,
     df_inverse_base: pd.DataFrame,
     df_inverse_mvf: pd.DataFrame,
-    df_inverse_f6: pd.DataFrame,
+    df_inverse_topk: pd.DataFrame,
     fallback_panels: Sequence[Path],
 ) -> tuple[bool, str]:
     caption = MANUSCRIPT_CAPTIONS[4]
@@ -2361,9 +2381,9 @@ def _fig5_inverse_design(
         )
 
     f5 = _prepare_view_frame(df_inverse_mvf, ["fair_success_rate"], "F5")
-    f6 = _prepare_view_frame(df_inverse_f6, ["top_k_fair_hit_rate"], "F6")
+    f5_topk = _prepare_view_frame(df_inverse_topk, ["top_k_fair_hit_rate"], "F5 top-k")
 
-    if f5 is None or f5.empty or f6 is None or f6.empty:
+    if f5 is None or f5.empty or f5_topk is None or f5_topk.empty:
         base = _prepare_view_frame(df_inverse_base, ["success_rate"], "baseline inverse")
         if base is None or base.empty:
             return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
@@ -2404,17 +2424,17 @@ def _fig5_inverse_design(
         _panel_mark(ax, "(a)", font_size)
         return _save_plot_figure(fig, output_path, dpi), caption
 
-    common_props = sorted(set(f5["property"].dropna().astype(str)) & set(f6["property"].dropna().astype(str)))
+    common_props = sorted(set(f5["property"].dropna().astype(str)) & set(f5_topk["property"].dropna().astype(str)))
     if not common_props:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
     target_prop = _ordered_properties(common_props)[0]
     f5 = f5[f5["property"] == target_prop].copy()
-    f6 = f6[f6["property"] == target_prop].copy()
-    if f5.empty or f6.empty:
+    f5_topk = f5_topk[f5_topk["property"] == target_prop].copy()
+    if f5.empty or f5_topk.empty:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
-    size_order = [s for s in MODEL_SIZE_ORDER if s in set(pd.concat([f5["model_size"], f6["model_size"]]).astype(str))]
-    for s in sorted(set(pd.concat([f5["model_size"], f6["model_size"]]).astype(str))):
+    size_order = [s for s in MODEL_SIZE_ORDER if s in set(pd.concat([f5["model_size"], f5_topk["model_size"]]).astype(str))]
+    for s in sorted(set(pd.concat([f5["model_size"], f5_topk["model_size"]]).astype(str))):
         if s not in size_order:
             size_order.append(s)
     if not size_order:
@@ -2424,7 +2444,7 @@ def _fig5_inverse_design(
     fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.3), squeeze=False)
     ax0, ax1 = axes[0]
 
-    all_views = ordered_views(pd.concat([f5["proposal_view"], f6["proposal_view"]], ignore_index=True).tolist())
+    all_views = ordered_views(pd.concat([f5["proposal_view"], f5_topk["proposal_view"]], ignore_index=True).tolist())
     for proposal_view in all_views:
         sub = f5[f5["proposal_view"] == proposal_view].copy()
         if sub.empty:
@@ -2458,7 +2478,7 @@ def _fig5_inverse_design(
     _panel_mark(ax0, "(a)", font_size)
 
     for proposal_view in all_views:
-        sub = f6[f6["proposal_view"] == proposal_view].copy()
+        sub = f5_topk[f5_topk["proposal_view"] == proposal_view].copy()
         if sub.empty:
             continue
         sub["x"] = sub["model_size"].map(size_to_x)
@@ -2480,7 +2500,7 @@ def _fig5_inverse_design(
     ax1.set_xticks(np.arange(len(size_order)))
     ax1.set_xticklabels([s.upper() for s in size_order])
     ax1.set_xlabel("Model Size")
-    ax1.set_ylabel("F6 Top-k Fair Hit Rate")
+    ax1.set_ylabel("F5 Top-k Fair Hit Rate")
     ax1.set_ylim(0.0, 1.0)
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
     handles1, labels1 = ax1.get_legend_handles_labels()
@@ -2812,10 +2832,10 @@ def main(args):
         ("F5", "foundation_inverse", "step5_foundation_inverse", "metrics_inverse.csv", "table_f5_inverse_design.csv"),
         (
             "F6",
-            "ood_aware_inverse",
-            "step6_ood_aware_inverse",
-            "metrics_inverse_ood_objective.csv",
-            "table_f6_ood_aware_objective.csv",
+            "dit_interpretability",
+            "step6_dit_interpretability",
+            "metrics_dit_interpretability.csv",
+            "table_f6_dit_interpretability.csv",
         ),
         (
             "F7",
@@ -2830,7 +2850,7 @@ def main(args):
     for step_id, step_name, step_subdir, filename, out_name in step_metric_map:
         main_dst = tables_main_dir / out_name
         include_property_scopes = step_id in {"F5", "F6", "F7"}
-        suffix_regex = r"^metrics_inverse_ood_objective_(.+)\.csv$" if step_id == "F6" else None
+        suffix_regex = r"^metrics_dit_interpretability_(.+)\.csv$" if step_id == "F6" else None
         df_step = _load_mvf_csv_multi(
             mvf_results_dirs,
             step_subdir,
@@ -2899,7 +2919,7 @@ def main(args):
         step6_dirs.extend(
             _collect_step_artifact_dirs(
                 mvf_results_dir=mvf_dir,
-                step_subdir="step6_ood_aware_inverse",
+                step_subdir="step6_dit_interpretability",
                 include_property_scopes=True,
                 include_root_when_property_scopes=False,
             )
@@ -2919,9 +2939,16 @@ def main(args):
     properties = _discover_properties(config, step5_dirs, step6_dirs, step_metric_sources.get("F7"))
 
     f5_artifacts: list[Path] = []
-    f6_patterns = ["ood_objective_topk*.csv"]
+    f6_patterns = ["dit_token_summary*.csv", "metrics_dit_interpretability*.csv"]
     if include_large_csv:
-        f6_patterns = ["ood_objective_scores*.csv", "ood_objective_topk*.csv"]
+        f6_patterns = [
+            "dit_case_attributions*.csv",
+            "dit_method_agreement*.csv",
+            "dit_token_summary*.csv",
+            "interpretability_selected_cases*.csv",
+            "metrics_dit_interpretability*.csv",
+            "dit_token_attributions*.csv",
+        ]
 
     # Prefer property-scoped suffixed files to avoid double-copying duplicates
     # (e.g., candidate_scores.csv and candidate_scores_<PROPERTY>.csv in the same scope).
@@ -2947,6 +2974,17 @@ def main(args):
         _append_f5_unique(accepted_prop)
     else:
         _append_f5_unique(_collect_glob_unique(step5_dirs, ["accepted_candidates.csv"]))
+
+    view_compare_patterns = [
+        "metrics_view_compare*.csv",
+        "view_compare_topk*.csv",
+        "view_compare_descriptor_summary*.csv",
+        "view_compare_class_distribution*.csv",
+        "view_compare_space*.csv",
+    ]
+    if include_large_csv:
+        view_compare_patterns.insert(1, "view_compare_scores*.csv")
+    _append_f5_unique(_collect_glob_unique(step5_dirs, view_compare_patterns))
 
     def _size_tag_for(path: Path) -> str:
         for mvf_dir in mvf_results_dirs:
@@ -3079,6 +3117,8 @@ def main(args):
                         mvf_dir / "step3_property",
                         mvf_dir / "step4_ood",
                         mvf_dir / "step5_foundation_inverse",
+                        mvf_dir / "step6_dit_interpretability",
+                        mvf_dir / "step6_view_compare_analysis",
                         mvf_dir / "step6_ood_aware_inverse",
                         mvf_dir / "step7_chem_physics_analysis",
                     ]
@@ -3180,12 +3220,12 @@ def main(args):
                 "metrics_inverse.csv",
                 include_property_scopes=True,
             )
-            df_mvf_inverse_f6 = _load_mvf_csv_multi(
+            df_mvf_inverse_topk = _load_mvf_csv_multi(
                 mvf_results_dirs,
-                "step6_ood_aware_inverse",
-                "metrics_inverse_ood_objective.csv",
+                "step5_foundation_inverse",
+                "metrics_view_compare.csv",
                 include_property_scopes=True,
-                suffixed_filename_regex=r"^metrics_inverse_ood_objective_(.+)\.csv$",
+                suffixed_filename_regex=r"^metrics_view_compare_(.+)\.csv$",
             )
             df_mvf_desc = _load_mvf_csv_multi(
                 mvf_results_dirs,
@@ -3239,7 +3279,7 @@ def main(args):
                     "kwargs": {
                         "df_inverse_base": df_agg_inverse,
                         "df_inverse_mvf": df_mvf_inverse,
-                        "df_inverse_f6": df_mvf_inverse_f6,
+                        "df_inverse_topk": df_mvf_inverse_topk,
                     },
                 },
                 {

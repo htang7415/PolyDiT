@@ -15,6 +15,7 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sys
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -28,6 +29,12 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.utils.config import load_config, save_config
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
+from src.utils.property_names import (
+    normalize_property_name as shared_normalize_property_name,
+    property_column_candidates,
+    property_display_name,
+    property_file_candidates,
+)
 from src.utils.visualization import (
     COLOR_MUTED as SHARED_COLOR_MUTED,
     COLOR_TEXT as SHARED_COLOR_TEXT,
@@ -124,24 +131,24 @@ PHYSICS_RULES = {
         ("ring_count", -1, "Extensive aromatic cyclic systems can reduce Eg."),
         ("polystyrene", -1, "Aromatic-rich motifs may correspond to lower Eg."),
     ],
-    "cohesive_energy_density": [
+    "Ced": [
         ("aromatic_ring_count", +1, "Aromatic packing interactions can increase cohesive energy density."),
         ("ring_count", +1, "Rigid cyclic units can improve chain packing and intermolecular cohesion."),
         ("tpsa", +1, "Higher polarity can strengthen intermolecular attraction."),
         ("rotatable_bonds", -1, "Reduced flexibility can support denser packing."),
     ],
-    "electron_affinity": [
+    "Ea": [
         ("aromatic_ring_count", +1, "Conjugated aromatic systems can stabilize an added electron."),
         ("hetero_atom_fraction", +1, "Hetero atoms can increase electron-withdrawing character."),
         ("fraction_csp3", -1, "Higher saturation generally weakens electron-accepting character."),
         ("tpsa", +1, "Polar functionality can correlate with stronger electron-acceptor behavior."),
     ],
-    "electron_injection_barrier": [
+    "Eib": [
         ("aromatic_ring_count", -1, "Greater conjugation can reduce electron injection barriers."),
         ("fraction_csp3", +1, "More saturated backbones can increase injection barriers."),
         ("hetero_atom_fraction", -1, "Electron-withdrawing hetero atoms can lower injection barriers."),
     ],
-    "ionization_energy": [
+    "In": [
         ("aromatic_ring_count", -1, "Extended conjugation can reduce ionization energy."),
         ("fraction_csp3", +1, "More saturated backbones can increase ionization energy."),
         ("hetero_atom_fraction", +1, "Polar/hetero-atom-rich motifs can increase ionization energy."),
@@ -279,9 +286,22 @@ def _wrap_ticklabels(ax, axis: str = "x", width: int = 16, rotation: int = 32) -
             needs_rotation = True
         updated.append(wrapped)
     if axis == "x":
+        positions = ax.get_xticks()
+        ax.set_xticks(positions)
         ax.set_xticklabels(updated, rotation=rotation if needs_rotation else 0, ha="right" if needs_rotation else "center")
     else:
+        positions = ax.get_yticks()
+        ax.set_yticks(positions)
         ax.set_yticklabels(updated)
+
+
+def _copy_png_if_exists(src_base: Path, dst_base: Path) -> None:
+    src = src_base.with_suffix(".png")
+    dst = dst_base.with_suffix(".png")
+    if not src.exists():
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
 
 
 def _annotate_scatter_subset(
@@ -315,13 +335,7 @@ def _numeric_array(values) -> np.ndarray:
 
 
 def _normalize_property_name(value) -> str:
-    text = str(value).strip()
-    if not text:
-        return ""
-    p = Path(text)
-    if p.suffix.lower() == ".csv":
-        text = p.stem
-    return text.strip()
+    return shared_normalize_property_name(value)
 
 
 def _parse_properties(args, cfg: dict) -> List[str]:
@@ -437,10 +451,10 @@ def _resolve_property_columns(df: pd.DataFrame, property_name: str) -> Tuple[str
     if smiles_col is None:
         raise ValueError("Property CSV must contain a SMILES column.")
 
-    prop_lower = str(property_name).strip().lower()
+    candidate_columns = {str(col).strip().lower() for col in property_column_candidates(property_name)}
     value_col = None
     for col in df.columns:
-        if col.lower() == prop_lower:
+        if col.lower() in candidate_columns:
             value_col = col
             break
     if value_col is None:
@@ -457,7 +471,8 @@ def _resolve_property_columns(df: pd.DataFrame, property_name: str) -> Tuple[str
 
 
 def _load_property_reference(property_dir: Path, property_name: str, max_samples: Optional[int]) -> pd.DataFrame:
-    path = property_dir / f"{property_name}.csv"
+    candidates = [property_dir / name for name in property_file_candidates(property_name)]
+    path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
     if not path.exists():
         raise FileNotFoundError(f"Missing property file: {path}")
     df = pd.read_csv(path)
@@ -642,7 +657,7 @@ def _build_design_filter_audit_row(
         f5_require_novel = _to_bool(f5_run_meta.get("require_novel"), True)
         f5_require_unique = _to_bool(f5_run_meta.get("require_unique"), True)
         f5_max_sa = _to_float_or_none(f5_run_meta.get("max_sa"))
-        f5_rerank_strategy = str(f5_run_meta.get("rerank_strategy", "")).strip()
+        f5_view_compare_top_k = _to_int_or_none(f5_run_meta.get("view_compare_top_k"))
         f5_property_model_mode = str(f5_run_meta.get("property_model_mode", "")).strip()
     elif f5_cfg_active:
         f5_target_class = str(cfg_f5.get("target_class", "")).strip()
@@ -653,7 +668,7 @@ def _build_design_filter_audit_row(
         f5_require_novel = _to_bool(cfg_f5.get("require_novel", True), True)
         f5_require_unique = _to_bool(cfg_f5.get("require_unique", True), True)
         f5_max_sa = _to_float_or_none(cfg_f5.get("max_sa"))
-        f5_rerank_strategy = str(cfg_f5.get("rerank_strategy", "")).strip()
+        f5_view_compare_top_k = _to_int_or_none(cfg_f5.get("top_k"))
         f5_property_model_mode = str(cfg_f5.get("property_model_mode", "")).strip()
     else:
         f5_target_class = ""
@@ -664,45 +679,28 @@ def _build_design_filter_audit_row(
         f5_require_novel = None
         f5_require_unique = None
         f5_max_sa = np.nan
-        f5_rerank_strategy = ""
+        f5_view_compare_top_k = np.nan
         f5_property_model_mode = ""
 
     if f6_meta_active:
         f6_encoder_view = str(f6_run_meta.get("encoder_view", "")).strip()
-        f6_ood_views_requested = _stringify_list_like(f6_run_meta.get("ood_views_requested"))
-        f6_property_weight = _to_float_or_none(f6_run_meta.get("objective_property_weight"))
-        f6_ood_weight = _to_float_or_none(f6_run_meta.get("objective_ood_weight"))
-        f6_uncertainty_weight = _to_float_or_none(f6_run_meta.get("objective_uncertainty_weight"))
-        f6_constraint_weight = _to_float_or_none(f6_run_meta.get("objective_constraint_weight"))
-        f6_sa_weight = _to_float_or_none(f6_run_meta.get("objective_sa_weight"))
-        f6_descriptor_weight = _to_float_or_none(f6_run_meta.get("objective_descriptor_weight"))
-        f6_constraint_properties = _stringify_list_like(f6_run_meta.get("constraint_properties"))
-        f6_descriptor_constraints = _stringify_list_like(f6_run_meta.get("descriptor_constraints"))
-        f6_d2_distance_source = str(f6_run_meta.get("d2_distance_source", "")).strip()
+        f6_attribution_method = str(f6_run_meta.get("attribution_method", "")).strip()
+        f6_max_samples_per_group = _to_int_or_none(f6_run_meta.get("max_samples_per_group"))
+        f6_max_tokens_in_figure = _to_int_or_none(f6_run_meta.get("max_tokens_in_figure"))
     elif f6_cfg_active:
         f6_encoder_view = str(cfg_f6.get("encoder_view", "")).strip()
-        f6_ood_views_requested = _stringify_list_like(cfg_f6.get("ood_views"))
-        f6_property_weight = _to_float_or_none(cfg_f6.get("property_weight"))
-        f6_ood_weight = _to_float_or_none(cfg_f6.get("ood_weight"))
-        f6_uncertainty_weight = _to_float_or_none(cfg_f6.get("uncertainty_weight"))
-        f6_constraint_weight = _to_float_or_none(cfg_f6.get("constraint_weight"))
-        f6_sa_weight = _to_float_or_none(cfg_f6.get("sa_weight"))
-        f6_descriptor_weight = _to_float_or_none(cfg_f6.get("descriptor_weight"))
-        f6_constraint_properties = _stringify_list_like(cfg_f6.get("constraint_properties"))
-        f6_descriptor_constraints = _stringify_jsonish(cfg_f6.get("descriptor_constraints"))
-        f6_d2_distance_source = ""
+        cfg_methods = cfg_f6.get("methods")
+        if isinstance(cfg_methods, (list, tuple, set)):
+            f6_attribution_method = ",".join(str(x).strip() for x in cfg_methods if str(x).strip())
+        else:
+            f6_attribution_method = str(cfg_f6.get("attribution_method", "gradient_x_hidden")).strip()
+        f6_max_samples_per_group = _to_int_or_none(cfg_f6.get("max_samples_per_group"))
+        f6_max_tokens_in_figure = _to_int_or_none(cfg_f6.get("max_tokens_in_figure"))
     else:
         f6_encoder_view = ""
-        f6_ood_views_requested = ""
-        f6_property_weight = np.nan
-        f6_ood_weight = np.nan
-        f6_uncertainty_weight = np.nan
-        f6_constraint_weight = np.nan
-        f6_sa_weight = np.nan
-        f6_descriptor_weight = np.nan
-        f6_constraint_properties = ""
-        f6_descriptor_constraints = ""
-        f6_d2_distance_source = ""
+        f6_attribution_method = ""
+        f6_max_samples_per_group = np.nan
+        f6_max_tokens_in_figure = np.nan
 
     cand_mean_sa = _series_mean(_sa_series(candidate_df, cand_desc))
     top_mean_sa = _series_mean(_sa_series(topk_df, top_desc))
@@ -750,19 +748,12 @@ def _build_design_filter_audit_row(
         "f5_require_unique": f5_require_unique,
         "f5_target_class": f5_target_class,
         "f5_max_sa": f5_max_sa,
-        "f5_rerank_strategy": f5_rerank_strategy,
+        "f5_view_compare_top_k": f5_view_compare_top_k,
         "f5_property_model_mode": f5_property_model_mode,
         "f6_encoder_view": f6_encoder_view,
-        "f6_ood_views_requested": f6_ood_views_requested,
-        "f6_property_weight": f6_property_weight,
-        "f6_ood_weight": f6_ood_weight,
-        "f6_uncertainty_weight": f6_uncertainty_weight,
-        "f6_constraint_weight": f6_constraint_weight,
-        "f6_sa_weight": f6_sa_weight,
-        "f6_descriptor_weight": f6_descriptor_weight,
-        "f6_constraint_properties": f6_constraint_properties,
-        "f6_descriptor_constraints": f6_descriptor_constraints,
-        "f6_d2_distance_source": f6_d2_distance_source,
+        "f6_attribution_method": f6_attribution_method,
+        "f6_max_samples_per_group": f6_max_samples_per_group,
+        "f6_max_tokens_in_figure": f6_max_tokens_in_figure,
     }
 
 
@@ -787,31 +778,61 @@ def _find_first_existing(paths: Iterable[Path]) -> Optional[Path]:
 
 
 def _default_candidate_paths(results_dir: Path, property_name: str) -> List[Path]:
-    return [
-        results_dir / "step5_foundation_inverse" / property_name / "files" / f"candidate_scores_{property_name}.csv",
-        results_dir / "step5_foundation_inverse" / property_name / "files" / "candidate_scores.csv",
-        results_dir / "step5_foundation_inverse" / property_name / f"candidate_scores_{property_name}.csv",
-        results_dir / "step5_foundation_inverse" / property_name / "candidate_scores.csv",
-        results_dir / "step5_foundation_inverse" / "files" / f"candidate_scores_{property_name}.csv",
-        results_dir / "step5_foundation_inverse" / "files" / f"{property_name}_candidate_scores.csv",
-        results_dir / "step5_foundation_inverse" / "files" / "candidate_scores.csv",
-        results_dir / "step5_foundation_inverse" / f"candidate_scores_{property_name}.csv",
-        results_dir / "step5_foundation_inverse" / "candidate_scores.csv",
-    ]
+    paths: List[Path] = []
+    for alias in [_normalize_property_name(property_name), *property_column_candidates(property_name)]:
+        if not alias:
+            continue
+        paths.extend(
+            [
+                results_dir / "step5_foundation_inverse" / alias / "files" / f"candidate_scores_{alias}.csv",
+                results_dir / "step5_foundation_inverse" / alias / "files" / "candidate_scores.csv",
+                results_dir / "step5_foundation_inverse" / alias / f"candidate_scores_{alias}.csv",
+                results_dir / "step5_foundation_inverse" / alias / "candidate_scores.csv",
+                results_dir / "step5_foundation_inverse" / "files" / f"candidate_scores_{alias}.csv",
+                results_dir / "step5_foundation_inverse" / "files" / f"{alias}_candidate_scores.csv",
+                results_dir / "step5_foundation_inverse" / f"candidate_scores_{alias}.csv",
+            ]
+        )
+    paths.append(results_dir / "step5_foundation_inverse" / "files" / "candidate_scores.csv")
+    paths.append(results_dir / "step5_foundation_inverse" / "candidate_scores.csv")
+    return paths
 
 
 def _default_topk_paths(results_dir: Path, property_name: str) -> List[Path]:
-    return [
-        results_dir / "step6_ood_aware_inverse" / property_name / "files" / f"ood_objective_topk_{property_name}.csv",
-        results_dir / "step6_ood_aware_inverse" / property_name / "files" / "ood_objective_topk.csv",
-        results_dir / "step6_ood_aware_inverse" / property_name / f"ood_objective_topk_{property_name}.csv",
-        results_dir / "step6_ood_aware_inverse" / property_name / "ood_objective_topk.csv",
-        results_dir / "step6_ood_aware_inverse" / "files" / f"ood_objective_topk_{property_name}.csv",
-        results_dir / "step6_ood_aware_inverse" / "files" / f"{property_name}_ood_objective_topk.csv",
-        results_dir / "step6_ood_aware_inverse" / "files" / "ood_objective_topk.csv",
-        results_dir / "step6_ood_aware_inverse" / f"ood_objective_topk_{property_name}.csv",
-        results_dir / "step6_ood_aware_inverse" / "ood_objective_topk.csv",
-    ]
+    paths: List[Path] = []
+    for alias in [_normalize_property_name(property_name), *property_column_candidates(property_name)]:
+        if not alias:
+            continue
+        paths.extend(
+            [
+                results_dir / "step5_foundation_inverse" / alias / "files" / f"view_compare_topk_{alias}.csv",
+                results_dir / "step5_foundation_inverse" / alias / "files" / "view_compare_topk.csv",
+                results_dir / "step5_foundation_inverse" / alias / f"view_compare_topk_{alias}.csv",
+                results_dir / "step5_foundation_inverse" / alias / "view_compare_topk.csv",
+                results_dir / "step5_foundation_inverse" / "files" / f"view_compare_topk_{alias}.csv",
+                results_dir / "step5_foundation_inverse" / f"view_compare_topk_{alias}.csv",
+                results_dir / "step6_view_compare_analysis" / alias / "files" / f"view_compare_topk_{alias}.csv",
+                results_dir / "step6_view_compare_analysis" / alias / "files" / "view_compare_topk.csv",
+                results_dir / "step6_view_compare_analysis" / alias / f"view_compare_topk_{alias}.csv",
+                results_dir / "step6_view_compare_analysis" / alias / "view_compare_topk.csv",
+                results_dir / "step6_view_compare_analysis" / "files" / f"view_compare_topk_{alias}.csv",
+                results_dir / "step6_view_compare_analysis" / f"view_compare_topk_{alias}.csv",
+                results_dir / "step6_ood_aware_inverse" / alias / "files" / f"ood_objective_topk_{alias}.csv",
+                results_dir / "step6_ood_aware_inverse" / alias / "files" / "ood_objective_topk.csv",
+                results_dir / "step6_ood_aware_inverse" / alias / f"ood_objective_topk_{alias}.csv",
+                results_dir / "step6_ood_aware_inverse" / alias / "ood_objective_topk.csv",
+                results_dir / "step6_ood_aware_inverse" / "files" / f"ood_objective_topk_{alias}.csv",
+                results_dir / "step6_ood_aware_inverse" / "files" / f"{alias}_ood_objective_topk.csv",
+                results_dir / "step6_ood_aware_inverse" / f"ood_objective_topk_{alias}.csv",
+            ]
+        )
+    paths.append(results_dir / "step5_foundation_inverse" / "files" / "view_compare_topk.csv")
+    paths.append(results_dir / "step5_foundation_inverse" / "view_compare_topk.csv")
+    paths.append(results_dir / "step6_view_compare_analysis" / "files" / "view_compare_topk.csv")
+    paths.append(results_dir / "step6_view_compare_analysis" / "view_compare_topk.csv")
+    paths.append(results_dir / "step6_ood_aware_inverse" / "files" / "ood_objective_topk.csv")
+    paths.append(results_dir / "step6_ood_aware_inverse" / "ood_objective_topk.csv")
+    return paths
 
 
 def _resolve_property_file_inputs(
@@ -838,7 +859,13 @@ def _resolve_property_file_inputs(
 def _is_generic_scores_file(path: Optional[Path]) -> bool:
     if path is None:
         return False
-    return path.name in {"candidate_scores.csv", "ood_objective_scores.csv", "ood_objective_topk.csv"}
+    return path.name in {
+        "candidate_scores.csv",
+        "ood_objective_scores.csv",
+        "ood_objective_topk.csv",
+        "view_compare_scores.csv",
+        "view_compare_topk.csv",
+    }
 
 
 def _filter_property_rows_if_available(
@@ -849,8 +876,8 @@ def _filter_property_rows_if_available(
 ) -> Tuple[pd.DataFrame, Optional[str]]:
     if "property" not in df.columns:
         return df, None
-    prop_series = df["property"].astype(str).str.strip()
-    match_mask = prop_series == property_name
+    prop_series = df["property"].astype(str).map(_normalize_property_name)
+    match_mask = prop_series == _normalize_property_name(property_name)
     if bool(match_mask.any()):
         return df.loc[match_mask].copy(), None
     seen = [x for x in sorted(prop_series.unique().tolist()) if x]
@@ -1157,11 +1184,12 @@ def _target_excess_from_predictions(
 
 
 def _target_excess_axis_label(property_name: str, target_mode: str) -> str:
+    property_label = property_display_name(property_name)
     mode = str(target_mode).strip().lower()
     if mode == "ge":
-        return f"Target excess (predicted {property_name} - target)"
+        return f"Target excess (predicted {property_label} - target)"
     if mode == "le":
-        return f"Target excess (target - predicted {property_name})"
+        return f"Target excess (target - predicted {property_label})"
     return "Signed error (prediction - target)"
 
 
@@ -1248,7 +1276,7 @@ def _resolve_reference_class(
 
     class_map = cfg_step7.get("reference_classes", {}) or {}
     if isinstance(class_map, dict):
-        text = str(class_map.get(property_name, "")).strip().lower()
+        text = str(_lookup_property_setting(class_map, property_name) or "").strip().lower()
         if text:
             return text
 
@@ -1271,7 +1299,7 @@ def _resolve_reference_class(
                 return uniq[0]
 
     # Use F5 target_class when this property is the active F5 target.
-    f5_prop = str(cfg_f5.get("property", "")).strip()
+    f5_prop = _normalize_property_name(cfg_f5.get("property", ""))
     if f5_prop == property_name:
         text = str(cfg_f5.get("target_class", "")).strip().lower()
         if text:
@@ -1280,7 +1308,7 @@ def _resolve_reference_class(
     # Optional per-property class map from F5 configs.
     f5_class_map = cfg_f5.get("target_classes", {}) or {}
     if isinstance(f5_class_map, dict):
-        text = str(f5_class_map.get(property_name, "")).strip().lower()
+        text = str(_lookup_property_setting(f5_class_map, property_name) or "").strip().lower()
         if text:
             return text
 
@@ -1869,7 +1897,7 @@ def _plot_view_summary_figure(view_summary_df: pd.DataFrame, output_base: Path, 
         axes[2].set_xticklabels(labels, rotation=20, ha="right")
         axes[2].grid(axis="y", alpha=0.25)
 
-        fig.suptitle(f"F7 View Summary: {property_name}", fontsize=16, fontweight="bold")
+        fig.suptitle(f"F7 View Summary: {property_display_name(property_name)}", fontsize=16, fontweight="bold")
         _save_figure_png(fig, output_base)
         plt.close(fig)
 
@@ -1881,7 +1909,7 @@ def main(args):
     config = load_config(args.config)
     cfg_step7 = config.get("chem_physics_analysis", {}) or {}
     cfg_f5 = config.get("foundation_inverse", {}) or {}
-    cfg_f6 = config.get("ood_aware_inverse", {}) or {}
+    cfg_f6 = config.get("dit_interpretability", {}) or config.get("view_compare_analysis", {}) or config.get("ood_aware_inverse", {}) or {}
 
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -1908,6 +1936,16 @@ def main(args):
         top_k_override = _to_int_or_none(cfg_step7.get("top_k"))
     if top_k_override is None:
         top_k_override = 100
+    min_candidates_for_analysis = _to_int_or_none(cfg_step7.get("min_candidates_for_analysis"))
+    if min_candidates_for_analysis is None:
+        min_candidates_for_analysis = 100
+    min_topk_for_analysis = _to_int_or_none(cfg_step7.get("min_topk_for_analysis"))
+    if min_topk_for_analysis is None:
+        min_topk_for_analysis = 10
+    copy_property_figures_to_top_level = _to_bool(
+        cfg_step7.get("copy_property_figures_to_top_level", True),
+        True,
+    )
 
     generate_figures = args.generate_figures
     if generate_figures is None:
@@ -1922,7 +1960,7 @@ def main(args):
     reference_class_override = str(args.reference_class or "").strip().lower() or None
     reference_class_filter_enabled = args.reference_class_filter_enabled
     if reference_class_filter_enabled is None:
-        reference_class_filter_enabled = _to_bool(cfg_step7.get("reference_class_filter_enabled", True), True)
+        reference_class_filter_enabled = _to_bool(cfg_step7.get("reference_class_filter_enabled", False), False)
     reference_class_filter_enabled = bool(reference_class_filter_enabled)
 
     sa_score_fn = _load_sa_score_fn()
@@ -1975,7 +2013,7 @@ def main(args):
         )
 
         if topk_path is None:
-            msg = f"{prop}: top-k file not found (set step6 output or topk_scores_template)."
+            msg = f"{prop}: top-k file not found (set F5 view_compare_topk output or topk_scores_template)."
             if skip_missing:
                 skipped.append(msg)
                 continue
@@ -1991,7 +2029,7 @@ def main(args):
         if multi_property_run and _is_generic_scores_file(topk_path) and "property" not in topk_df.columns:
             msg = (
                 f"{prop}: only generic top-k file found ({topk_path}) without a property column. "
-                "Use property-specific file naming (ood_objective_topk_<PROPERTY>.csv)."
+                "Use property-specific file naming (view_compare_topk_<PROPERTY>.csv)."
             )
             if skip_missing:
                 skipped.append(msg)
@@ -2020,6 +2058,10 @@ def main(args):
         if top_k_override is not None and top_k_override > 0 and len(topk_df) > top_k_override:
             if "ood_aware_rank" in topk_df.columns:
                 topk_df = topk_df.sort_values("ood_aware_rank").head(int(top_k_override)).copy()
+            elif "property_rank_within_view" in topk_df.columns:
+                rank_series = pd.to_numeric(topk_df["property_rank_within_view"], errors="coerce")
+                topk_df = topk_df.loc[rank_series <= int(top_k_override)].copy()
+                topk_df = topk_df.sort_values(["proposal_view", "property_rank_within_view"], kind="mergesort")
             else:
                 topk_df = topk_df.head(int(top_k_override)).copy()
 
@@ -2044,6 +2086,25 @@ def main(args):
                     candidate_df = topk_df.copy()
         else:
             candidate_df = topk_df.copy()
+
+        if len(candidate_df) < int(min_candidates_for_analysis):
+            msg = (
+                f"{prop}: candidate pool too small for stable F7 analysis "
+                f"({len(candidate_df)} < {int(min_candidates_for_analysis)})."
+            )
+            if skip_missing:
+                skipped.append(msg)
+                continue
+            raise RuntimeError(msg)
+        if len(topk_df) < int(min_topk_for_analysis):
+            msg = (
+                f"{prop}: top-k pool too small for stable F7 analysis "
+                f"({len(topk_df)} < {int(min_topk_for_analysis)})."
+            )
+            if skip_missing:
+                skipped.append(msg)
+                continue
+            raise RuntimeError(msg)
 
         target, target_mode, epsilon = _resolve_target_config(
             prop,
@@ -2200,12 +2261,10 @@ def main(args):
             "topk_novel_rate": design_audit_row["topk_novel_rate"],
             "candidate_sa_lt_max_rate": design_audit_row["candidate_sa_lt_max_rate"],
             "topk_sa_lt_max_rate": design_audit_row["topk_sa_lt_max_rate"],
-            "f6_property_weight": design_audit_row["f6_property_weight"],
-            "f6_ood_weight": design_audit_row["f6_ood_weight"],
-            "f6_uncertainty_weight": design_audit_row["f6_uncertainty_weight"],
-            "f6_constraint_weight": design_audit_row["f6_constraint_weight"],
-            "f6_sa_weight": design_audit_row["f6_sa_weight"],
-            "f6_descriptor_weight": design_audit_row["f6_descriptor_weight"],
+            "f6_encoder_view": design_audit_row.get("f6_encoder_view", ""),
+            "f6_attribution_method": design_audit_row.get("f6_attribution_method", ""),
+            "f6_max_samples_per_group": design_audit_row.get("f6_max_samples_per_group", np.nan),
+            "f6_max_tokens_in_figure": design_audit_row.get("f6_max_tokens_in_figure", np.nan),
         }
         metric_rows.append(metric_row)
         save_csv(pd.DataFrame([metric_row]), prop_step_dirs["metrics_dir"] / "metrics_chem_physics.csv", index=False)
@@ -2291,6 +2350,21 @@ def main(args):
                     output_base=prop_step_dirs["figures_dir"] / f"figure_f7_view_summary_{prop}",
                     property_name=prop,
                 )
+            if copy_property_figures_to_top_level:
+                figure_bases = [
+                    prop_step_dirs["figures_dir"] / f"figure_f7_chem_physics_{prop}",
+                    prop_step_dirs["figures_dir"] / f"figure_f7_descriptors_{prop}",
+                    prop_step_dirs["figures_dir"] / f"figure_f7_motif_enrichment_{prop}",
+                    prop_step_dirs["figures_dir"] / f"figure_f7_physics_rules_{prop}",
+                    prop_step_dirs["figures_dir"] / f"figure_f7_property_ood_landscape_{prop}",
+                    prop_step_dirs["figures_dir"] / f"figure_f7_nearest_neighbor_{prop}",
+                    prop_step_dirs["figures_dir"] / f"figure_f7_view_summary_{prop}",
+                ]
+                for src_base in figure_bases:
+                    _copy_png_if_exists(
+                        src_base,
+                        step_dirs["figures_dir"] / src_base.name,
+                    )
 
         save_json(
             {
@@ -2306,6 +2380,9 @@ def main(args):
                 "target_mode": target_mode,
                 "epsilon": epsilon,
                 "generate_figures": bool(generate_figures),
+                "copy_property_figures_to_top_level": bool(copy_property_figures_to_top_level),
+                "min_candidates_for_analysis": int(min_candidates_for_analysis),
+                "min_topk_for_analysis": int(min_topk_for_analysis),
                 "design_filter_audit": design_audit_row,
             },
             prop_step_dirs["files_dir"] / "run_meta.json",
@@ -2394,6 +2471,9 @@ def main(args):
             ),
             "reference_class_override": reference_class_override or "",
             "generate_figures": bool(generate_figures),
+            "copy_property_figures_to_top_level": bool(copy_property_figures_to_top_level),
+            "min_candidates_for_analysis": int(min_candidates_for_analysis),
+            "min_topk_for_analysis": int(min_topk_for_analysis),
             "design_filter_audit_path": str(step_dirs["files_dir"] / "design_filter_audit.csv"),
         },
         step_dirs["files_dir"] / "run_meta.json",

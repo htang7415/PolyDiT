@@ -15,8 +15,8 @@
 #   ood.*
 # F5 foundation inverse (resample):
 #   foundation_inverse.*
-# F6 OOD-aware inverse objective:
-#   ood_aware_inverse.*
+# F6 DiT interpretability:
+#   dit_interpretability.*
 # F7 chemistry/physics analysis:
 #   chem_physics_analysis.*
 # F8 paper package export:
@@ -33,24 +33,24 @@ paths:
 
 data:
   random_seed: 42
-  max_samples_d1: 1000000
-  max_samples_d2: 12888
+  max_samples_d1: null
+  max_samples_d2: null
 
 # F0/F1 view selection
-alignment_views: ["smiles"]
+alignment_views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
 
 views:
   smiles:
     enabled: true
   smiles_bpe:
-    enabled: false
+    enabled: true
   selfies:
-    enabled: false
+    enabled: true
   group_selfies:
-    enabled: false
+    enabled: true
     tokenizer_path: "../Bi_Diffusion_Group_SELFIES/results/tokenizer.pkl"
   graph:
-    enabled: false
+    enabled: true
 
 # F1 embedding-figure args
 alignment_embeddings:
@@ -59,7 +59,8 @@ alignment_embeddings:
 # F2 retrieval args
 evaluation:
   recall_ks: [1, 5, 10]
-  max_samples_per_dataset: 5000
+  max_samples_d1: 5000
+  max_samples_d2: null
   generate_figures: true
 
 # F4 OOD args
@@ -76,20 +77,19 @@ property:
     "Tm.csv",
     "Td.csv",
     "Eg.csv",
-    "cohesive_energy_density.csv",
-    "electron_affinity.csv",
-    "electron_injection_barrier.csv",
-    "ionization_energy.csv",
+    "Ced.csv",
+    "Ea.csv",
+    "Eib.csv",
+    "In.csv",
   ]
-  max_samples: null
   test_ratio: 0.1            # 10% holdout; remaining 90% used for CV and final training
   model_type: "mlp"
-  views: ["smiles"]
+  views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]   # F3 trains and compares all view-specific heads
   enable_multiview_mean_head: false
   generate_figures: true
   hyperparameter_tuning:
     cv_folds: 5
-    n_trials: 150
+    n_trials: 250
     enabled: true
     tuning_epochs: 50
     tuning_patience: 10
@@ -112,36 +112,36 @@ foundation_inverse:
     Tm: 300.0
     Td: 450.0
     Eg: 6.0
-    cohesive_energy_density: 126.66
-    electron_affinity: 3.10
-    electron_injection_barrier: 1.82
-    ionization_energy: 5.64
+    Ced: 125
+    Ea: 3.10
+    Eib: 1.80
+    In: 5.60
   target_modes:
     Tg: ge
     Tm: ge
     Td: ge
     Eg: ge
-    cohesive_energy_density: ge
-    electron_affinity: ge
-    electron_injection_barrier: le
-    ionization_energy: le
+    Ced: ge
+    Ea: ge
+    Eib: le
+    In: le
   epsilons:
     Tg: 0.0
     Tm: 0.0
     Td: 0.0
     Eg: 0.0
-    cohesive_energy_density: 0.0
-    electron_affinity: 0.0
-    electron_injection_barrier: 0.0
-    ionization_energy: 0.0
+    Ced: 0.0
+    Ea: 0.0
+    Eib: 0.0
+    In: 0.0
   target_mode: "ge"  # window: |pred-target|<=epsilon, ge: pred>=target, le: pred<=target
   epsilon: 0.0
-  sampling_mode: "fixed_budget"   # fixed_budget: compare proposal views fairly; resample: discovery mode
-  candidate_budget_per_view: 10000
+  sampling_mode: "resample"       # resample 100 per attempt until each proposal view reaches sampling_target accepted polymers
   sampling_target: 100
   sampling_num_per_batch: 100
   sampling_batch_size: 100
   sampling_max_batches: 10000
+  top_k: 100                   # per-view top-k exported for downstream chemistry analysis
   proposal_views: "all"         # compare proposal views under one shared smiles property scorer
   sampling_temperature: null
   sampling_num_atoms: null
@@ -151,44 +151,28 @@ foundation_inverse:
   target_class: ""                  # empty string disables class filter
   require_validity: true
   require_two_stars: true
-  require_novel: false              # benchmark: compute novelty post hoc, do not filter online
-  require_unique: false             # benchmark: compute uniqueness post hoc, do not filter online
+  require_novel: true
+  require_unique: true
   max_sa: 3.6
   per_view_min_hits: 0
   per_view_quota_relax_after_batches: 0
-  property_model_mode: "single"     # single: use one MLP (encoder_view's); all: ensemble all view MLPs (committee)
-  property_model_path: ""           # explicit MLP path; auto-resolved from step3 results if empty (single mode only)
-  rerank_strategy: "ood_prop"
-  rerank_top_k: 100
+  property_model_mode: "single"     # F5 uses one shared smiles property head for all proposal views
+  property_model_path: ""           # explicit scorer path; auto-resolved from F3 results if empty
   generate_figures: true
-  ood_k: 5
-  # ood_prop = cosine dist to D2 (property MLP training set); ood_gen = cosine dist to D1 (backbone training set)
-  encoder_view: "smiles"           # backbone used to embed candidates for property scoring and D2 OOD distance
+  encoder_view: "smiles"           # backbone used to embed candidates for property scoring
 
-# F6 OOD-aware inverse args
-ood_aware_inverse:
+# F6 DiT interpretability args
+dit_interpretability:
   enabled: true
   run_all_properties: false
-  encoder_view: "smiles"        # backbone for D2 OOD distance
-  ood_views: "smiles"           # views used to compute per-view D2 distances, then averaged; "all" or comma-separated list
+  encoder_view: "smiles"        # shared scorer view used in F5/F6
   property: "Tg"
-  target: null
-  target_mode: ""
-  epsilon: null
-  top_k: 100
-  property_weight: 0.6
-  ood_weight: 0.2
-  uncertainty_weight: 0.15      # penalize committee disagreement (prediction std)
-  constraint_weight: 0.0        # disable non-target soft constraints
-  sa_weight: 0.0                # optional SA penalty term
-  descriptor_weight: 0.0        # disable descriptor constraints/penalties
-  constraint_properties: []     # empty => no additional property constraints
-  descriptor_constraints: {}
-  constraint_weights: {}        # optional per-property multipliers, e.g. {Tm: 2.0}
-  normalization: "minmax"       # minmax|rank|none
-  ood_k: 5
-  ood_gen_weight: 0.0  # informational only by default; set >0 to penalize generative OOD
-  compute_d2_distance_if_missing: true
+  property_model_path: ""
+  methods: ["gradient_x_hidden", "integrated_gradients", "attention_rollout"]
+  ig_steps: 16
+  faithfulness_top_k: 3
+  max_samples_per_group: 24
+  max_tokens_in_figure: 16
   generate_figures: true
 
 # F7 chemistry/physics analysis args
@@ -197,11 +181,16 @@ chem_physics_analysis:
   properties: ["Tg"]
   # Optional path templates with {property}, e.g.:
   # "results/step5_foundation_inverse/files/candidate_scores_{property}.csv"
+  # "results/step5_foundation_inverse/files/view_compare_topk_{property}.csv"
   candidate_scores_template: ""
   topk_scores_template: ""
   max_reference_samples: null
   top_k: 100
   generate_figures: true
+  reference_class_filter_enabled: false
+  min_candidates_for_analysis: 100
+  min_topk_for_analysis: 10
+  copy_property_figures_to_top_level: true
   # Optional per-property target config for physics panels.
   # If omitted, Step7 uses property_hit/abs_error from input files when available.
   targets: {}
@@ -243,7 +232,7 @@ smiles_encoder:
   timestep: 1
   batch_size: 256
   device: "auto"
-  max_samples_d1: null
+  max_samples_d1: 500000
   max_samples_d2: null
 
 smiles_bpe_encoder:
@@ -259,7 +248,7 @@ smiles_bpe_encoder:
   timestep: 1
   batch_size: 256
   device: "auto"
-  max_samples_d1: null
+  max_samples_d1: 500000
   max_samples_d2: null
 
 selfies_encoder:
@@ -275,7 +264,7 @@ selfies_encoder:
   timestep: 1
   batch_size: 256
   device: "auto"
-  max_samples_d1: null
+  max_samples_d1: 500000
   max_samples_d2: null
 
 group_selfies_encoder:
@@ -291,7 +280,7 @@ group_selfies_encoder:
   timestep: 1
   batch_size: 128
   device: "auto"
-  max_samples_d1: null
+  max_samples_d1: 500000
   max_samples_d2: null
 
 graph_encoder:
@@ -308,5 +297,5 @@ graph_encoder:
   timestep: 1
   batch_size: 64
   device: "auto"
-  max_samples_d1: null
+  max_samples_d1: 500000
   max_samples_d2: null

@@ -76,9 +76,21 @@ def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: st
         except Exception:
             continue
     for ax in fig.axes:
+        try:
+            ax.set_title("")
+            ax.set_title("", loc="left")
+            ax.set_title("", loc="right")
+        except Exception:
+            pass
         legend = ax.get_legend()
         if legend is not None:
             legend.set_loc(legend_loc)
+    try:
+        suptitle = getattr(fig, "_suptitle", None)
+        if suptitle is not None:
+            suptitle.set_text("")
+    except Exception:
+        pass
 
 
 def _save_figure_png(fig, output_base: Path) -> None:

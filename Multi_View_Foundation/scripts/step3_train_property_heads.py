@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import random
 import sys
 import importlib.util
 import json
@@ -46,6 +47,11 @@ from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
 from src.utils.checkpoint_loading import load_backbone_checkpoint
+from src.utils.property_names import (
+    normalize_property_name,
+    property_column_candidates,
+    property_file_candidates,
+)
 
 
 REPRESENTATION_ORDER = [
@@ -385,9 +391,14 @@ def _collect_property_files(property_dir: Path, file_list) -> List[Path]:
             file_list = [file_list]
         paths = []
         for name in file_list:
-            path = Path(name)
-            if not path.is_absolute():
-                path = property_dir / name
+            path = Path(str(name))
+            if path.is_absolute():
+                paths.append(path)
+                continue
+            candidates = [property_dir / path.name]
+            for candidate_name in property_file_candidates(path.name):
+                candidates.append(property_dir / candidate_name)
+            path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
             paths.append(path)
         return paths
     return sorted(property_dir.glob("*.csv"))
@@ -460,9 +471,21 @@ def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: st
         except Exception:
             continue
     for ax in fig.axes:
+        try:
+            ax.set_title("")
+            ax.set_title("", loc="left")
+            ax.set_title("", loc="right")
+        except Exception:
+            pass
         legend = ax.get_legend()
         if legend is not None:
             legend.set_loc(legend_loc)
+    try:
+        suptitle = getattr(fig, "_suptitle", None)
+        if suptitle is not None:
+            suptitle.set_text("")
+    except Exception:
+        pass
 
 
 def _save_figure_png(fig, output_base: Path) -> None:
@@ -1293,9 +1316,14 @@ def _resolve_property_columns(df: pd.DataFrame, property_name: str) -> tuple[str
     if smiles_col is None:
         raise ValueError("Property CSV must contain SMILES or p_smiles column.")
 
-    if property_name in df.columns:
-        value_col = property_name
-    else:
+    candidate_columns = property_column_candidates(property_name)
+    normalized_candidates = {str(col).strip().lower(): str(col) for col in candidate_columns}
+    value_col = None
+    for col in df.columns:
+        if str(col).strip().lower() in normalized_candidates:
+            value_col = col
+            break
+    if value_col is None:
         candidates = [c for c in df.columns if c != smiles_col]
         if not candidates:
             raise ValueError("Property CSV must contain a value column.")
@@ -1902,7 +1930,14 @@ def main(args):
         raise ValueError("property.test_ratio must be in (0, 1).")
 
     seed = int(config.get("data", {}).get("random_seed", 42))
-    max_prop_samples = _to_int_or_none(prop_cfg.get("max_samples"))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     mlp_hpo_cfg = prop_cfg.get("hyperparameter_tuning")
     if mlp_hpo_cfg is None:
         mlp_hpo_cfg = config.get("hyperparameter_tuning", {})
@@ -1922,7 +1957,7 @@ def main(args):
     rows_by_property: Dict[str, List[dict]] = {}
     for prop_path in property_files:
         df = pd.read_csv(prop_path)
-        prop_name = prop_path.stem
+        prop_name = normalize_property_name(prop_path.stem)
         prop_step_dirs = ensure_step_dirs(results_dir, "step3_property", prop_name)
         save_config(config, prop_step_dirs["files_dir"] / "config_used.yaml")
         prop_model_dir = prop_step_dirs["files_dir"]
@@ -1933,8 +1968,6 @@ def main(args):
         df = df.rename(columns={smiles_col: "p_smiles", value_col: "target"})
         df["target"] = pd.to_numeric(df["target"], errors="coerce")
         df = df.dropna(subset=["target"])
-        if max_prop_samples is not None:
-            df = df.head(max_prop_samples)
 
         if df.empty:
             print(f"Skipping {prop_name}: no valid rows.")

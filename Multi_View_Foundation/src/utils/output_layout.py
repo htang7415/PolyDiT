@@ -17,16 +17,15 @@ from typing import Iterable, Optional
 
 import numpy as np
 
+from src.utils.property_names import normalize_property_name
+
 
 def _normalize_optional_property_name(property_name: Optional[str]) -> Optional[str]:
     if property_name is None:
         return None
-    text = str(property_name).strip()
+    text = normalize_property_name(property_name)
     if not text:
         return None
-    p = Path(text)
-    if p.suffix.lower() == ".csv":
-        text = p.stem
     text = text.replace("/", "_").replace("\\", "_").strip()
     return text or None
 

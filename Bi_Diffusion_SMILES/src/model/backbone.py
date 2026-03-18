@@ -32,8 +32,9 @@ class MultiHeadAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+        attention_mask: Optional[torch.Tensor] = None,
+        return_attention: bool = False,
+    ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass.
 
         Args:
@@ -51,8 +52,10 @@ class MultiHeadAttention(nn.Module):
         v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         # Use PyTorch SDPA to unlock FlashAttention-style kernels on modern GPUs.
+        # For interpretability we fall back to the explicit attention path so the
+        # layer can return attention probabilities.
         sdpa = getattr(F, "scaled_dot_product_attention", None)
-        if sdpa is not None:
+        if sdpa is not None and not return_attention:
             sdpa_mask = None
             if attention_mask is not None:
                 # SDPA expects True for positions that are visible.
@@ -71,11 +74,13 @@ class MultiHeadAttention(nn.Module):
                 mask = attention_mask.unsqueeze(1).unsqueeze(2)
                 attn_scores = attn_scores.masked_fill(mask == 0, -1e9)
             attn_probs = F.softmax(attn_scores, dim=-1)
-            attn_probs = self.dropout(attn_probs)
-            out = torch.matmul(attn_probs, v)
+            attn_probs_dropped = self.dropout(attn_probs)
+            out = torch.matmul(attn_probs_dropped, v)
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size)
-
-        return self.out_proj(out)
+        out = self.out_proj(out)
+        if return_attention:
+            return out, attn_probs
+        return out
 
 
 class FeedForward(nn.Module):
@@ -120,12 +125,18 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+        attention_mask: Optional[torch.Tensor] = None,
+        return_attention: bool = False,
+    ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
         # Self-attention with residual
-        x = x + self.attn(self.norm1(x), attention_mask)
+        attn_out = self.attn(self.norm1(x), attention_mask, return_attention=return_attention)
+        if return_attention:
+            attn_out, attn_probs = attn_out
+        x = x + attn_out
         # FFN with residual
         x = x + self.ffn(self.norm2(x))
+        if return_attention:
+            return x, attn_probs
         return x
 
 
@@ -297,6 +308,41 @@ class DiffusionBackbone(nn.Module):
             x = self.final_norm(x)
 
         return x
+
+    def get_hidden_states_and_attentions(
+        self,
+        input_ids: torch.Tensor,
+        timesteps: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        layer_idx: int = -1,
+    ) -> Tuple[torch.Tensor, list[torch.Tensor]]:
+        """Get hidden states and per-layer attention probabilities.
+
+        Attention tensors have shape [batch, heads, seq_len, seq_len].
+        """
+        batch_size, seq_len = input_ids.shape
+
+        token_emb = self.token_embedding(input_ids)
+        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
+        pos_emb = self.position_embedding(positions)
+
+        if timesteps.dim() == 2:
+            timesteps = timesteps.squeeze(-1)
+        time_emb = self.timestep_embedding(timesteps).unsqueeze(1)
+
+        x = token_emb + pos_emb + time_emb
+        x = self.embedding_dropout(x)
+
+        num_layers = len(self.layers) if layer_idx == -1 else layer_idx + 1
+        attention_maps: list[torch.Tensor] = []
+        for i in range(num_layers):
+            x, attn = self.layers[i](x, attention_mask, return_attention=True)
+            attention_maps.append(attn)
+
+        if layer_idx == -1:
+            x = self.final_norm(x)
+
+        return x, attention_maps
 
     def get_pooled_output(
         self,

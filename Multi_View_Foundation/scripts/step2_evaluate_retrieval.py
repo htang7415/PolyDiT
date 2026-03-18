@@ -93,9 +93,21 @@ def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: st
         except Exception:
             continue
     for ax in fig.axes:
+        try:
+            ax.set_title("")
+            ax.set_title("", loc="left")
+            ax.set_title("", loc="right")
+        except Exception:
+            pass
         legend = ax.get_legend()
         if legend is not None:
             legend.set_loc(legend_loc)
+    try:
+        suptitle = getattr(fig, "_suptitle", None)
+        if suptitle is not None:
+            suptitle.set_text("")
+    except Exception:
+        pass
 
 
 def _save_figure_png(fig, output_base: Path) -> None:
@@ -399,7 +411,9 @@ def main(args):
 
     views = config.get("alignment_views", ["smiles"])
     ks = config.get("evaluation", {}).get("recall_ks", [1, 5, 10])
-    max_eval_samples = _to_int_or_none(config.get("evaluation", {}).get("max_samples_per_dataset"))
+    eval_cfg = config.get("evaluation", {}) or {}
+    max_eval_d1 = _to_int_or_none(eval_cfg.get("max_samples_d1"))
+    max_eval_d2 = _to_int_or_none(eval_cfg.get("max_samples_d2"))
 
     view_data = {}
     view_dims = {}
@@ -420,9 +434,10 @@ def main(args):
             )
             if ids is None or emb_aligned is None:
                 continue
-            if max_eval_samples is not None and len(ids) > max_eval_samples:
-                ids = ids[:max_eval_samples]
-                emb_aligned = emb_aligned[:max_eval_samples]
+            dataset_cap = max_eval_d1 if dataset == "d1" else max_eval_d2
+            if dataset_cap is not None and len(ids) > dataset_cap:
+                ids = ids[:dataset_cap]
+                emb_aligned = emb_aligned[:dataset_cap]
             view_data[view][dataset] = {"embeddings": emb_aligned, "ids": ids}
             view_dims[view] = emb_aligned.shape[1]
 
