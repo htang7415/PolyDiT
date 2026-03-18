@@ -10,6 +10,7 @@ import pandas as pd
 
 from src.evaluation.foundation_inverse import compute_property_hits
 from src.utils.output_layout import save_csv, save_json
+from src.utils.polymer_patterns import POLYMER_MOTIF_SMARTS
 from src.utils.property_names import property_display_name
 from src.utils.visualization import (
     normalize_view_name,
@@ -38,19 +39,6 @@ except Exception:  # pragma: no cover
     Descriptors = None
     rdMolDescriptors = None
 
-
-POLYMER_MOTIF_SMARTS = {
-    "polyimide": "[#6][CX3](=[OX1])[NX3][CX3](=[OX1])[#6]",
-    "polyester": "[#6][CX3](=[OX1])[OX2][#6]",
-    "polyamide": "[#6][CX3](=[OX1])[NX3;!$([N]([C](=O))[C](=O))][#6;!$([CX3](=[OX1]))]",
-    "polyurethane": "[#6][OX2][CX3](=[OX1])[NX3][#6]",
-    "polyether": "[#6;!$([CX3](=[OX1]))][OX2][#6;!$([CX3](=[OX1]))]",
-    "polysiloxane": "[Si][OX2][Si]",
-    "polycarbonate": "[#6][OX2][CX3](=[OX1])[OX2][#6]",
-    "polysulfone": "[#6][SX4](=[OX1])(=[OX1])[#6]",
-    "polyacrylate": "[#6]-[#6](=O)-[#8]",
-    "polystyrene": "[#6]-[#6](c1ccccc1)-[#6]",
-}
 
 DESCRIPTOR_COLUMNS = [
     "mol_wt",

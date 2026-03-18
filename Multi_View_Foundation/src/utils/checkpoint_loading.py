@@ -28,6 +28,7 @@ def load_backbone_checkpoint(
     strict: bool = False,
     prefix: str = "backbone.",
     label: str = "backbone",
+    error_on_mismatch: bool = True,
 ) -> torch.nn.modules.module._IncompatibleKeys:
     """Load checkpoint weights into a backbone and report key mismatches.
 
@@ -49,9 +50,29 @@ def load_backbone_checkpoint(
 
     incompatible = backbone.load_state_dict(final_state, strict=strict)
     if incompatible.missing_keys or incompatible.unexpected_keys:
-        print(f"Warning: mismatch when loading {label} weights from {checkpoint_path}.")
+        message = f"Mismatch when loading {label} weights from {checkpoint_path}."
+        print(f"Warning: {message}")
         if incompatible.missing_keys:
             print(f"  Missing keys: {len(incompatible.missing_keys)}")
         if incompatible.unexpected_keys:
             print(f"  Unexpected keys: {len(incompatible.unexpected_keys)}")
+        if error_on_mismatch:
+            missing_preview = ", ".join(incompatible.missing_keys[:5])
+            unexpected_preview = ", ".join(incompatible.unexpected_keys[:5])
+            details = []
+            if incompatible.missing_keys:
+                details.append(
+                    f"missing={len(incompatible.missing_keys)}"
+                    + (f" [{missing_preview}]" if missing_preview else "")
+                )
+            if incompatible.unexpected_keys:
+                details.append(
+                    f"unexpected={len(incompatible.unexpected_keys)}"
+                    + (f" [{unexpected_preview}]" if unexpected_preview else "")
+                )
+            joined = "; ".join(details) if details else "unknown mismatch"
+            raise RuntimeError(
+                f"{message} Refusing to continue with partially loaded weights ({joined}). "
+                "Pass error_on_mismatch=False only if this mismatch is intentional."
+            )
     return incompatible

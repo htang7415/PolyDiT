@@ -55,7 +55,7 @@ def _iter_unique_paths(primary_path: Path, legacy_paths: Optional[Iterable[Path]
     if legacy_paths:
         candidates.extend(Path(p) for p in legacy_paths)
     for path in candidates:
-        resolved = str(path.resolve()) if path.exists() else str(path)
+        resolved = str(path.resolve(strict=False))
         if resolved in seen:
             continue
         seen.add(resolved)

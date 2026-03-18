@@ -7,9 +7,8 @@ import math
 from pathlib import Path
 import sys
 import time
-import importlib
-import importlib.util
 from collections import Counter
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -29,8 +28,23 @@ from src.analysis.view_compare import (
     plot_view_compare,
     save_view_compare_outputs,
 )
+from src.utils.foundation_assets import (
+    SUPPORTED_VIEWS,
+    VIEW_SPECS,
+    TorchPropertyPredictor as _TorchPropertyPredictor,
+    default_property_model_path as _default_property_model_path,
+    load_property_model as _load_property_model,
+    load_view_assets as _load_view_assets,
+    resolve_view_device as _resolve_view_device,
+)
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
-from src.utils.checkpoint_loading import load_backbone_checkpoint
+from src.utils.runtime import (
+    load_module as _shared_load_module,
+    resolve_path as _shared_resolve_path,
+    to_bool as _to_bool,
+    to_int_or_none as _to_int_or_none,
+)
+from src.utils.polymer_patterns import POLYMER_CLASS_PATTERNS
 from src.utils.property_names import (
     normalize_property_name as shared_normalize_property_name,
     property_display_name,
@@ -44,11 +58,6 @@ from src.utils.visualization import (
     view_color,
     view_label,
 )
-
-try:
-    import joblib
-except Exception:  # pragma: no cover
-    joblib = None
 
 try:  # pragma: no cover
     import matplotlib
@@ -79,57 +88,6 @@ try:
 except Exception:  # pragma: no cover
     sascorer = None
 
-
-SUPPORTED_VIEWS = ("smiles", "smiles_bpe", "selfies", "group_selfies", "graph")
-
-VIEW_SPECS = {
-    "smiles": {
-        "type": "sequence",
-        "encoder_key": "smiles_encoder",
-        "tokenizer_module": REPO_ROOT / "Bi_Diffusion_SMILES" / "src" / "data" / "tokenizer.py",
-        "tokenizer_class": "PSmilesTokenizer",
-        "tokenizer_file": "tokenizer.json",
-    },
-    "smiles_bpe": {
-        "type": "sequence",
-        "encoder_key": "smiles_bpe_encoder",
-        "tokenizer_module": REPO_ROOT / "Bi_Diffusion_SMILES_BPE" / "src" / "data" / "tokenizer.py",
-        "tokenizer_class": "PSmilesTokenizer",
-        "tokenizer_file": "tokenizer.json",
-    },
-    "selfies": {
-        "type": "sequence",
-        "encoder_key": "selfies_encoder",
-        "tokenizer_module": REPO_ROOT / "Bi_Diffusion_SELFIES" / "src" / "data" / "selfies_tokenizer.py",
-        "tokenizer_class": "SelfiesTokenizer",
-        "tokenizer_file": "tokenizer.json",
-    },
-    "group_selfies": {
-        "type": "sequence",
-        "encoder_key": "group_selfies_encoder",
-        "tokenizer_module": REPO_ROOT / "Bi_Diffusion_Group_SELFIES" / "src" / "data" / "tokenizer.py",
-        "tokenizer_class": "GroupSELFIESTokenizer",
-        "tokenizer_file": "tokenizer.pkl",
-    },
-    "graph": {
-        "type": "graph",
-        "encoder_key": "graph_encoder",
-    },
-}
-
-DEFAULT_POLYMER_PATTERNS = {
-    "polyimide": "[#6][CX3](=[OX1])[NX3][CX3](=[OX1])[#6]",
-    "polyester": "[#6][CX3](=[OX1])[OX2][#6]",
-    "polyamide": "[#6][CX3](=[OX1])[NX3;!$([N]([C](=O))[C](=O))][#6;!$([CX3](=[OX1]))]",
-    "polyurethane": "[#6][OX2][CX3](=[OX1])[NX3][#6]",
-    "polyether": "[#6;!$([CX3](=[OX1]))][OX2][#6;!$([CX3](=[OX1]))]",
-    "polysiloxane": "[Si][OX2][Si]",
-    "polycarbonate": "[#6][OX2][CX3](=[OX1])[OX2][#6]",
-    "polysulfone": "[#6][SX4](=[OX1])(=[OX1])[#6]",
-    "polyacrylate": "[#6]-[#6](=O)-[#8]",
-    "polystyrene": "[#6]-[#6](c1ccccc1)-[#6]",
-}
-
 DEFAULT_F5_RESAMPLE_SETTINGS = {
     "property_model_mode": "single",  # single|all
     "proposal_views": "all",  # all|<comma-separated views>
@@ -146,27 +104,19 @@ DEFAULT_F5_RESAMPLE_SETTINGS = {
     "target_class": "",
     "require_validity": True,
     "require_two_stars": True,
-    "require_novel": False,
-    "require_unique": False,
+    "require_novel": True,
+    "require_unique": True,
     "max_sa": 3.6,
     "per_view_min_hits": 0,
     "per_view_quota_relax_after_batches": 0,
 }
-
-_SHARED_UNLABELED_TRAIN_DF: Optional[pd.DataFrame] = None
 
 if plt is not None:
     set_publication_style()
 
 
 def _resolve_path(path_str: str) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (BASE_DIR / path)
-
-
-def _resolve_with_base(path_str: str, base_dir: Path) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (base_dir / path)
+    return _shared_resolve_path(path_str, BASE_DIR)
 
 
 def _view_to_representation(view: str) -> str:
@@ -178,27 +128,6 @@ def _view_to_representation(view: str) -> str:
         "graph": "Graph",
     }
     return mapping.get(view, view)
-
-
-def _to_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _to_int_or_none(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("Boolean is not a valid integer value.")
-    if isinstance(value, int):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    return int(float(text))
 
 
 def _save_figure_png(fig, output_base: Path) -> None:
@@ -833,11 +762,18 @@ def _plot_f5_accepted_polymer_gallery(
         return
 
     try:
+        draw_options = Draw.rdMolDraw2D.MolDrawOptions()
+        # Keep the RDKit-rendered gallery aligned with the publication-wide
+        # typography requirement instead of relying on RDKit defaults.
+        draw_options.fixedFontSize = 16
+        draw_options.legendFontSize = 16
+        draw_options.annotationFontScale = 1.0
         img = Draw.MolsToGridImage(
             mols,
             molsPerRow=6,
             subImgSize=(260, 200),
             legends=legends,
+            drawOptions=draw_options,
             useSVG=False,
         )
         out_path = figures_dir / f"figure_f5_accepted_polymer_gallery_{property_name}.png"
@@ -1074,270 +1010,8 @@ def _select_proposal_views(config: dict, override: Optional[str], fallback_view:
     return selected
 
 
-def _resolve_view_device(config: dict, view: str) -> str:
-    encoder_cfg = config.get(VIEW_SPECS[view]["encoder_key"], {})
-    device = str(encoder_cfg.get("device", "auto")).strip() or "auto"
-    if device == "auto":
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    return device
-
-
 def _load_module(module_name: str, path: Path):
-    module_path = path.resolve()
-
-    # Prefer package import when the module is within this repo, so relative
-    # imports inside the target module (e.g., from ..utils import ...) work.
-    import_name = None
-    try:
-        rel = module_path.relative_to(REPO_ROOT.resolve())
-        if rel.suffix == ".py":
-            parts = list(rel.with_suffix("").parts)
-            if parts and parts[-1] == "__init__":
-                parts = parts[:-1]
-            if parts and all(part.isidentifier() for part in parts):
-                import_name = ".".join(parts)
-    except Exception:
-        import_name = None
-
-    if import_name:
-        try:
-            return importlib.import_module(import_name)
-        except Exception:
-            # Fall back to direct file import for backward compatibility.
-            pass
-
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import module {module_name} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_sequence_backbone(
-    encoder_cfg: dict,
-    device: str,
-    tokenizer_module: Path,
-    tokenizer_class: str,
-    tokenizer_filename: str,
-):
-    method_dir = _resolve_path(encoder_cfg.get("method_dir"))
-    config_path = encoder_cfg.get("config_path")
-    if config_path:
-        config_path = _resolve_path(config_path)
-    else:
-        config_path = method_dir / "configs" / "config.yaml"
-
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config not found: {config_path}")
-
-    method_cfg = load_config(str(config_path))
-
-    scales_mod = _load_module(
-        f"scales_{method_dir.name}",
-        method_dir / "src" / "utils" / "model_scales.py",
-    )
-    tokenizer_mod = _load_module(
-        f"tokenizer_{method_dir.name}",
-        tokenizer_module,
-    )
-    backbone_mod = _load_module(
-        f"backbone_{method_dir.name}",
-        method_dir / "src" / "model" / "backbone.py",
-    )
-
-    get_model_config = scales_mod.get_model_config
-    get_results_dir = scales_mod.get_results_dir
-    tokenizer_cls = getattr(tokenizer_mod, tokenizer_class)
-    diffusion_backbone = backbone_mod.DiffusionBackbone
-
-    model_size = encoder_cfg.get("model_size")
-    backbone_config = get_model_config(model_size, method_cfg, model_type="sequence")
-    diffusion_steps = method_cfg.get("diffusion", {}).get("num_steps", 50)
-
-    base_results_dir = encoder_cfg.get("results_dir")
-    if base_results_dir:
-        base_results_dir = _resolve_path(base_results_dir)
-    else:
-        base_results_dir = _resolve_with_base(method_cfg["paths"]["results_dir"], method_dir)
-
-    results_dir = Path(get_results_dir(model_size, str(base_results_dir)))
-
-    tokenizer_path = encoder_cfg.get("tokenizer_path")
-    if tokenizer_path:
-        tokenizer_path = _resolve_path(tokenizer_path)
-    else:
-        tokenizer_path = results_dir / tokenizer_filename
-        if not tokenizer_path.exists():
-            tokenizer_path = base_results_dir / tokenizer_filename
-
-    checkpoint_path = encoder_cfg.get("checkpoint_path")
-    if checkpoint_path:
-        checkpoint_path = _resolve_path(checkpoint_path)
-    else:
-        step_dir = encoder_cfg.get("step_dir", "step1_backbone")
-        checkpoint_name = encoder_cfg.get("checkpoint_name", "backbone_best.pt")
-        checkpoint_path = results_dir / step_dir / "checkpoints" / checkpoint_name
-
-    if not tokenizer_path.exists():
-        raise FileNotFoundError(f"Tokenizer not found: {tokenizer_path}")
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    tokenizer = tokenizer_cls.load(str(tokenizer_path))
-    backbone = diffusion_backbone(
-        vocab_size=tokenizer.vocab_size,
-        hidden_size=backbone_config["hidden_size"],
-        num_layers=backbone_config["num_layers"],
-        num_heads=backbone_config["num_heads"],
-        ffn_hidden_size=backbone_config["ffn_hidden_size"],
-        max_position_embeddings=backbone_config.get("max_position_embeddings", 256),
-        num_diffusion_steps=diffusion_steps,
-        dropout=backbone_config.get("dropout", 0.1),
-        pad_token_id=tokenizer.pad_token_id,
-    )
-
-    load_backbone_checkpoint(
-        backbone=backbone,
-        checkpoint_path=checkpoint_path,
-        map_location=device,
-        strict=False,
-        prefix="backbone.",
-        label="sequence backbone",
-    )
-    backbone.to(device)
-    backbone.eval()
-
-    return {
-        "backbone": backbone,
-        "tokenizer": tokenizer,
-        "model_size": model_size or "base",
-        "pooling": encoder_cfg.get("pooling", "mean"),
-        "timestep": int(encoder_cfg.get("timestep", 1)),
-        "batch_size": int(encoder_cfg.get("batch_size", 256)),
-        "method_dir": method_dir,
-        "method_cfg": method_cfg,
-        "results_dir": results_dir,
-        "base_results_dir": base_results_dir,
-        "checkpoint_path": checkpoint_path,
-    }
-
-
-def _load_graph_backbone(encoder_cfg: dict, device: str):
-    method_dir = _resolve_path(encoder_cfg.get("method_dir"))
-    config_path = encoder_cfg.get("config_path")
-    if config_path:
-        config_path = _resolve_path(config_path)
-    else:
-        config_path = method_dir / "configs" / "config.yaml"
-
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config not found: {config_path}")
-
-    method_cfg = load_config(str(config_path))
-
-    scales_mod = _load_module(
-        f"graph_scales_{method_dir.name}",
-        method_dir / "src" / "utils" / "model_scales.py",
-    )
-    tokenizer_mod = _load_module(
-        f"graph_tokenizer_{method_dir.name}",
-        method_dir / "src" / "data" / "graph_tokenizer.py",
-    )
-    backbone_mod = _load_module(
-        f"graph_backbone_{method_dir.name}",
-        method_dir / "src" / "model" / "graph_backbone.py",
-    )
-
-    get_model_config = scales_mod.get_model_config
-    get_results_dir = scales_mod.get_results_dir
-    graph_tokenizer = tokenizer_mod.GraphTokenizer
-    graph_backbone = backbone_mod.GraphDiffusionBackbone
-
-    model_size = encoder_cfg.get("model_size")
-    backbone_config = get_model_config(model_size, method_cfg, model_type="graph")
-    diffusion_steps = method_cfg.get("diffusion", {}).get("num_steps", 50)
-
-    base_results_dir = encoder_cfg.get("results_dir")
-    if base_results_dir:
-        base_results_dir = _resolve_path(base_results_dir)
-    else:
-        base_results_dir = _resolve_with_base(method_cfg["paths"]["results_dir"], method_dir)
-
-    results_dir = Path(get_results_dir(model_size, str(base_results_dir)))
-
-    tokenizer_path = encoder_cfg.get("tokenizer_path")
-    if tokenizer_path:
-        tokenizer_path = _resolve_path(tokenizer_path)
-    else:
-        tokenizer_path = results_dir / "graph_tokenizer.json"
-        if not tokenizer_path.exists():
-            tokenizer_path = base_results_dir / "graph_tokenizer.json"
-
-    graph_config_path = encoder_cfg.get("graph_config_path")
-    if graph_config_path:
-        graph_config_path = _resolve_path(graph_config_path)
-    else:
-        graph_config_path = results_dir / "graph_config.json"
-        if not graph_config_path.exists():
-            graph_config_path = base_results_dir / "graph_config.json"
-
-    checkpoint_path = encoder_cfg.get("checkpoint_path")
-    if checkpoint_path:
-        checkpoint_path = _resolve_path(checkpoint_path)
-    else:
-        step_dir = encoder_cfg.get("step_dir", "step1_backbone")
-        checkpoint_name = encoder_cfg.get("checkpoint_name", "graph_backbone_best.pt")
-        checkpoint_path = results_dir / step_dir / "checkpoints" / checkpoint_name
-
-    if not tokenizer_path.exists():
-        raise FileNotFoundError(f"Graph tokenizer not found: {tokenizer_path}")
-    if not graph_config_path.exists():
-        raise FileNotFoundError(f"Graph config not found: {graph_config_path}")
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Graph checkpoint not found: {checkpoint_path}")
-
-    with open(graph_config_path, "r") as f:
-        graph_config = json.load(f)
-
-    tokenizer = graph_tokenizer.load(str(tokenizer_path))
-    backbone = graph_backbone(
-        atom_vocab_size=graph_config["atom_vocab_size"],
-        edge_vocab_size=graph_config["edge_vocab_size"],
-        Nmax=graph_config["Nmax"],
-        hidden_size=backbone_config["hidden_size"],
-        num_layers=backbone_config["num_layers"],
-        num_heads=backbone_config["num_heads"],
-        ffn_hidden_size=backbone_config["ffn_hidden_size"],
-        dropout=backbone_config.get("dropout", 0.1),
-        num_diffusion_steps=diffusion_steps,
-    )
-
-    load_backbone_checkpoint(
-        backbone=backbone,
-        checkpoint_path=checkpoint_path,
-        map_location=device,
-        strict=False,
-        prefix="backbone.",
-        label="graph backbone",
-    )
-    backbone.to(device)
-    backbone.eval()
-
-    return {
-        "backbone": backbone,
-        "tokenizer": tokenizer,
-        "model_size": model_size or "base",
-        "pooling": encoder_cfg.get("pooling", "mean"),
-        "timestep": int(encoder_cfg.get("timestep", 1)),
-        "batch_size": int(encoder_cfg.get("batch_size", 64)),
-        "method_dir": method_dir,
-        "method_cfg": method_cfg,
-        "results_dir": results_dir,
-        "base_results_dir": base_results_dir,
-        "checkpoint_path": checkpoint_path,
-        "graph_config": graph_config,
-    }
+    return _shared_load_module(module_name, path, REPO_ROOT)
 
 
 def _embed_sequence(inputs: List[str], assets: dict, device: str) -> np.ndarray:
@@ -1392,23 +1066,6 @@ def _embed_graph(smiles_list: List[str], assets: dict, device: str) -> Tuple[np.
     if embeddings:
         return np.concatenate(embeddings, axis=0), valid_indices
     return np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32), valid_indices
-
-
-def _load_view_assets(config: dict, view: str, device: str) -> dict:
-    spec = VIEW_SPECS[view]
-    encoder_cfg = config.get(spec["encoder_key"], {})
-    if not encoder_cfg or not encoder_cfg.get("method_dir"):
-        raise ValueError(f"Encoder config missing for view={view}")
-
-    if spec["type"] == "graph":
-        return _load_graph_backbone(encoder_cfg=encoder_cfg, device=device)
-    return _load_sequence_backbone(
-        encoder_cfg=encoder_cfg,
-        device=device,
-        tokenizer_module=spec["tokenizer_module"],
-        tokenizer_class=spec["tokenizer_class"],
-        tokenizer_filename=spec["tokenizer_file"],
-    )
 
 
 def _sanitize_sequence_inputs(inputs: List[str], tokenizer) -> Tuple[List[str], List[int]]:
@@ -1492,22 +1149,6 @@ def _load_d1_embeddings(results_dir: Path, view: str) -> np.ndarray:
     )
 
 
-def _default_property_model_path(results_dir: Path, property_name: str, view: str) -> Path:
-    prop = _normalize_property_name(property_name)
-    model_dir = results_dir / "step3_property"
-    if prop:
-        model_dir = model_dir / prop / "files"
-    else:
-        model_dir = model_dir / "files"
-    canonical = model_dir / f"{prop}_{view}_mlp.pt"
-    if view != "smiles":
-        return canonical
-    legacy = model_dir / f"{prop}_mlp.pt"
-    if canonical.exists() or not legacy.exists():
-        return canonical
-    return legacy
-
-
 def _discover_property_model_paths(
     results_dir: Path,
     property_name: str,
@@ -1550,64 +1191,6 @@ def _discover_property_model_paths(
             discovered["multiview_mean"] = mv_path
 
     return discovered
-
-
-class _PropertyMLP(torch.nn.Module):
-    def __init__(self, input_dim: int, num_layers: int, neurons: int, dropout: float):
-        super().__init__()
-        layers = []
-        current_dim = input_dim
-        for _ in range(max(int(num_layers), 1)):
-            layers.append(torch.nn.Linear(current_dim, int(neurons)))
-            layers.append(torch.nn.ReLU())
-            if float(dropout) > 0:
-                layers.append(torch.nn.Dropout(float(dropout)))
-            current_dim = int(neurons)
-        layers.append(torch.nn.Linear(current_dim, 1))
-        self.net = torch.nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)
-
-
-class _TorchPropertyPredictor:
-    def __init__(self, checkpoint: dict):
-        if checkpoint.get("format") != "mvf_torch_mlp":
-            raise ValueError("Unsupported torch property model format.")
-        self.mean = np.asarray(checkpoint["scaler_mean"], dtype=np.float32)
-        self.scale = np.asarray(checkpoint["scaler_scale"], dtype=np.float32)
-        self.scale = np.where(np.abs(self.scale) < 1e-12, 1.0, self.scale).astype(np.float32, copy=False)
-        self.model = _PropertyMLP(
-            input_dim=int(checkpoint["input_dim"]),
-            num_layers=int(checkpoint["num_layers"]),
-            neurons=int(checkpoint["neurons"]),
-            dropout=float(checkpoint.get("dropout", 0.0)),
-        )
-        self.model.load_state_dict(checkpoint["state_dict"])
-        self.model.eval()
-
-    def predict(self, features: np.ndarray) -> np.ndarray:
-        if features is None or len(features) == 0:
-            return np.zeros((0,), dtype=np.float32)
-        x = np.asarray(features, dtype=np.float32)
-        x = (x - self.mean) / self.scale
-        with torch.no_grad():
-            preds = self.model(torch.tensor(x, dtype=torch.float32)).cpu().numpy()
-        return preds
-
-
-def _load_property_model(model_path: Path):
-    if model_path.suffix in {".pt", ".pth"}:
-        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
-        if isinstance(checkpoint, dict) and checkpoint.get("format") == "mvf_torch_mlp":
-            return _TorchPropertyPredictor(checkpoint)
-        raise ValueError(f"Unsupported torch property model checkpoint: {model_path}")
-
-    if joblib is not None:
-        return joblib.load(model_path)
-    import pickle
-    with open(model_path, "rb") as f:
-        return pickle.load(f)
 
 
 def _build_prediction_columns_from_all_models(
@@ -1767,18 +1350,17 @@ def _load_training_smiles(path: Path) -> set:
     return set(df[col].astype(str).tolist())
 
 
-def _load_shared_unlabeled_train_df() -> pd.DataFrame:
-    global _SHARED_UNLABELED_TRAIN_DF
-    if _SHARED_UNLABELED_TRAIN_DF is not None:
-        return _SHARED_UNLABELED_TRAIN_DF
-
+@lru_cache(maxsize=1)
+def _load_shared_unlabeled_train_df_cached() -> pd.DataFrame:
     try:
         train_path, _ = require_preprocessed_unlabeled_splits(REPO_ROOT)
-        _SHARED_UNLABELED_TRAIN_DF = pd.read_csv(train_path)
+        return pd.read_csv(train_path)
     except Exception:
-        _SHARED_UNLABELED_TRAIN_DF = pd.DataFrame()
+        return pd.DataFrame()
 
-    return _SHARED_UNLABELED_TRAIN_DF
+
+def _load_shared_unlabeled_train_df() -> pd.DataFrame:
+    return _load_shared_unlabeled_train_df_cached().copy()
 
 
 def _step2_lengths_from_psmiles(train_df: pd.DataFrame, tokenizer: Any, num_samples: int, random_seed: int) -> Optional[List[int]]:
@@ -2323,7 +1905,7 @@ def _resample_candidates_until_target(
     if not proposal_views:
         raise ValueError("proposal_views must be non-empty.")
 
-    patterns = config.get("polymer_classes") or f5_cfg.get("polymer_class_patterns") or DEFAULT_POLYMER_PATTERNS
+    patterns = config.get("polymer_classes") or f5_cfg.get("polymer_class_patterns") or POLYMER_CLASS_PATTERNS
     target_classes = _parse_target_classes(target_class)
     compiled_patterns = _compile_polymer_patterns(patterns)
     for class_name in target_classes:

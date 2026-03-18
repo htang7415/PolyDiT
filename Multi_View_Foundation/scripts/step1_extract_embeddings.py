@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import sys
 import time
-import importlib.util
 from typing import Any, List
 
 import numpy as np
@@ -23,6 +22,13 @@ from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json, save_numpy
 from src.utils.checkpoint_loading import load_backbone_checkpoint
+from src.utils.runtime import (
+    load_module as _load_module,
+    resolve_path as _shared_resolve_path,
+    resolve_with_base as _shared_resolve_with_base,
+    to_bool as _to_bool,
+)
+from src.utils.visualization import save_figure_png as shared_save_figure_png, set_publication_style
 
 try:  # pragma: no cover
     import matplotlib
@@ -32,71 +38,20 @@ try:  # pragma: no cover
 except Exception:  # pragma: no cover
     plt = None
 
-
-PUBLICATION_STYLE = {
-    "font.family": "serif",
-    "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 16,
-    "axes.titlesize": 16,
-    "xtick.labelsize": 16,
-    "ytick.labelsize": 16,
-    "legend.fontsize": 16,
-    "axes.linewidth": 0.9,
-    "lines.linewidth": 1.8,
-    "figure.dpi": 300,
-    "savefig.dpi": 600,
-}
-
 if plt is not None:
-    plt.rcParams.update(PUBLICATION_STYLE)
+    set_publication_style()
 
 
 def _resolve_path(path_str: str) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (BASE_DIR / path)
+    return _shared_resolve_path(path_str, BASE_DIR)
 
 
 def _resolve_with_base(path_str: str, base_dir: Path) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (base_dir / path)
-
-
-def _to_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: str = "best") -> None:
-    for text_obj in fig.findobj(match=lambda artist: hasattr(artist, "set_fontsize")):
-        try:
-            text_obj.set_fontsize(font_size)
-        except Exception:
-            continue
-    for ax in fig.axes:
-        try:
-            ax.set_title("")
-            ax.set_title("", loc="left")
-            ax.set_title("", loc="right")
-        except Exception:
-            pass
-        legend = ax.get_legend()
-        if legend is not None:
-            legend.set_loc(legend_loc)
-    try:
-        suptitle = getattr(fig, "_suptitle", None)
-        if suptitle is not None:
-            suptitle.set_text("")
-    except Exception:
-        pass
+    return _shared_resolve_with_base(path_str, base_dir)
 
 
 def _save_figure_png(fig, output_base: Path) -> None:
-    output_base.parent.mkdir(parents=True, exist_ok=True)
-    _standardize_figure_text_and_legend(fig, font_size=16, legend_loc="best")
-    fig.savefig(output_base.with_suffix(".png"), dpi=600, bbox_inches="tight")
+    shared_save_figure_png(fig, output_base, font_size=16, legend_loc="best")
 
 
 def _load_f1_meta_table(results_dir: Path, step_dirs: dict) -> pd.DataFrame:
@@ -274,17 +229,6 @@ def _generate_f1_figures(*, results_dir: Path, step_dirs: dict, cfg_f1: dict, ar
         _plot_f1_embedding_summary(meta_df, step_dirs["figures_dir"])
         save_csv(meta_df, step_dirs["figures_dir"] / "figure_f1_embedding_summary.csv", index=False)
 
-
-
-def _load_module(module_name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import module {module_name} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _load_sequence_backbone(
     encoder_cfg: dict,
     device: str,
@@ -307,14 +251,17 @@ def _load_sequence_backbone(
     scales_mod = _load_module(
         f"scales_{method_dir.name}",
         method_dir / "src" / "utils" / "model_scales.py",
+        REPO_ROOT,
     )
     tokenizer_mod = _load_module(
         f"tokenizer_{method_dir.name}",
         tokenizer_module,
+        REPO_ROOT,
     )
     backbone_mod = _load_module(
         f"backbone_{method_dir.name}",
         method_dir / "src" / "model" / "backbone.py",
+        REPO_ROOT,
     )
 
     get_model_config = scales_mod.get_model_config
@@ -443,14 +390,17 @@ def _load_graph_backbone(encoder_cfg: dict, device: str):
     scales_mod = _load_module(
         f"graph_scales_{method_dir.name}",
         method_dir / "src" / "utils" / "model_scales.py",
+        REPO_ROOT,
     )
     tokenizer_mod = _load_module(
         f"graph_tokenizer_{method_dir.name}",
         method_dir / "src" / "data" / "graph_tokenizer.py",
+        REPO_ROOT,
     )
     backbone_mod = _load_module(
         f"graph_backbone_{method_dir.name}",
         method_dir / "src" / "model" / "graph_backbone.py",
+        REPO_ROOT,
     )
 
     get_model_config = scales_mod.get_model_config

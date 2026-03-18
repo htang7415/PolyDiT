@@ -12,7 +12,6 @@ This step summarizes science-facing evidence across configured properties:
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -29,11 +28,18 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.utils.config import load_config, save_config
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
+from src.utils.polymer_patterns import POLYMER_MOTIF_SMARTS
 from src.utils.property_names import (
     normalize_property_name as shared_normalize_property_name,
     property_column_candidates,
     property_display_name,
     property_file_candidates,
+)
+from src.utils.runtime import (
+    load_module as _shared_load_module,
+    resolve_path as _shared_resolve_path,
+    to_bool as _to_bool,
+    to_int_or_none as _to_int_or_none,
 )
 from src.utils.visualization import (
     COLOR_MUTED as SHARED_COLOR_MUTED,
@@ -43,6 +49,7 @@ from src.utils.visualization import (
     normalize_view_name,
     ordered_views,
     save_figure_png as shared_save_figure_png,
+    set_publication_style,
     view_color,
     view_label,
 )
@@ -88,19 +95,6 @@ DESCRIPTOR_COLUMNS = [
     "sa_score",
     "star_count",
 ]
-
-POLYMER_MOTIF_SMARTS = {
-    "polyimide": "[#6][CX3](=[OX1])[NX3][CX3](=[OX1])[#6]",
-    "polyester": "[#6][CX3](=[OX1])[OX2][#6]",
-    "polyamide": "[#6][CX3](=[OX1])[NX3;!$([N]([C](=O))[C](=O))][#6;!$([CX3](=[OX1]))]",
-    "polyurethane": "[#6][OX2][CX3](=[OX1])[NX3][#6]",
-    "polyether": "[#6;!$([CX3](=[OX1]))][OX2][#6;!$([CX3](=[OX1]))]",
-    "polysiloxane": "[Si][OX2][Si]",
-    "polycarbonate": "[#6][OX2][CX3](=[OX1])[OX2][#6]",
-    "polysulfone": "[#6][SX4](=[OX1])(=[OX1])[#6]",
-    "polyacrylate": "[#6]-[#6](=O)-[#8]",
-    "polystyrene": "[#6]-[#6](c1ccccc1)-[#6]",
-}
 
 # Heuristic direction is defined for the property value itself:
 # +1 means the feature tends to increase the property, -1 means decrease.
@@ -155,11 +149,9 @@ PHYSICS_RULES = {
     ],
 }
 
-PUBLICATION_STYLE = {
-    **SHARED_PUBLICATION_STYLE,
+F7_STYLE_OVERRIDES = {
     "axes.spines.top": False,
     "axes.spines.right": False,
-    "axes.linewidth": SHARED_PUBLICATION_STYLE.get("axes.linewidth", 0.9),
     "axes.titleweight": "bold",
     "legend.frameon": False,
     "figure.constrained_layout.use": True,
@@ -175,33 +167,19 @@ COLOR_MUTED = SHARED_COLOR_MUTED
 COLOR_TEXT = SHARED_COLOR_TEXT
 
 if plt is not None:  # pragma: no branch
-    PUBLICATION_STYLE["axes.prop_cycle"] = matplotlib.cycler(color=NATURE_PALETTE)
+    set_publication_style()
+
+
+def _f7_rc_style() -> dict:
+    style = dict(SHARED_PUBLICATION_STYLE)
+    style.update(F7_STYLE_OVERRIDES)
+    if matplotlib is not None:
+        style["axes.prop_cycle"] = matplotlib.cycler(color=NATURE_PALETTE)
+    return style
 
 
 def _resolve_path(path_str: str) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (BASE_DIR / path)
-
-
-def _to_bool(value, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _to_int_or_none(value):
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("Boolean is not a valid integer value.")
-    if isinstance(value, int):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    return int(float(text))
+    return _shared_resolve_path(path_str, BASE_DIR)
 
 
 def _to_float_or_none(value):
@@ -367,12 +345,7 @@ def _lookup_property_setting(mapping: dict, property_name: str):
     return None
 
 def _load_module(module_name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import module {module_name} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _shared_load_module(module_name, path, REPO_ROOT)
 
 
 def _load_sa_score_fn():
@@ -1402,7 +1375,7 @@ def _plot_descriptor_detail_figure(property_name: str, descriptor_shift_df: pd.D
     ds["abs_d"] = np.abs(ds["cohens_d_topk_vs_ref"])
     ds = ds.sort_values("abs_d", ascending=False).head(8).iloc[::-1]
 
-    with plt.rc_context(PUBLICATION_STYLE):
+    with plt.rc_context(_f7_rc_style()):
         fig, axes = _make_panel_figure(1, 2)
         ax0, ax1 = axes[0]
 
@@ -1447,7 +1420,7 @@ def _plot_motif_detail_figure(property_name: str, motif_df: pd.DataFrame, output
     mf["abs_log2"] = np.abs(mf["log2_enrichment_topk_vs_ref"])
     mf = mf.sort_values("abs_log2", ascending=False).head(8).iloc[::-1]
 
-    with plt.rc_context(PUBLICATION_STYLE):
+    with plt.rc_context(_f7_rc_style()):
         fig, axes = _make_panel_figure(1, 2)
         ax0, ax1 = axes[0]
 
@@ -1487,7 +1460,7 @@ def _plot_physics_rule_detail_figure(property_name: str, physics_df: pd.DataFram
     pf["abs_delta"] = np.abs(pf["observed_delta_topk_vs_ref"])
     pf = pf.sort_values("abs_delta", ascending=False).head(8).copy()
 
-    with plt.rc_context(PUBLICATION_STYLE):
+    with plt.rc_context(_f7_rc_style()):
         fig, axes = _make_panel_figure(1, 2)
         ax0, ax1 = axes[0]
 
@@ -1548,7 +1521,7 @@ def _plot_property_ood_landscape_figure(
     base = plot_df[~plot_df["is_topk"]]
     tk = plot_df[plot_df["is_topk"]]
 
-    with plt.rc_context(PUBLICATION_STYLE):
+    with plt.rc_context(_f7_rc_style()):
         fig, axes = _make_panel_figure(1, 2)
         ax0, ax1 = axes[0]
 
@@ -1594,7 +1567,7 @@ def _plot_nearest_neighbor_detail_figure(property_name: str, nn_df: pd.DataFrame
     if sims.size == 0:
         return
 
-    with plt.rc_context(PUBLICATION_STYLE):
+    with plt.rc_context(_f7_rc_style()):
         fig, axes = _make_panel_figure(1, 3, panel_width=5.8, panel_height=5.8)
         ax0, ax1, ax2 = axes[0]
 
@@ -1744,7 +1717,7 @@ def _plot_property_figure(
 ) -> None:
     if plt is None:
         return
-    with plt.rc_context(PUBLICATION_STYLE):
+    with plt.rc_context(_f7_rc_style()):
         fig, axes = _make_panel_figure(2, 2, panel_width=6.7, panel_height=5.7)
         ax1, ax2, ax3, ax4 = axes.ravel()
 
@@ -1832,7 +1805,7 @@ def _plot_property_figure(
 def _plot_summary_figure(metrics_df: pd.DataFrame, output_base: Path) -> None:
     if plt is None or metrics_df.empty:
         return
-    with plt.rc_context(PUBLICATION_STYLE):
+    with plt.rc_context(_f7_rc_style()):
         fig, axes = _make_panel_figure(1, 3, panel_width=5.8, panel_height=5.2)
         axes = axes[0]
 
@@ -1862,7 +1835,7 @@ def _plot_summary_figure(metrics_df: pd.DataFrame, output_base: Path) -> None:
 def _plot_view_summary_figure(view_summary_df: pd.DataFrame, output_base: Path, property_name: str) -> None:
     if plt is None or view_summary_df.empty:
         return
-    with plt.rc_context(PUBLICATION_STYLE):
+    with plt.rc_context(_f7_rc_style()):
         fig, axes = _make_panel_figure(1, 3, panel_width=5.8, panel_height=5.0)
         axes = axes[0]
         df = view_summary_df.copy()

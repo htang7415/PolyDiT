@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import math
 from pathlib import Path
 import sys
@@ -25,6 +24,12 @@ from src.utils.config import load_config, save_config
 from src.utils.embedding_artifacts import load_view_embeddings, load_view_index, load_view_meta
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
 from src.utils.property_names import ordered_properties, property_column_candidates
+from src.utils.runtime import (
+    load_module as _shared_load_module,
+    resolve_path as _shared_resolve_path,
+    resolve_with_base as _shared_resolve_with_base,
+    to_bool as _to_bool,
+)
 from src.utils.visualization import (
     ordered_views,
     save_figure_png,
@@ -67,30 +72,15 @@ SEQUENCE_VIEW_SPECS = {
 
 
 def _resolve_path(path_str: str) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (BASE_DIR / path)
+    return _shared_resolve_path(path_str, BASE_DIR)
 
 
 def _resolve_with_base(path_str: str, base_dir: Path) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (base_dir / path)
+    return _shared_resolve_with_base(path_str, base_dir)
 
 
 def _load_module(module_name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import module {module_name} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _to_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    return _shared_load_module(module_name, path, REPO_ROOT)
 
 
 def _load_step_csv(results_dir: Path, step_name: str, filename: str) -> pd.DataFrame:

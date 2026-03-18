@@ -35,6 +35,7 @@ from src.utils.property_names import (
     normalize_property_name as shared_normalize_property_name,
     ordered_properties,
 )
+from src.utils.runtime import resolve_path as _shared_resolve_path, to_bool as _to_bool
 from src.utils.visualization import (
     COLOR_MUTED,
     COLOR_TEXT,
@@ -113,21 +114,12 @@ SI_CAPTIONS = [
 
 
 def _resolve_path(path_str: str) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (BASE_DIR / path)
+    return _shared_resolve_path(path_str, BASE_DIR)
 
 
 def _resolve_repo_path(path_str: str) -> Path:
     path = Path(path_str)
     return path if path.is_absolute() else (REPO_ROOT / path)
-
-
-def _to_bool(value, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _to_int(value, default: int) -> int:
@@ -2668,11 +2660,9 @@ def main(args):
     )
     max_panels_per_figure = max(1, min(12, max_panels_per_figure))
 
-    figure_fontsize = _to_int(
-        args.figure_fontsize if args.figure_fontsize is not None else paper_cfg.get("figure_fontsize", 16),
-        16,
-    )
-    figure_fontsize = max(8, min(48, figure_fontsize))
+    # Paper-package figures are hard-locked to 16pt for consistency with the
+    # MVF publication figure policy, regardless of config or CLI overrides.
+    figure_fontsize = 16
 
     figure_dpi = _to_int(
         args.figure_dpi if args.figure_dpi is not None else paper_cfg.get("figure_dpi", 600),

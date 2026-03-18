@@ -7,7 +7,6 @@ Currently builds a paired index with p-SMILES for D1 (SMiPoly) and D2 (PolyInfo)
 import argparse
 from pathlib import Path
 import sys
-import importlib.util
 
 import pandas as pd
 
@@ -19,20 +18,19 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies, smiles_to_group_selfies
 from src.utils.output_layout import ensure_step_dirs, save_csv
+from src.utils.runtime import (
+    load_module as _shared_load_module,
+    resolve_path as _shared_resolve_path,
+    to_int_or_none as _to_int_or_none,
+)
 
 
 def _resolve_path(path_str: str) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (BASE_DIR / path)
+    return _shared_resolve_path(path_str, BASE_DIR)
 
 
 def _load_module(module_name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import module {module_name} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _shared_load_module(module_name, path, REPO_ROOT)
 
 
 def _load_group_tokenizer(tokenizer_path: Path):
@@ -42,19 +40,6 @@ def _load_group_tokenizer(tokenizer_path: Path):
     )
     tokenizer_cls = getattr(module, "GroupSELFIESTokenizer")
     return tokenizer_cls.load(str(tokenizer_path))
-
-
-def _to_int_or_none(value):
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("Boolean is not a valid integer sample cap.")
-    if isinstance(value, int):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    return int(float(text))
 
 
 def _load_smiles(path: Path, max_rows=None):
@@ -170,7 +155,8 @@ def main(args):
             "p_smiles": smi,
             "selfies": d1_selfies[i] if i < len(d1_selfies) else "",
             "group_selfies": d1_group[i] if i < len(d1_group) else "",
-            "graph": "",
+            # Graph view is derived from p-SMILES at tokenize time.
+            "graph": smi,
         })
     for i, smi in enumerate(d2_smiles):
         records.append({
@@ -179,7 +165,8 @@ def main(args):
             "p_smiles": smi,
             "selfies": d2_selfies[i] if i < len(d2_selfies) else "",
             "group_selfies": d2_group[i] if i < len(d2_group) else "",
-            "graph": "",
+            # Graph view is derived from p-SMILES at tokenize time.
+            "graph": smi,
         })
 
     paired_df = pd.DataFrame(records)

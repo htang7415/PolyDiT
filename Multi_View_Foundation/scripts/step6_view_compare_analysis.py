@@ -18,7 +18,11 @@ from src.analysis.view_compare import analyze_view_compare, plot_view_compare, s
 from src.utils.config import load_config, save_config
 from src.utils.output_layout import ensure_step_dirs
 from src.utils.property_names import normalize_property_name
-from step5_foundation_inverse import _resolve_path
+from src.utils.runtime import resolve_path as _shared_resolve_path
+
+
+def _resolve_path(path_str: str) -> Path:
+    return _shared_resolve_path(path_str, BASE_DIR)
 
 
 def _resolve_candidate_scores_path(results_dir: Path, property_name: str) -> Path:

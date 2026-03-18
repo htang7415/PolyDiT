@@ -20,12 +20,21 @@ sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.utils.config import load_config, save_config
+from src.utils.foundation_assets import (
+    TorchPropertyPredictor,
+    default_property_model_path,
+    load_property_model,
+    load_view_assets,
+    resolve_path as foundation_resolve_path,
+    resolve_view_device,
+)
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
 from src.utils.property_names import (
     normalize_property_name as shared_normalize_property_name,
     property_column_candidates,
     property_display_name,
 )
+from src.utils.runtime import to_bool as _to_bool, to_int_or_none as _to_int_or_none
 from src.utils.visualization import (
     normalize_view_name,
     ordered_views,
@@ -33,14 +42,6 @@ from src.utils.visualization import (
     set_publication_style,
     view_color,
     view_label,
-)
-from step5_foundation_inverse import (
-    _TorchPropertyPredictor,
-    _default_property_model_path,
-    _load_property_model,
-    _load_view_assets,
-    _resolve_path,
-    _resolve_view_device,
 )
 
 try:  # pragma: no cover
@@ -75,27 +76,6 @@ def _normalize_property_name(value) -> str:
 
 def _dit_cfg(config: dict) -> dict:
     return dict(config.get("dit_interpretability", {}) or {})
-
-
-def _to_int_or_none(value):
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("Boolean is not a valid integer value.")
-    if isinstance(value, int):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    return int(float(text))
-
-
-def _to_bool(value, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_methods(value: Optional[object]) -> List[str]:
@@ -239,13 +219,13 @@ def _select_cases(df: pd.DataFrame, *, max_samples_per_group: int) -> pd.DataFra
 
 
 def _load_property_scorer(config: dict, results_dir: Path, property_name: str, encoder_view: str, property_model_path: Optional[str]):
-    device = _resolve_view_device(config, encoder_view)
-    assets = _load_view_assets(config=config, view=encoder_view, device=device)
-    model_path = Path(property_model_path) if property_model_path else _default_property_model_path(results_dir, property_name, encoder_view)
+    device = resolve_view_device(config, encoder_view)
+    assets = load_view_assets(config=config, view=encoder_view, device=device)
+    model_path = Path(property_model_path) if property_model_path else default_property_model_path(results_dir, property_name, encoder_view)
     if not model_path.is_absolute():
-        model_path = _resolve_path(str(model_path))
-    predictor = _load_property_model(model_path)
-    if not isinstance(predictor, _TorchPropertyPredictor):
+        model_path = foundation_resolve_path(str(model_path))
+    predictor = load_property_model(model_path)
+    if not isinstance(predictor, TorchPropertyPredictor):
         raise TypeError(f"F6 interpretability requires MVF torch MLP checkpoint, got {type(predictor).__name__}")
     predictor.model.to(device)
     predictor.model.eval()
@@ -794,7 +774,7 @@ def main(args) -> None:
     cfg_f5 = config.get("foundation_inverse", {}) or {}
     cfg_f6 = _dit_cfg(config)
 
-    results_dir = _resolve_path(config["paths"]["results_dir"])
+    results_dir = foundation_resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
     step_dirs = ensure_step_dirs(results_dir, "step6_dit_interpretability")
     save_config(config, results_dir / "config_used.yaml")

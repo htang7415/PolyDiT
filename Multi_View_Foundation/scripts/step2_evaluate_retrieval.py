@@ -7,7 +7,6 @@ import sys
 
 import numpy as np
 import pandas as pd
-from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR))
@@ -16,6 +15,8 @@ from src.utils.config import load_config, save_config
 from src.evaluation.retrieval_metrics import compute_recall_at_k
 from src.utils.embedding_artifacts import load_view_embeddings, load_view_index
 from src.utils.output_layout import ensure_step_dirs, save_csv
+from src.utils.runtime import resolve_path as _shared_resolve_path, to_bool as _to_bool, to_int_or_none as _to_int_or_none
+from src.utils.visualization import VIEW_ORDER, ordered_views, save_figure_png as shared_save_figure_png, set_publication_style
 
 try:  # pragma: no cover
     import matplotlib
@@ -25,96 +26,15 @@ try:  # pragma: no cover
 except Exception:  # pragma: no cover
     plt = None
 
-
-PUBLICATION_STYLE = {
-    "font.family": "serif",
-    "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 16,
-    "axes.titlesize": 16,
-    "xtick.labelsize": 16,
-    "ytick.labelsize": 16,
-    "legend.fontsize": 16,
-    "axes.linewidth": 0.9,
-    "lines.linewidth": 1.8,
-    "figure.dpi": 300,
-    "savefig.dpi": 600,
-}
-
 if plt is not None:
-    plt.rcParams.update(PUBLICATION_STYLE)
-
-
-VIEW_ORDER = ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
-
+    set_publication_style()
 
 def _resolve_path(path_str: str) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (BASE_DIR / path)
-
-
-def _to_int_or_none(value):
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("Boolean is not a valid integer sample cap.")
-    if isinstance(value, int):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    return int(float(text))
-
-
-def _to_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _ordered_views(values):
-    seen = set()
-    ordered = []
-    for view in VIEW_ORDER:
-        if view in values and view not in seen:
-            ordered.append(view)
-            seen.add(view)
-    for view in values:
-        if view not in seen:
-            ordered.append(view)
-            seen.add(view)
-    return ordered
-
-
-def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: str = "best") -> None:
-    for text_obj in fig.findobj(match=lambda artist: hasattr(artist, "set_fontsize")):
-        try:
-            text_obj.set_fontsize(font_size)
-        except Exception:
-            continue
-    for ax in fig.axes:
-        try:
-            ax.set_title("")
-            ax.set_title("", loc="left")
-            ax.set_title("", loc="right")
-        except Exception:
-            pass
-        legend = ax.get_legend()
-        if legend is not None:
-            legend.set_loc(legend_loc)
-    try:
-        suptitle = getattr(fig, "_suptitle", None)
-        if suptitle is not None:
-            suptitle.set_text("")
-    except Exception:
-        pass
+    return _shared_resolve_path(path_str, BASE_DIR)
 
 
 def _save_figure_png(fig, output_base: Path) -> None:
-    output_base.parent.mkdir(parents=True, exist_ok=True)
-    _standardize_figure_text_and_legend(fig, font_size=16, legend_loc="best")
-    fig.savefig(output_base.with_suffix(".png"), dpi=600, bbox_inches="tight")
+    shared_save_figure_png(fig, output_base, font_size=16, legend_loc="best")
 
 
 def _draw_heatmap(fig, ax, matrix: np.ndarray, row_labels, col_labels, vmin=0.0, vmax=1.0) -> None:
@@ -222,7 +142,7 @@ def _plot_f2_retrieval_heatmaps(metrics_df: pd.DataFrame, figures_dir: Path) -> 
         return
 
     datasets = sorted(df["src_dataset"].astype(str).unique().tolist())
-    views = _ordered_views(sorted(set(df["src_view"].astype(str)).union(set(df["tgt_view"].astype(str)))))
+    views = ordered_views(sorted(set(df["src_view"].astype(str)).union(set(df["tgt_view"].astype(str)))))
     if not datasets or not views:
         return
 
@@ -255,7 +175,11 @@ def _plot_f2_retrieval_heatmaps(metrics_df: pd.DataFrame, figures_dir: Path) -> 
                     val = pd.to_numeric(r[metric], errors="coerce").mean()
                     if np.isfinite(val):
                         matrix[i, j] = float(val)
-            _draw_heatmap(fig, ax, matrix, views, views, vmin=0.0, vmax=1.0)
+            finite = matrix[np.isfinite(matrix)]
+            vmax = 1.0
+            if finite.size and metric == "match_rate":
+                vmax = min(1.0, max(0.05, float(np.nanmax(finite))))
+            _draw_heatmap(fig, ax, matrix, views, views, vmin=0.0, vmax=vmax)
 
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f2_retrieval_heatmaps")
@@ -353,7 +277,7 @@ def _plot_f2_recall_bars(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
     for col_idx, dataset in enumerate(datasets):
         ax = axes[0, col_idx]
         sub = df[df["src_dataset"] == dataset]
-        src_views = _ordered_views(sub["src_view"].astype(str).unique().tolist())
+        src_views = ordered_views(sub["src_view"].astype(str).unique().tolist())
         if not src_views:
             ax.set_axis_off()
             continue

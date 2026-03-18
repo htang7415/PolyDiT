@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import random
 import sys
-import importlib.util
 import json
 import copy
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -47,11 +46,19 @@ from src.utils.config import load_config, save_config
 from src.data.view_converters import smiles_to_selfies
 from src.utils.output_layout import ensure_step_dirs, save_csv, save_json
 from src.utils.checkpoint_loading import load_backbone_checkpoint
+from src.utils.runtime import (
+    load_module as _load_module,
+    resolve_path as _shared_resolve_path,
+    resolve_with_base as _shared_resolve_with_base,
+    to_bool as _to_bool,
+    to_int_or_none as _to_int_or_none,
+)
 from src.utils.property_names import (
     normalize_property_name,
     property_column_candidates,
     property_file_candidates,
 )
+from src.utils.visualization import save_figure_png as shared_save_figure_png, set_publication_style
 
 
 REPRESENTATION_ORDER = [
@@ -79,42 +86,16 @@ REPRESENTATION_COLORS = {
     "MultiViewMean": "#E15759",
 }
 
-
-PUBLICATION_STYLE = {
-    "font.family": "serif",
-    "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
-    "axes.labelsize": 16,
-    "axes.titlesize": 16,
-    "xtick.labelsize": 16,
-    "ytick.labelsize": 16,
-    "legend.fontsize": 16,
-    "axes.linewidth": 0.9,
-    "lines.linewidth": 1.8,
-    "figure.dpi": 300,
-    "savefig.dpi": 600,
-}
-
 if plt is not None:
-    plt.rcParams.update(PUBLICATION_STYLE)
+    set_publication_style()
 
 
 def _resolve_path(path_str: str) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (BASE_DIR / path)
+    return _shared_resolve_path(path_str, BASE_DIR)
 
 
 def _resolve_with_base(path_str: str, base_dir: Path) -> Path:
-    path = Path(path_str)
-    return path if path.is_absolute() else (base_dir / path)
-
-
-def _load_module(module_name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import module {module_name} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _shared_resolve_with_base(path_str, base_dir)
 
 
 def _load_sequence_backbone(
@@ -404,27 +385,6 @@ def _collect_property_files(property_dir: Path, file_list) -> List[Path]:
     return sorted(property_dir.glob("*.csv"))
 
 
-def _to_int_or_none(value):
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("Boolean is not a valid integer sample cap.")
-    if isinstance(value, int):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    return int(float(text))
-
-
-def _to_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _ordered_representations(values: List[str]) -> List[str]:
     seen = set()
     ordered = []
@@ -464,34 +424,8 @@ def _to_float_or_nan(value: Any) -> float:
         return float("nan")
 
 
-def _standardize_figure_text_and_legend(fig, font_size: int = 16, legend_loc: str = "best") -> None:
-    for text_obj in fig.findobj(match=lambda artist: hasattr(artist, "set_fontsize")):
-        try:
-            text_obj.set_fontsize(font_size)
-        except Exception:
-            continue
-    for ax in fig.axes:
-        try:
-            ax.set_title("")
-            ax.set_title("", loc="left")
-            ax.set_title("", loc="right")
-        except Exception:
-            pass
-        legend = ax.get_legend()
-        if legend is not None:
-            legend.set_loc(legend_loc)
-    try:
-        suptitle = getattr(fig, "_suptitle", None)
-        if suptitle is not None:
-            suptitle.set_text("")
-    except Exception:
-        pass
-
-
 def _save_figure_png(fig, output_base: Path) -> None:
-    output_base.parent.mkdir(parents=True, exist_ok=True)
-    _standardize_figure_text_and_legend(fig, font_size=16, legend_loc="best")
-    fig.savefig(output_base.with_suffix(".png"), dpi=600, bbox_inches="tight")
+    shared_save_figure_png(fig, output_base, font_size=16, legend_loc="best")
 
 
 def _draw_heatmap(

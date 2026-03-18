@@ -92,7 +92,7 @@ property:
   generate_figures: true
   hyperparameter_tuning:
     cv_folds: 5
-    n_trials: 250
+    n_trials: 50
     enabled: true
     tuning_epochs: 50
     tuning_patience: 10
