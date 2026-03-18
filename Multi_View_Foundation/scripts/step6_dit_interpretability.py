@@ -671,6 +671,8 @@ def _plot_token_heatmaps(
     active_groups = [g for g in OUTCOME_GROUPS if not token_summary_df[token_summary_df["outcome_group"] == g].empty]
     if not active_groups:
         return
+    global_max = pd.to_numeric(token_summary_df["token_score_norm_mean"], errors="coerce").max()
+    vmax = float(global_max) if np.isfinite(global_max) and float(global_max) > 0.0 else 1.0
     fig, axes = plt.subplots(len(methods), len(active_groups), figsize=(5.2 * len(active_groups), 4.6 * len(methods)), squeeze=False)
     for row_idx, method in enumerate(methods):
         for col_idx, outcome_group in enumerate(active_groups):
@@ -695,15 +697,15 @@ def _plot_token_heatmaps(
                 for j, token in enumerate(token_order):
                     match = group_df[(group_df["proposal_view"] == view) & (group_df["token"] == token)]
                     matrix[i, j] = float(match["token_score_norm_mean"].iloc[0]) if not match.empty else 0.0
-            im = ax.imshow(matrix, aspect="auto", cmap="YlGnBu")
+            im = ax.imshow(matrix, aspect="auto", cmap="YlGnBu", vmin=0.0, vmax=vmax)
             ax.set_yticks(np.arange(len(views)))
             ax.set_yticklabels([view_label(v) for v in views])
             ax.set_xticks(np.arange(len(token_order)))
             ax.set_xticklabels(token_order, rotation=45, ha="right")
             ax.set_ylabel(METHOD_LABELS[method])
             if row_idx == 0:
-                ax.set_xlabel(OUTCOME_LABELS[outcome_group])
-            fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+                ax.set_title(OUTCOME_LABELS[outcome_group])
+            fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="Mean normalized token attribution")
     fig.tight_layout()
     _save_figure(fig, figures_dir / f"figure_f6_token_saliency_{property_name}")
     plt.close(fig)
@@ -729,7 +731,7 @@ def _plot_faithfulness_summary(
     if not active_groups:
         return
     fig, axes = plt.subplots(1, 2, figsize=(14.0, 5.4))
-    for ax, value_col in zip(axes, ["comprehensiveness_drop", "sufficiency_gap"]):
+    for panel_idx, (ax, value_col) in enumerate(zip(axes, ["comprehensiveness_drop", "sufficiency_gap"])):
         width = 0.22
         xpos = np.arange(len(methods), dtype=np.float32)
         for offset_idx, outcome_group in enumerate(active_groups):
@@ -745,9 +747,13 @@ def _plot_faithfulness_summary(
             )
         ax.set_xticks(xpos)
         ax.set_xticklabels([METHOD_LABELS[m] for m in methods], rotation=15, ha="right")
-        ax.set_ylabel("Mean value")
+        if value_col == "comprehensiveness_drop":
+            ax.set_ylabel("Mean comprehensiveness drop")
+        else:
+            ax.set_ylabel("Mean sufficiency gap")
         ax.grid(axis="y", alpha=0.25)
         ax.legend(loc="best", fontsize=12)
+        ax.text(0.01, 0.99, f"({chr(ord('A') + panel_idx)})", transform=ax.transAxes, ha="left", va="top", fontweight="bold")
     fig.tight_layout()
     _save_figure(fig, figures_dir / f"figure_f6_faithfulness_{property_name}")
     plt.close(fig)

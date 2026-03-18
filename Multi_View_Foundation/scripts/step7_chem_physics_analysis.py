@@ -544,6 +544,23 @@ def _series_mean(values) -> float:
     return float(series.mean()) if series.notna().any() else np.nan
 
 
+def _warn_on_nan_metrics(property_name: str, metric_row: dict) -> None:
+    nan_keys = []
+    for key, value in metric_row.items():
+        if isinstance(value, (str, bool, np.bool_)):
+            continue
+        try:
+            if bool(pd.isna(value)):
+                nan_keys.append(str(key))
+        except Exception:
+            continue
+    if nan_keys:
+        print(
+            f"[F7] Warning: metrics for {property_name} contain NaN values in "
+            f"{', '.join(nan_keys)}"
+        )
+
+
 def _smiles_unique_rate(df: pd.DataFrame) -> float:
     if df.empty or "smiles" not in df.columns:
         return np.nan
@@ -1586,6 +1603,7 @@ def _plot_descriptor_detail_figure(property_name: str, descriptor_shift_df: pd.D
         ax0.barh(ds["descriptor"].astype(str), ds["cohens_d_topk_vs_ref"], color=colors, alpha=0.9)
         ax0.axvline(0.0, color=COLOR_TEXT, linewidth=1.0)
         ax0.set_xlabel("Cohen's d (top-k vs reference)")
+        ax0.set_ylabel("Descriptor")
         ax0.grid(axis="x", alpha=0.25)
         _wrap_ticklabels(ax0, axis="y", width=18)
 
@@ -1631,6 +1649,7 @@ def _plot_motif_detail_figure(property_name: str, motif_df: pd.DataFrame, output
         ax0.barh(mf["motif"].astype(str), mf["log2_enrichment_topk_vs_ref"], color=colors, alpha=0.9)
         ax0.axvline(0.0, color=COLOR_TEXT, linewidth=1.0)
         ax0.set_xlabel("log2(top-k / reference)")
+        ax0.set_ylabel("Motif")
         ax0.grid(axis="x", alpha=0.25)
         _wrap_ticklabels(ax0, axis="y", width=18)
 
@@ -2017,17 +2036,19 @@ def _plot_summary_figure(metrics_df: pd.DataFrame, output_base: Path) -> None:
 
         axes[0].bar(props, pd.to_numeric(df["descriptor_consistency_rate"], errors="coerce").fillna(0.0), color=COLOR_PRIMARY)
         axes[0].set_ylim(0, 1)
-        axes[0].set_ylabel("Rate")
+        axes[0].set_ylabel("Descriptor consistency rate")
         axes[0].grid(axis="y", alpha=0.25)
         _wrap_ticklabels(axes[0], axis="x", width=14, rotation=35)
 
         axes[1].bar(props, pd.to_numeric(df["topk_hit_rate"], errors="coerce").fillna(0.0), color=COLOR_ACCENT)
         axes[1].set_ylim(0, 1)
+        axes[1].set_ylabel("Top-k hit rate")
         axes[1].grid(axis="y", alpha=0.25)
         _wrap_ticklabels(axes[1], axis="x", width=14, rotation=35)
 
         axes[2].bar(props, pd.to_numeric(df["mean_nn_similarity"], errors="coerce").fillna(0.0), color=COLOR_QUATERNARY)
         axes[2].set_ylim(0, 1)
+        axes[2].set_ylabel("Mean nearest-neighbor similarity")
         axes[2].grid(axis="y", alpha=0.25)
         _wrap_ticklabels(axes[2], axis="x", width=14, rotation=35)
 
@@ -2074,7 +2095,6 @@ def _plot_view_summary_figure(view_summary_df: pd.DataFrame, output_base: Path, 
         axes[2].set_xticklabels(labels, rotation=20, ha="right")
         axes[2].grid(axis="y", alpha=0.25)
 
-        fig.suptitle(f"F7 View Summary: {property_display_name(property_name)}", fontsize=16, fontweight="bold")
         _save_figure_png(fig, output_base)
         plt.close(fig)
 
@@ -2513,6 +2533,7 @@ def main(args):
             "f6_max_samples_per_group": design_audit_row.get("f6_max_samples_per_group", np.nan),
             "f6_max_tokens_in_figure": design_audit_row.get("f6_max_tokens_in_figure", np.nan),
         }
+        _warn_on_nan_metrics(prop, metric_row)
         metric_rows.append(metric_row)
         save_csv(pd.DataFrame([metric_row]), prop_step_dirs["metrics_dir"] / "metrics_chem_physics.csv", index=False)
 

@@ -367,7 +367,8 @@ def _plot_f5_diagnostics(
                  ha="center", va="center", style="italic")
         ax5.set_axis_off()
 
-    fig.suptitle(f"F5 Inverse Design Diagnostics: {property_label}", fontsize=16, fontweight="bold")
+    for label, ax in zip(["(A)", "(B)", "(C)", "(D)", "(E)", "(F)"], [ax0, ax1, ax2, ax3, ax4, ax5]):
+        ax.text(0.01, 0.99, label, transform=ax.transAxes, ha="left", va="top", fontweight="bold")
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / f"figure_f5_inverse_diagnostics_{property_name}")
     plt.close(fig)
@@ -722,7 +723,8 @@ def _plot_f5_accepted_polymer_overview(
     else:
         ax3.text(0.5, 0.5, "No accepted candidates", ha="center", va="center")
 
-    fig.suptitle(f"F5 accepted polymer report: {property_label}", fontsize=16, fontweight="bold", y=0.995)
+    for label, ax in zip(["(A)", "(B)", "(C)", "(D)"], [ax0, ax1, ax2, ax3]):
+        ax.text(0.01, 0.99, label, transform=ax.transAxes, ha="left", va="top", fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.98])
     _save_figure_png(fig, figures_dir / f"figure_f5_accepted_polymer_overview_{property_name}")
     plt.close(fig)
@@ -2627,10 +2629,14 @@ def _augment_f5_posthoc_flags(scored_df: pd.DataFrame) -> pd.DataFrame:
             df["is_two_star"] = False
     if "sa_pass" not in df.columns:
         df["sa_pass"] = False
-    df["property_hit"] = df.get("property_hit", False).fillna(False).astype(bool)
+    if "property_hit" not in df.columns:
+        df["property_hit"] = False
     df["is_valid"] = df["is_valid"].fillna(False).astype(bool)
     df["is_two_star"] = df["is_two_star"].fillna(False).astype(bool)
-    df["is_novel"] = df.get("is_novel", False).fillna(False).astype(bool)
+    if "is_novel" not in df.columns:
+        df["is_novel"] = False
+    df["property_hit"] = df["property_hit"].fillna(False).astype(bool)
+    df["is_novel"] = df["is_novel"].fillna(False).astype(bool)
     df["sa_pass"] = df["sa_pass"].fillna(False).astype(bool)
     df["fair_hit"] = (
         scored_mask
@@ -2929,7 +2935,8 @@ def _plot_f5_design_process(
         ax2.text(0.5, 0.5, "No per-view metrics", ha="center", va="center")
         ax2.set_axis_off()
 
-    fig.suptitle(f"F5 Benchmark Design Process: {property_label}", fontsize=16, fontweight="bold")
+    for label, ax in zip(["(A)", "(B)", "(C)"], [ax0, ax1, ax2]):
+        ax.text(0.01, 0.99, label, transform=ax.transAxes, ha="left", va="top", fontweight="bold")
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / f"figure_f5_design_process_{property_name}")
     plt.close(fig)

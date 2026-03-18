@@ -2039,9 +2039,9 @@ def main(args):
                     "property": prop_name,
                     "split": "val",
                     "split_detail": f"cv_mean_{int(hpo_best.get('cv_folds', 5))}fold",
-                    "mae": float(hpo_best.get("cv_mean_mae", 0.0)),
-                    "rmse": float(hpo_best.get("cv_mean_rmse", 0.0)),
-                    "r2": float(hpo_best.get("cv_mean_r2", 0.0)),
+                    "mae": _to_float_or_nan(hpo_best.get("cv_mean_mae")),
+                    "rmse": _to_float_or_nan(hpo_best.get("cv_mean_rmse")),
+                    "r2": _to_float_or_nan(hpo_best.get("cv_mean_r2")),
                 }
             )
             rows_by_property.setdefault(prop_name, []).append(rows[-1])
@@ -2050,7 +2050,7 @@ def main(args):
                 test_preds = _predict_torch_model(model, scaler, embeddings[test_rows], device=training_device)
                 test_metrics = _compute_metrics(targets[test_indices], test_preds)
             else:
-                test_metrics = {"mae": 0.0, "rmse": 0.0, "r2": 0.0}
+                test_metrics = {"mae": float("nan"), "rmse": float("nan"), "r2": float("nan")}
             rows.append(
                 {
                     "method": "Multi_View_Foundation",
@@ -2175,9 +2175,9 @@ def main(args):
                             "property": prop_name,
                             "split": "val",
                             "split_detail": f"cv_mean_{int(hpo_best.get('cv_folds', 5))}fold",
-                            "mae": float(hpo_best.get("cv_mean_mae", 0.0)),
-                            "rmse": float(hpo_best.get("cv_mean_rmse", 0.0)),
-                            "r2": float(hpo_best.get("cv_mean_r2", 0.0)),
+                            "mae": _to_float_or_nan(hpo_best.get("cv_mean_mae")),
+                            "rmse": _to_float_or_nan(hpo_best.get("cv_mean_rmse")),
+                            "r2": _to_float_or_nan(hpo_best.get("cv_mean_r2")),
                         }
                     )
                     rows_by_property.setdefault(prop_name, []).append(rows[-1])
@@ -2186,7 +2186,7 @@ def main(args):
                         test_preds = _predict_torch_model(model, scaler, fused[test_rows], device=training_device)
                         test_metrics = _compute_metrics(targets[test_indices], test_preds)
                     else:
-                        test_metrics = {"mae": 0.0, "rmse": 0.0, "r2": 0.0}
+                        test_metrics = {"mae": float("nan"), "rmse": float("nan"), "r2": float("nan")}
                     rows.append(
                         {
                             "method": "Multi_View_Foundation",

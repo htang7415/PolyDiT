@@ -37,7 +37,28 @@ def _save_figure_png(fig, output_base: Path) -> None:
     shared_save_figure_png(fig, output_base, font_size=16, legend_loc="best")
 
 
-def _draw_heatmap(fig, ax, matrix: np.ndarray, row_labels, col_labels, vmin=0.0, vmax=1.0) -> None:
+def _metric_label(metric: str) -> str:
+    if metric.startswith("recall_at_"):
+        suffix = str(metric).split("_")[-1]
+        return f"Recall@{suffix}"
+    labels = {
+        "mean_cosine_sim_matched": "Matched cosine similarity",
+        "match_rate": "Matched ID rate",
+    }
+    return labels.get(metric, str(metric))
+
+
+def _draw_heatmap(
+    fig,
+    ax,
+    matrix: np.ndarray,
+    row_labels,
+    col_labels,
+    *,
+    colorbar_label: str,
+    vmin=0.0,
+    vmax=1.0,
+) -> None:
     arr = np.asarray(matrix, dtype=np.float32)
     masked = np.ma.masked_invalid(arr)
     im = ax.imshow(masked, cmap="YlGnBu", vmin=vmin, vmax=vmax, aspect="auto")
@@ -54,7 +75,7 @@ def _draw_heatmap(fig, ax, matrix: np.ndarray, row_labels, col_labels, vmin=0.0,
             if np.isfinite(val):
                 text_color = "white" if float(val) > 0.65 * (vmax - vmin) + vmin else "black"
                 ax.text(c, r, f"{float(val):.2f}", ha="center", va="center", fontsize=cell_fs, color=text_color)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=colorbar_label)
 
 
 def _split_dataset_and_view(token: str):
@@ -179,7 +200,22 @@ def _plot_f2_retrieval_heatmaps(metrics_df: pd.DataFrame, figures_dir: Path) -> 
             vmax = 1.0
             if finite.size and metric == "match_rate":
                 vmax = min(1.0, max(0.05, float(np.nanmax(finite))))
-            _draw_heatmap(fig, ax, matrix, views, views, vmin=0.0, vmax=vmax)
+            _draw_heatmap(
+                fig,
+                ax,
+                matrix,
+                views,
+                views,
+                colorbar_label=_metric_label(metric),
+                vmin=0.0,
+                vmax=vmax,
+            )
+            if row_idx == 0:
+                ax.set_title(_metric_label(metric))
+            if row_idx == len(datasets) - 1:
+                ax.set_xlabel("Target view")
+            if col_idx == 0:
+                ax.set_ylabel(f"{dataset}\nSource view")
 
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f2_retrieval_heatmaps")
@@ -219,7 +255,9 @@ def _plot_f2_cosine_sim_bars(metrics_df: pd.DataFrame, figures_dir: Path) -> Non
         bars = ax.bar(range(len(pairs)), sims, color=bar_colors, alpha=0.88, width=0.6)
         ax.set_xticks(range(len(pairs)))
         ax.set_xticklabels(pairs, rotation=40, ha="right", fontsize=11)
-        ax.set_ylim(0.0, 1.05)
+        finite_sims = [float(val) for val in sims if np.isfinite(val)]
+        upper = max(finite_sims) + 0.08 if finite_sims else 1.0
+        ax.set_ylim(0.0, max(1.05, upper))
         ax.set_ylabel("Mean Cosine Similarity (matched pairs)", fontsize=13)
         ax.set_title(f"Dataset: {dataset}", fontsize=14)
         ax.grid(axis="y", alpha=0.25)
@@ -284,11 +322,14 @@ def _plot_f2_recall_bars(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
         x = np.arange(len(src_views), dtype=np.float32)
         width = 0.7 / max(n_k, 1)
         offsets = np.linspace(-0.35 + width / 2, 0.35 - width / 2, n_k)
+        max_mean = 0.0
         for k_idx, (recall_col, k_label) in enumerate(zip(recall_cols, k_labels)):
             means = []
             for sv in src_views:
                 vals = pd.to_numeric(sub[sub["src_view"] == sv][recall_col], errors="coerce").dropna()
                 means.append(float(vals.mean()) if len(vals) else 0.0)
+            if means:
+                max_mean = max(max_mean, max(means))
             color = palette[k_idx % len(palette)]
             bars = ax.bar(x + offsets[k_idx], means, width=width, color=color, alpha=0.88, label=k_label)
             for bar, val in zip(bars, means):
@@ -297,7 +338,7 @@ def _plot_f2_recall_bars(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
                             f"{val:.2f}", ha="center", va="bottom", fontsize=9, rotation=90)
         ax.set_xticks(x)
         ax.set_xticklabels(src_views, rotation=35, ha="right")
-        ax.set_ylim(0.0, 1.05)
+        ax.set_ylim(0.0, max(1.05, float(max_mean) + 0.08))
         ax.set_ylabel("Mean recall (avg over target views)")
         ax.set_title(f"Dataset: {dataset}")
         ax.grid(axis="y", alpha=0.25)

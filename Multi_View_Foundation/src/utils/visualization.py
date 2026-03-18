@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Iterable
 
@@ -28,6 +29,7 @@ NATURE_PALETTE = [
 
 COLOR_TEXT = "#1F2937"
 COLOR_MUTED = "#B8BFC9"
+LOGGER = logging.getLogger(__name__)
 
 VIEW_ORDER = ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph", "all"]
 VIEW_LABELS = {
@@ -116,29 +118,27 @@ def standardize_figure_text_and_legend(
     legend_loc: str = "best",
     strip_titles: bool = True,
 ) -> None:
+    font_failures = 0
     for text_obj in fig.findobj(match=lambda artist: hasattr(artist, "set_fontsize")):
         try:
             text_obj.set_fontsize(font_size)
         except Exception:
-            continue
+            font_failures += 1
+    if font_failures:
+        LOGGER.warning("Failed to set font size on %d text objects.", font_failures)
     for ax in fig.axes:
-        if strip_titles:
-            try:
-                ax.set_title("")
-                ax.set_title("", loc="left")
-                ax.set_title("", loc="right")
-            except Exception:
-                pass
         legend = ax.get_legend()
         if legend is not None:
             set_legend_location(legend, legend_loc)
     if strip_titles:
-        try:
-            suptitle = getattr(fig, "_suptitle", None)
-            if suptitle is not None:
-                suptitle.set_text("")
-        except Exception:
-            pass
+        get_suptitle = getattr(fig, "get_suptitle", None)
+        set_suptitle = getattr(fig, "suptitle", None)
+        if callable(set_suptitle):
+            try:
+                if not callable(get_suptitle) or str(get_suptitle()).strip():
+                    set_suptitle("")
+            except Exception as exc:
+                LOGGER.warning("Failed to clear figure suptitle: %s", exc)
 
 
 def set_legend_location(legend, legend_loc: str = "best") -> None:
@@ -147,19 +147,10 @@ def set_legend_location(legend, legend_loc: str = "best") -> None:
         try:
             setter(legend_loc)
             return
-        except Exception:
-            pass
-    private_setter = getattr(legend, "_set_loc", None)
-    if callable(private_setter):
-        try:
-            private_setter(legend_loc)
+        except Exception as exc:
+            LOGGER.warning("Failed to set legend location to '%s': %s", legend_loc, exc)
             return
-        except Exception:
-            pass
-    try:
-        legend._loc = legend_loc
-    except Exception:
-        pass
+    LOGGER.warning("Legend.set_loc is unavailable; keeping existing legend location.")
 
 
 def save_figure_png(

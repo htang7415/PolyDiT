@@ -28,7 +28,12 @@ from src.utils.runtime import (
     resolve_with_base as _shared_resolve_with_base,
     to_bool as _to_bool,
 )
-from src.utils.visualization import save_figure_png as shared_save_figure_png, set_publication_style
+from src.utils.visualization import (
+    save_figure_png as shared_save_figure_png,
+    set_publication_style,
+    view_color,
+    view_label,
+)
 
 try:  # pragma: no cover
     import matplotlib
@@ -108,6 +113,10 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
     if plt is None or meta_df.empty:
         return
     views = meta_df["view"].astype(str).tolist()
+    if not views:
+        return
+    view_labels = [view_label(view) for view in views]
+    view_colors = [view_color(view) for view in views]
     x = np.arange(len(views), dtype=np.float32)
 
     d1 = pd.to_numeric(meta_df["d1_samples"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
@@ -128,7 +137,7 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
     ax0.bar(x - width / 2.0, d1, width=width, color="#4E79A7", alpha=0.9, label="D1 (backbone train)")
     ax0.bar(x + width / 2.0, d2, width=width, color="#F28E2B", alpha=0.9, label="D2 (property train)")
     ax0.set_xticks(x)
-    ax0.set_xticklabels(views, rotation=30, ha="right")
+    ax0.set_xticklabels(view_labels, rotation=30, ha="right")
     ax0.set_ylabel("Embedded samples")
     ax0.set_title("(A) Dataset coverage per view")
     ax0.grid(axis="y", alpha=0.25)
@@ -141,7 +150,7 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
     ax1.bar(x, d1_time, width=0.55, color="#4E79A7", alpha=0.85, label="D1 time")
     ax1.bar(x, d2_time, width=0.55, bottom=d1_time, color="#F28E2B", alpha=0.85, label="D2 time")
     ax1.set_xticks(x)
-    ax1.set_xticklabels(views, rotation=30, ha="right")
+    ax1.set_xticklabels(view_labels, rotation=30, ha="right")
     ax1.set_ylabel("Encoding time (s)")
     ax1.set_title("(B) Encoding time breakdown (D1 + D2)")
     ax1.grid(axis="y", alpha=0.25)
@@ -151,11 +160,9 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
             ax1.text(float(i), float(tot), f"{float(tot):.1f}s", ha="center", va="bottom", fontsize=11)
 
     # (C) Encoding throughput
-    palette_c = ["#4E79A7", "#F28E2B", "#59A14F", "#E15759", "#B07AA1"]
-    bar_colors = [palette_c[i % len(palette_c)] for i in range(len(views))]
-    bars2 = ax2.bar(x, speed, color=bar_colors, alpha=0.9)
+    bars2 = ax2.bar(x, speed, color=view_colors, alpha=0.9)
     ax2.set_xticks(x)
-    ax2.set_xticklabels(views, rotation=30, ha="right")
+    ax2.set_xticklabels(view_labels, rotation=30, ha="right")
     ax2.set_ylabel("Throughput (samples/sec)")
     ax2.set_title("(C) Encoding throughput")
     ax2.grid(axis="y", alpha=0.25)
@@ -165,10 +172,9 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
                      f"{float(val):.0f}", ha="center", va="bottom", fontsize=11)
 
     # (D) Embedding dimensionality per view
-    dim_colors = [palette_c[i % len(palette_c)] for i in range(len(views))]
-    bars3 = ax3.bar(x, emb_dims, color=dim_colors, alpha=0.9)
+    bars3 = ax3.bar(x, emb_dims, color=view_colors, alpha=0.9)
     ax3.set_xticks(x)
-    ax3.set_xticklabels(views, rotation=30, ha="right")
+    ax3.set_xticklabels(view_labels, rotation=30, ha="right")
     ax3.set_ylabel("Embedding dimension")
     ax3.set_title("(D) Backbone embedding dimensionality")
     ax3.grid(axis="y", alpha=0.25)
@@ -179,10 +185,16 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
     # (E) Samples-per-second vs embedding-dim scatter
     finite_mask = np.isfinite(speed) & np.isfinite(emb_dims) & (speed > 0) & (emb_dims > 0)
     if finite_mask.any():
-        sc = ax4.scatter(emb_dims[finite_mask], speed[finite_mask],
-                         c=np.arange(int(finite_mask.sum())), cmap="tab10", s=100, zorder=5)
+        scatter_colors = [view_color(view) for view in np.asarray(views)[finite_mask].tolist()]
+        ax4.scatter(
+            emb_dims[finite_mask],
+            speed[finite_mask],
+            c=scatter_colors,
+            s=100,
+            zorder=5,
+        )
         for i, (v, spd, dim) in enumerate(zip(np.array(views)[finite_mask], speed[finite_mask], emb_dims[finite_mask])):
-            ax4.annotate(v, (float(dim), float(spd)), xytext=(5, 3), textcoords="offset points", fontsize=11)
+            ax4.annotate(view_label(v), (float(dim), float(spd)), xytext=(5, 3), textcoords="offset points", fontsize=11)
         ax4.set_xlabel("Embedding dimension")
         ax4.set_ylabel("Throughput (samples/sec)")
         ax4.set_title("(E) Throughput vs. embedding dimension")
@@ -196,7 +208,7 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
     emb_dims_int = [int(d) for d in emb_dims]
     table_data = [
         [v, f"{int(d1_v):,}", f"{int(d2_v):,}", f"{dim:,}", f"{t:.1f}s", m]
-        for v, d1_v, d2_v, dim, t, m in zip(views, d1, d2, emb_dims_int, total_time, model_sizes_list)
+        for v, d1_v, d2_v, dim, t, m in zip(view_labels, d1, d2, emb_dims_int, total_time, model_sizes_list)
     ]
     col_labels = ["View", "D1 samples", "D2 samples", "Emb dim", "Time (s)", "Model"]
     tbl = ax5.table(cellText=table_data, colLabels=col_labels, loc="center", cellLoc="center")
@@ -208,7 +220,6 @@ def _plot_f1_embedding_summary(meta_df: pd.DataFrame, figures_dir: Path) -> None
         tbl[(0, col_idx)].set_text_props(color="white", fontweight="bold")
     ax5.set_title(f"(F) Embedding summary  (total time: {float(np.sum(total_time)):.1f}s)")
 
-    fig.suptitle("F1: Backbone Embedding Extraction Summary", fontsize=18, fontweight="bold", y=1.01)
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f1_embedding_summary")
     plt.close(fig)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 from pathlib import Path
 import sys
@@ -211,6 +212,11 @@ def _subsample_indices(n_items: int, cap: Optional[int], seed: int) -> np.ndarra
     return chosen.astype(np.int64)
 
 
+def _stable_seed_offset(value: str) -> int:
+    digest = hashlib.sha256(str(value).encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], byteorder="little", signed=False)
+
+
 def _normalize_rows(array: np.ndarray) -> np.ndarray:
     arr = np.asarray(array, dtype=np.float32)
     norms = np.linalg.norm(arr, axis=1, keepdims=True)
@@ -234,7 +240,7 @@ def _effective_rank_and_participation(embeddings: np.ndarray) -> tuple[float, fl
     entropy = float(-(probs * np.log(probs + 1e-12)).sum())
     effective_rank = float(np.exp(entropy))
     dim = float(x.shape[1])
-    participation = float((power.sum() ** 2) / max(np.square(power).sum(), 1e-12))
+    participation = float(1.0 / max(np.square(probs).sum(), 1e-12))
     return effective_rank / max(dim, 1.0), participation / max(dim, 1.0)
 
 
@@ -571,7 +577,7 @@ def _plot_embedding_research(metrics_df: pd.DataFrame, figures_dir: Path, datase
             arr.append(float(val) if np.isfinite(val) else np.nan)
         return np.asarray(arr, dtype=np.float32)
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 11))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 11), constrained_layout=True)
     ax0, ax1, ax2, ax3 = axes.reshape(-1)
     panels = [
         (ax0, "mean_recall_at_10", "Mean Recall@10"),
@@ -586,10 +592,18 @@ def _plot_embedding_research(metrics_df: pd.DataFrame, figures_dir: Path, datase
         ax.set_xticklabels(labels, rotation=18, ha="right")
         ax.set_ylabel(ylabel)
         ax.grid(axis="y", linestyle="--", alpha=0.3)
-        ax.text(0.01, 0.98, f"({chr(ord('a') + idx)})", transform=ax.transAxes, ha="left", va="top")
+        ax.text(
+            0.01,
+            0.98,
+            f"({chr(ord('a') + idx)})",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontweight="bold",
+        )
         if col in {"mean_recall_at_10"}:
             ax.set_ylim(bottom=0.0, top=max(1.0, float(np.nanmax(y)) * 1.08 if np.isfinite(y).any() else 1.0))
-    fig.text(0.995, 0.005, str(dataset).upper(), ha="right", va="bottom", fontsize=16, alpha=0.6)
+    fig.text(0.975, 0.015, str(dataset).upper(), ha="right", va="bottom", fontsize=16, alpha=0.6)
     save_figure_png(fig, figures_dir / "figure_f4_embedding_research")
     plt.close(fig)
 
@@ -723,7 +737,11 @@ def main(args) -> None:
         if len(paired_subset) != int(aligned.shape[0]):
             continue
 
-        sample_idx = _subsample_indices(len(paired_subset), max_samples_per_view, seed + len(view))
+        sample_idx = _subsample_indices(
+            len(paired_subset),
+            max_samples_per_view,
+            seed + _stable_seed_offset(view),
+        )
         emb_sample = aligned[sample_idx]
         paired_sample = paired_subset.iloc[sample_idx].reset_index(drop=True)
         emb_sample = _normalize_rows(emb_sample)
@@ -812,6 +830,7 @@ def main(args) -> None:
                 "representation_length_mean": token_stats.get("representation_length_mean", np.nan),
                 "representation_length_p95": token_stats.get("representation_length_p95", np.nan),
                 "truncation_rate": token_stats.get("truncation_rate", np.nan),
+                "coverage_loss": 1.0 - coverage,
                 "tokenizer_failure_rate": 1.0 - coverage,
                 "property_smoothness_mean": float(np.mean(prop_scores)) if prop_scores else np.nan,
                 "mean_test_r2": comp_row.get("mean_test_r2", np.nan),
@@ -842,6 +861,7 @@ def main(args) -> None:
             "representation_length_mean": float(pd.to_numeric(metrics_df["representation_length_mean"], errors="coerce").mean()),
             "representation_length_p95": float(pd.to_numeric(metrics_df["representation_length_p95"], errors="coerce").mean()),
             "truncation_rate": float(pd.to_numeric(metrics_df["truncation_rate"], errors="coerce").mean()),
+            "coverage_loss": float(pd.to_numeric(metrics_df["coverage_loss"], errors="coerce").mean()),
             "tokenizer_failure_rate": float(pd.to_numeric(metrics_df["tokenizer_failure_rate"], errors="coerce").mean()),
             "property_smoothness_mean": float(pd.to_numeric(metrics_df["property_smoothness_mean"], errors="coerce").mean()),
             "mean_test_r2": float(pd.to_numeric(metrics_df["mean_test_r2"], errors="coerce").mean()),
