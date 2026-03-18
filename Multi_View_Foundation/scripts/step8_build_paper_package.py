@@ -94,12 +94,12 @@ METHOD_PLOT_COLORS = {
     "Bi_Diffusion_graph": "#8491B4",
 }
 MANUSCRIPT_CAPTIONS = [
-    "Figure 1. Generation quality of five bidirectional diffusion models across molecular representation types. (a) Valid polymer fraction for each representation at the best-performing model size. (b) Unique fraction among valid generated polymers, reflecting generation diversity. (c) Validity-uniqueness trade-off colored by novelty.",
-    "Figure 2. Cross-view molecular alignment in the multi-view foundation model. (a) Recall@1 heatmap: fraction of queries for which the correct paired molecule ranks first under cosine similarity. (b) Recall@10 heatmap: fraction of correct pairs recovered within the top-10 retrieved candidates.",
-    "Figure 3. Property prediction with multi-view foundation embeddings across model scales. (a) Test-set R^2 versus model size across configured target properties, comparing the best baseline representation and the best MVF/fusion representation at each size. (b) Fusion gain in R^2 across model sizes.",
-    "Figure 4. Multi-view polymer embedding research across model scales. (a) Mean cross-view Recall@10 versus model size for each representation. (b) Embedding-space property smoothness versus model size for each representation, measured by kNN regression on D2 polymer embeddings.",
-    "Figure 5. View-aligned inverse polymer design across model scales. (a) F5 fair hit rate versus model size for each proposal view under the shared SMILES scorer. (b) F5 per-view top-k fair hit rate versus model size for each proposal view.",
-    "Figure 6. Chemistry and physics analysis of inversely designed polymers. (a) Normalized descriptor shifts of accepted candidates relative to the D1 reference set for key physicochemical features and each target property. (b) Motif enrichment ratios for discriminative polymer substructures in accepted candidates compared to the reference distribution.",
+    "Figure 1. All five representation-specific generators produce valid polymers, but their diversity and novelty profiles differ, motivating a multi-view comparison. (a) Valid polymer fraction for each representation at the best-performing model size. (b) Unique fraction among valid generated polymers. (c) Validity-uniqueness trade-off colored by novelty.",
+    "Figure 2. Cross-view alignment is strong enough to compare the same polymer across representation spaces. (a) Recall@1 heatmap: fraction of queries for which the correct paired molecule ranks first under cosine similarity. (b) Recall@10 heatmap: fraction of correct pairs recovered within the top-10 retrieved candidates.",
+    "Figure 3. Different polymer views provide complementary embedding structure rather than a single uniformly best representation. (a) Mean cross-view Recall@10 across available model sizes or, when only one size is available, across views directly. (b) Embedding-space property smoothness across available model sizes or across views directly.",
+    "Figure 4. Fusing aligned views improves downstream property prediction over the strongest single-view alternative. (a) Test-set R^2 for the best single-view reference and the fused multi-view representation across configured target properties or model sizes, depending on available checkpoints. (b) Fusion gain in R^2, computed as fused multi-view performance minus the best single-view reference.",
+    "Figure 5. Inverse design success generalizes across target properties rather than a single polymer objective. (a) Fair hit rate for each proposal view across available properties, aggregating over model sizes when multiple sizes are present. (b) Top-k fair hit rate under the same multi-property comparison.",
+    "Figure 6. Accepted inverse designs remain chemically plausible under descriptor, physics-rule, motif, and nearest-neighbor checks. (a) Normalized descriptor shifts relative to the reference set. (b) Physics-rule consistency rate across properties. (c) Motif enrichment of accepted candidates relative to the reference distribution. (d) Nearest-neighbor similarity to known polymers.",
 ]
 
 SI_CAPTIONS = [
@@ -107,11 +107,11 @@ SI_CAPTIONS = [
     "Figure S2. Training convergence and generation quality across representations and model sizes.",
     "Figure S3. Multi-view embedding extraction summary: embedding dimensionalities, model sizes, and sample counts per view.",
     "Figure S4. Cross-view retrieval evaluation: full Recall@K heatmaps across all view pairs.",
-    "Figure S5. Property head training diagnostics: per-split metrics, head leaderboard, and coverage.",
-    "Figure S6. Embedding-research diagnostics: tokenizer efficiency, geometry summaries, and semantic-structure metrics across views.",
-    "Figure S7. Foundation-guided inverse design diagnostics: candidate score distributions and accepted-candidate profiles by view.",
-    "Figure S8. F6 DiT interpretability diagnostics: integrated gradients, gradient-times-hidden, and attention-rollout analyses of the shared SMILES scorer, with faithfulness summaries across proposal views and outcome groups.",
-    "Figure S9. Chemistry/physics analysis: per-property descriptor distributions, physics consistency checks, and nearest-neighbor explanations.",
+    "Figure S5. Property-head training diagnostics supporting Figure 4: per-split metrics, head leaderboard, and coverage across target properties.",
+    "Figure S6. Embedding-research diagnostics supporting Figure 3: tokenizer efficiency, geometry summaries, and semantic-structure metrics across views.",
+    "Figure S7. Foundation-guided inverse-design diagnostics supporting Figure 5: candidate score distributions and accepted-candidate profiles by view.",
+    "Figure S8. F6 DiT interpretability diagnostics complementing Figures 3-5: integrated gradients, gradient-times-hidden, and attention-rollout analyses of the shared SMILES scorer, with faithfulness summaries across proposal views and outcome groups.",
+    "Figure S9. Chemistry/physics diagnostics supporting Figure 6: per-property descriptor distributions, physics consistency checks, and nearest-neighbor explanations.",
 ]
 
 STEP_EXPORT_SPECS = {
@@ -1745,9 +1745,6 @@ def _save_plot_figure(fig, output_path: Path, dpi: int) -> bool:
             continue
     for ax in fig.axes:
         try:
-            ax.set_title("")
-            ax.set_title("", loc="left")
-            ax.set_title("", loc="right")
             ax.xaxis.label.set_fontsize(16)
             ax.yaxis.label.set_fontsize(16)
         except Exception:
@@ -2458,7 +2455,7 @@ def _fig3_property_prediction(
     fallback_lines: Sequence[str],
     fallback_note: str,
 ) -> tuple[bool, str, str]:
-    caption = MANUSCRIPT_CAPTIONS[2]
+    caption = MANUSCRIPT_CAPTIONS[3]
     if plt is None:
         ok, render_mode = _render_panels_or_placeholder(
             output_path=output_path,
@@ -2540,34 +2537,42 @@ def _fig3_property_prediction(
         )
         return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
-    fusion_tokens = ("mvf", "multiview", "multi view", "fusion", "mean")
+    fusion_tokens = ("multiview", "multi view", "fusion", "mean")
     comp_rows: list[dict[str, object]] = []
     for prop in prop_order:
         for size in size_order:
             block = agg[(agg["property"] == prop) & (agg["model_size"] == size)]
             if block.empty:
                 continue
-            baseline_vals = block.loc[block["source_name"] == "baseline", "r2"]
             mvf_block = block.loc[block["source_name"] == "mvf"].copy()
-            mvf_fusion_vals = mvf_block.loc[
-                mvf_block["representation_label"].astype(str).str.lower().apply(
-                    lambda t: any(tok in t for tok in fusion_tokens)
-                ),
-                "r2",
-            ]
-            baseline_best = float(baseline_vals.max()) if not baseline_vals.dropna().empty else np.nan
-            if mvf_fusion_vals.dropna().empty:
-                mvf_best = float(mvf_block["r2"].max()) if not mvf_block["r2"].dropna().empty else np.nan
+            if mvf_block.empty:
+                continue
+            rep_lower = mvf_block["representation_label"].astype(str).str.lower()
+            fusion_mask = rep_lower.apply(lambda text: any(tok in text for tok in fusion_tokens))
+            fusion_vals = mvf_block.loc[fusion_mask, "r2"].dropna()
+            single_vals = mvf_block.loc[~fusion_mask, "r2"].dropna()
+            baseline_vals = block.loc[block["source_name"] == "baseline", "r2"].dropna()
+            if fusion_vals.empty and mvf_block["r2"].dropna().empty:
+                continue
+            fusion_best = float(fusion_vals.max()) if not fusion_vals.empty else float(mvf_block["r2"].max())
+            if not single_vals.empty:
+                reference_best = float(single_vals.max())
+                reference_source = "single_view"
+            elif not baseline_vals.empty:
+                reference_best = float(baseline_vals.max())
+                reference_source = "baseline"
             else:
-                mvf_best = float(mvf_fusion_vals.max())
-            gain = mvf_best - baseline_best if np.isfinite(mvf_best) and np.isfinite(baseline_best) else np.nan
+                reference_best = np.nan
+                reference_source = "missing"
+            gain = fusion_best - reference_best if np.isfinite(fusion_best) and np.isfinite(reference_best) else np.nan
             comp_rows.append(
                 {
                     "property": prop,
                     "model_size": size,
-                    "baseline_best_r2": baseline_best,
-                    "mvf_best_r2": mvf_best,
+                    "reference_r2": reference_best,
+                    "fusion_r2": fusion_best,
                     "fusion_gain": gain,
+                    "reference_source": reference_source,
                 }
             )
 
@@ -2583,95 +2588,148 @@ def _fig3_property_prediction(
         )
         return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
-    size_to_x = {s: i for i, s in enumerate(size_order)}
     fig, axes = plt.subplots(1, 2, figsize=(15.8, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
 
-    for idx, prop in enumerate(prop_order):
-        sub = comp[comp["property"] == prop].copy()
-        if sub.empty:
-            continue
-        sub["x"] = sub["model_size"].map(size_to_x)
-        sub = sub.dropna(subset=["x"]).sort_values("x")
-        if sub.empty:
-            continue
-        color = NATURE_PALETTE[idx % len(NATURE_PALETTE)]
-        x_vals = sub["x"].to_numpy(dtype=float)
-        ax0.plot(
-            x_vals,
-            sub["baseline_best_r2"].to_numpy(dtype=float),
-            linestyle="--",
-            marker="o",
-            linewidth=2.0,
-            markersize=6.5,
-            color=color,
-            alpha=0.65,
-            label=f"{prop} baseline",
+    if len(size_order) <= 1:
+        summary = (
+            comp.groupby("property", as_index=False)[["reference_r2", "fusion_r2", "fusion_gain"]]
+            .mean(numeric_only=True)
         )
-        ax0.plot(
-            x_vals,
-            sub["mvf_best_r2"].to_numpy(dtype=float),
-            linestyle="-",
-            marker="s",
-            linewidth=2.2,
-            markersize=6.5,
-            color=color,
-            alpha=0.95,
-            label=f"{prop} MVF",
+        summary = summary.set_index("property").reindex(prop_order).dropna(how="all").reset_index()
+        x = np.arange(len(summary))
+        width = 0.36
+        ax0.bar(
+            x - width / 2.0,
+            pd.to_numeric(summary["reference_r2"], errors="coerce").to_numpy(dtype=float),
+            width=width,
+            color=COLOR_MUTED,
+            edgecolor=COLOR_TEXT,
+            linewidth=0.7,
+            label="Best single-view reference",
         )
+        ax0.bar(
+            x + width / 2.0,
+            pd.to_numeric(summary["fusion_r2"], errors="coerce").to_numpy(dtype=float),
+            width=width,
+            color=NATURE_PALETTE[0],
+            edgecolor=COLOR_TEXT,
+            linewidth=0.7,
+            label="Fused multi-view",
+        )
+        ax0.set_xticks(x)
+        ax0.set_xticklabels(summary["property"].tolist(), rotation=35, ha="right")
+        ax0.set_xlabel("Property")
+        ax0.set_ylabel("Test R^2")
+        ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+        ax0.legend(loc="best", frameon=False, fontsize=max(8, font_size - 4))
 
-    ax0.set_xticks(np.arange(len(size_order)))
-    ax0.set_xticklabels([s.upper() for s in size_order])
-    ax0.set_xlabel("Model Size")
-    ax0.set_ylabel("Test R^2")
-    ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
-    handles0, labels0 = ax0.get_legend_handles_labels()
-    if handles0:
-        max_props = 6
-        max_entries = max_props * 2
-        ax0.legend(
-            handles0[:max_entries],
-            labels0[:max_entries],
-            loc="best",
-            ncol=2,
-            frameon=False,
-            fontsize=max(8, font_size - 4),
+        gains = pd.to_numeric(summary["fusion_gain"], errors="coerce").to_numpy(dtype=float)
+        gain_colors = [
+            NATURE_PALETTE[0] if np.isfinite(val) and val >= 0.0 else NATURE_PALETTE[3]
+            for val in gains
+        ]
+        ax1.bar(
+            x,
+            gains,
+            color=gain_colors,
+            edgecolor=COLOR_TEXT,
+            linewidth=0.7,
         )
+        ax1.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, alpha=0.75)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(summary["property"].tolist(), rotation=35, ha="right")
+        ax1.set_xlabel("Property")
+        ax1.set_ylabel("Fusion Gain in R^2")
+        ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+    else:
+        size_to_x = {s: i for i, s in enumerate(size_order)}
+        for idx, prop in enumerate(prop_order):
+            sub = comp[comp["property"] == prop].copy()
+            if sub.empty:
+                continue
+            sub["x"] = sub["model_size"].map(size_to_x)
+            sub = sub.dropna(subset=["x"]).sort_values("x")
+            if sub.empty:
+                continue
+            color = NATURE_PALETTE[idx % len(NATURE_PALETTE)]
+            x_vals = sub["x"].to_numpy(dtype=float)
+            ax0.plot(
+                x_vals,
+                sub["reference_r2"].to_numpy(dtype=float),
+                linestyle="--",
+                marker="o",
+                linewidth=2.0,
+                markersize=6.5,
+                color=color,
+                alpha=0.65,
+                label=f"{prop} best single",
+            )
+            ax0.plot(
+                x_vals,
+                sub["fusion_r2"].to_numpy(dtype=float),
+                linestyle="-",
+                marker="s",
+                linewidth=2.2,
+                markersize=6.5,
+                color=color,
+                alpha=0.95,
+                label=f"{prop} fusion",
+            )
+
+        ax0.set_xticks(np.arange(len(size_order)))
+        ax0.set_xticklabels([s.upper() for s in size_order])
+        ax0.set_xlabel("Model Size")
+        ax0.set_ylabel("Test R^2")
+        ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+        handles0, labels0 = ax0.get_legend_handles_labels()
+        if handles0:
+            max_props = 6
+            max_entries = max_props * 2
+            ax0.legend(
+                handles0[:max_entries],
+                labels0[:max_entries],
+                loc="best",
+                ncol=2,
+                frameon=False,
+                fontsize=max(8, font_size - 4),
+            )
+
+        gain_by_size = comp.groupby("model_size", as_index=False)["fusion_gain"].mean(numeric_only=True)
+        gain_by_size["x"] = gain_by_size["model_size"].map(size_to_x)
+        gain_by_size = gain_by_size.dropna(subset=["x"]).sort_values("x")
+        ax1.bar(
+            gain_by_size["x"].to_numpy(dtype=float),
+            gain_by_size["fusion_gain"].to_numpy(dtype=float),
+            color=NATURE_PALETTE[2],
+            edgecolor=COLOR_TEXT,
+            linewidth=0.7,
+        )
+        for idx, prop in enumerate(prop_order):
+            sub = comp[comp["property"] == prop].copy()
+            if sub.empty:
+                continue
+            sub["x"] = sub["model_size"].map(size_to_x)
+            sub = sub.dropna(subset=["x", "fusion_gain"])
+            if sub.empty:
+                continue
+            ax1.plot(
+                sub["x"].to_numpy(dtype=float),
+                sub["fusion_gain"].to_numpy(dtype=float),
+                linestyle="",
+                marker="o",
+                markersize=4.8,
+                color=NATURE_PALETTE[idx % len(NATURE_PALETTE)],
+                alpha=0.8,
+            )
+        ax1.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, alpha=0.75)
+        ax1.set_xticks(np.arange(len(size_order)))
+        ax1.set_xticklabels([s.upper() for s in size_order])
+        ax1.set_xlabel("Model Size")
+        ax1.set_ylabel("Fusion Gain in R^2")
+        ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+
     _panel_mark(ax0, "(a)", font_size)
-
-    gain_by_size = comp.groupby("model_size", as_index=False)["fusion_gain"].mean(numeric_only=True)
-    gain_by_size["x"] = gain_by_size["model_size"].map(size_to_x)
-    gain_by_size = gain_by_size.dropna(subset=["x"]).sort_values("x")
-    ax1.bar(
-        gain_by_size["x"].to_numpy(dtype=float),
-        gain_by_size["fusion_gain"].to_numpy(dtype=float),
-        color=NATURE_PALETTE[2],
-        edgecolor=COLOR_TEXT,
-        linewidth=0.7,
-    )
-    for idx, prop in enumerate(prop_order):
-        sub = comp[comp["property"] == prop].copy()
-        if sub.empty:
-            continue
-        sub["x"] = sub["model_size"].map(size_to_x)
-        sub = sub.dropna(subset=["x", "fusion_gain"])
-        if sub.empty:
-            continue
-        ax1.plot(
-            sub["x"].to_numpy(dtype=float),
-            sub["fusion_gain"].to_numpy(dtype=float),
-            linestyle="",
-            marker="o",
-            markersize=4.8,
-            color=NATURE_PALETTE[idx % len(NATURE_PALETTE)],
-            alpha=0.8,
-        )
-    ax1.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, alpha=0.75)
-    ax1.set_xticks(np.arange(len(size_order)))
-    ax1.set_xticklabels([s.upper() for s in size_order])
-    ax1.set_xlabel("Model Size")
-    ax1.set_ylabel("Fusion Gain in R^2")
-    ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
     _panel_mark(ax1, "(b)", font_size)
 
     return _save_plot_figure(fig, output_path, dpi), caption, "data"
@@ -2688,7 +2746,7 @@ def _fig4_embedding_research(
     fallback_lines: Sequence[str],
     fallback_note: str,
 ) -> tuple[bool, str, str]:
-    caption = MANUSCRIPT_CAPTIONS[3]
+    caption = MANUSCRIPT_CAPTIONS[2]
     if plt is None:
         ok, render_mode = _render_panels_or_placeholder(
             output_path=output_path,
@@ -2754,59 +2812,104 @@ def _fig4_embedding_research(
             size_order.append(s)
     if not size_order:
         size_order = ["unknown"]
-    size_to_x = {s: i for i, s in enumerate(size_order)}
-
     fig, axes = plt.subplots(1, 2, figsize=(15.4, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
-    for proposal_view in ordered_views(data["proposal_view"].tolist()):
-        sub = data[data["proposal_view"] == proposal_view].copy()
-        if sub.empty:
-            continue
-        sub["x"] = sub["model_size"].map(size_to_x)
-        color = view_color(proposal_view)
-        label = view_label(proposal_view)
+    view_order = ordered_views(data["proposal_view"].tolist())
+    if len(size_order) <= 1:
+        recall_df = (
+            data.groupby("proposal_view", as_index=False)["mean_recall_at_10"]
+            .mean(numeric_only=True)
+            .set_index("proposal_view")
+            .reindex(view_order)
+            .reset_index()
+        )
+        smooth_df = (
+            data.groupby("proposal_view", as_index=False)["property_smoothness_mean"]
+            .mean(numeric_only=True)
+            .set_index("proposal_view")
+            .reindex(view_order)
+            .reset_index()
+        )
+        x = np.arange(len(view_order))
+        recall_vals = pd.to_numeric(recall_df["mean_recall_at_10"], errors="coerce").to_numpy(dtype=float)
+        smooth_vals = pd.to_numeric(smooth_df["property_smoothness_mean"], errors="coerce").to_numpy(dtype=float)
+        bar_colors = [view_color(view) for view in view_order]
+        if np.isfinite(recall_vals).any():
+            ax0.bar(x, recall_vals, color=bar_colors, edgecolor=COLOR_TEXT, linewidth=0.7)
+            ax0.set_xticks(x)
+            ax0.set_xticklabels([view_label(view) for view in view_order], rotation=30, ha="right")
+            ax0.set_xlabel("View")
+            ax0.set_ylabel("Mean Recall@10")
+            ax0.set_ylim(0.0, 1.0)
+            ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+        else:
+            ax0.text(0.5, 0.5, "Recall@10 unavailable", ha="center", va="center", transform=ax0.transAxes)
+            ax0.set_xticks([])
+            ax0.set_yticks([])
 
-        sub_a = sub.dropna(subset=["x", "mean_recall_at_10"]).sort_values("x")
-        if not sub_a.empty:
-            ax0.plot(
-                sub_a["x"].to_numpy(dtype=float),
-                sub_a["mean_recall_at_10"].to_numpy(dtype=float),
-                linestyle="-",
-                marker="o",
-                linewidth=2.2,
-                markersize=7.2,
-                color=color,
-                label=label,
-            )
+        if np.isfinite(smooth_vals).any():
+            ax1.bar(x, smooth_vals, color=bar_colors, edgecolor=COLOR_TEXT, linewidth=0.7)
+            ax1.set_xticks(x)
+            ax1.set_xticklabels([view_label(view) for view in view_order], rotation=30, ha="right")
+            ax1.set_xlabel("View")
+            ax1.set_ylabel("Property Smoothness")
+            ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+        else:
+            ax1.text(0.5, 0.5, "Property smoothness unavailable", ha="center", va="center", transform=ax1.transAxes)
+            ax1.set_xticks([])
+            ax1.set_yticks([])
+    else:
+        size_to_x = {s: i for i, s in enumerate(size_order)}
+        for proposal_view in view_order:
+            sub = data[data["proposal_view"] == proposal_view].copy()
+            if sub.empty:
+                continue
+            sub["x"] = sub["model_size"].map(size_to_x)
+            color = view_color(proposal_view)
+            label = view_label(proposal_view)
 
-        sub_b = sub.dropna(subset=["x", "property_smoothness_mean"]).sort_values("x")
-        if not sub_b.empty:
-            ax1.plot(
-                sub_b["x"].to_numpy(dtype=float),
-                sub_b["property_smoothness_mean"].to_numpy(dtype=float),
-                linestyle="-",
-                marker="o",
-                linewidth=2.2,
-                markersize=7.2,
-                color=color,
-                label=label,
-            )
+            sub_a = sub.dropna(subset=["x", "mean_recall_at_10"]).sort_values("x")
+            if not sub_a.empty:
+                ax0.plot(
+                    sub_a["x"].to_numpy(dtype=float),
+                    sub_a["mean_recall_at_10"].to_numpy(dtype=float),
+                    linestyle="-",
+                    marker="o",
+                    linewidth=2.2,
+                    markersize=7.2,
+                    color=color,
+                    label=label,
+                )
 
-    ax0.set_xticks(np.arange(len(size_order)))
-    ax0.set_xticklabels([s.upper() for s in size_order])
-    ax0.set_xlabel("Model Size")
-    ax0.set_ylabel("Mean Recall@10")
-    ax0.set_ylim(0.0, 1.0)
-    ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
-    ax0.legend(loc="best", frameon=False)
+            sub_b = sub.dropna(subset=["x", "property_smoothness_mean"]).sort_values("x")
+            if not sub_b.empty:
+                ax1.plot(
+                    sub_b["x"].to_numpy(dtype=float),
+                    sub_b["property_smoothness_mean"].to_numpy(dtype=float),
+                    linestyle="-",
+                    marker="o",
+                    linewidth=2.2,
+                    markersize=7.2,
+                    color=color,
+                    label=label,
+                )
+
+        ax0.set_xticks(np.arange(len(size_order)))
+        ax0.set_xticklabels([s.upper() for s in size_order])
+        ax0.set_xlabel("Model Size")
+        ax0.set_ylabel("Mean Recall@10")
+        ax0.set_ylim(0.0, 1.0)
+        ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+        ax0.legend(loc="best", frameon=False)
+
+        ax1.set_xticks(np.arange(len(size_order)))
+        ax1.set_xticklabels([s.upper() for s in size_order])
+        ax1.set_xlabel("Model Size")
+        ax1.set_ylabel("Property Smoothness")
+        ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+        ax1.legend(loc="best", frameon=False)
+
     _panel_mark(ax0, "(a)", font_size)
-
-    ax1.set_xticks(np.arange(len(size_order)))
-    ax1.set_xticklabels([s.upper() for s in size_order])
-    ax1.set_xlabel("Model Size")
-    ax1.set_ylabel("Property Smoothness")
-    ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
-    ax1.legend(loc="best", frameon=False)
     _panel_mark(ax1, "(b)", font_size)
 
     return _save_plot_figure(fig, output_path, dpi), caption, "data"
@@ -2874,53 +2977,15 @@ def _fig5_inverse_design(
     f5_topk = _prepare_view_frame(df_inverse_topk, ["top_k_fair_hit_rate"], "F5 top-k")
 
     if f5 is None or f5.empty or f5_topk is None or f5_topk.empty:
-        base = _prepare_view_frame(df_inverse_base, ["success_rate"], "baseline inverse")
-        if base is None or base.empty:
-            ok, render_mode = _render_panels_or_placeholder(
-                output_path=output_path,
-                fallback_panels=fallback_panels,
-                font_size=font_size,
-                dpi=dpi,
-                empty_title=fallback_title,
-                empty_lines=fallback_lines,
-            )
-            return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
-        target_prop = _ordered_properties(base["property"].tolist())[0]
-        base = base[base["property"] == target_prop].copy()
-        size_order = [s for s in MODEL_SIZE_ORDER if s in set(base["model_size"].astype(str))]
-        for s in sorted(set(base["model_size"].astype(str))):
-            if s not in size_order:
-                size_order.append(s)
-        size_to_x = {s: i for i, s in enumerate(size_order)}
-        fig, ax = plt.subplots(1, 1, figsize=(8.2, 6.0))
-        for proposal_view in ordered_views(base["proposal_view"].tolist()):
-            sub = base[base["proposal_view"] == proposal_view].copy()
-            sub["x"] = sub["model_size"].map(size_to_x)
-            sub = sub.dropna(subset=["x"]).sort_values("x")
-            if sub.empty:
-                continue
-            ax.plot(
-                sub["x"].to_numpy(dtype=float),
-                sub["value"].to_numpy(dtype=float),
-                linestyle="-",
-                marker="o",
-                linewidth=2.0,
-                markersize=6.0,
-                color=view_color(proposal_view),
-                alpha=0.95,
-                label=view_label(proposal_view),
-            )
-        ax.set_xticks(np.arange(len(size_order)))
-        ax.set_xticklabels([s.upper() for s in size_order])
-        ax.set_xlabel("Model Size")
-        ax.set_ylabel("Baseline Success Rate")
-        ax.set_ylim(0.0, 1.0)
-        ax.grid(True, axis="y", linestyle="--", alpha=0.4)
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(handles, labels, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
-        _panel_mark(ax, "(a)", font_size)
-        return _save_plot_figure(fig, output_path, dpi), caption, "data"
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     common_props = sorted(set(f5["property"].dropna().astype(str)) & set(f5_topk["property"].dropna().astype(str)))
     if not common_props:
@@ -2933,6 +2998,88 @@ def _fig5_inverse_design(
             empty_lines=fallback_lines,
         )
         return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
+
+    common_views = ordered_views(
+        sorted(set(f5["proposal_view"].dropna().astype(str)) & set(f5_topk["proposal_view"].dropna().astype(str)))
+    )
+    if not common_views:
+        ok, render_mode = _render_panels_or_placeholder(
+            output_path=output_path,
+            fallback_panels=fallback_panels,
+            font_size=font_size,
+            dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
+        )
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
+
+    if len(common_props) > 1:
+        prop_order = _ordered_properties(common_props)
+        fair_best = (
+            f5.groupby(["property", "proposal_view"], as_index=False)["value"]
+            .max(numeric_only=True)
+            .pivot_table(index="property", columns="proposal_view", values="value", aggfunc="mean")
+            .reindex(index=prop_order, columns=common_views)
+        )
+        topk_best = (
+            f5_topk.groupby(["property", "proposal_view"], as_index=False)["value"]
+            .max(numeric_only=True)
+            .pivot_table(index="property", columns="proposal_view", values="value", aggfunc="mean")
+            .reindex(index=prop_order, columns=common_views)
+        )
+        mats = [
+            fair_best.to_numpy(dtype=float),
+            topk_best.to_numpy(dtype=float),
+        ]
+        finite_values = np.concatenate([mat[np.isfinite(mat)] for mat in mats if np.isfinite(mat).any()]) if any(
+            np.isfinite(mat).any() for mat in mats
+        ) else np.asarray([], dtype=float)
+        if finite_values.size == 0:
+            ok, render_mode = _render_panels_or_placeholder(
+                output_path=output_path,
+                fallback_panels=fallback_panels,
+                font_size=font_size,
+                dpi=dpi,
+                empty_title=fallback_title,
+                empty_lines=fallback_lines,
+            )
+            return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
+
+        shared_vmax = min(1.0, max(0.05, float(np.nanmax(finite_values))))
+        cmap = _nature_sequential_cmap()
+        cmap.set_bad(color="#D1D5DB")
+        fig, axes = plt.subplots(1, 2, figsize=(16.2, 7.0), squeeze=False)
+        ax0, ax1 = axes[0]
+        for ax, mat, panel_tag, cbar_label in [
+            (ax0, mats[0], "(a)", "Fair hit rate"),
+            (ax1, mats[1], "(b)", "Top-k fair hit rate"),
+        ]:
+            im = ax.imshow(np.ma.masked_invalid(mat), cmap=cmap, vmin=0.0, vmax=shared_vmax, aspect="auto")
+            ax.set_xticks(np.arange(len(common_views)))
+            ax.set_xticklabels([view_label(view) for view in common_views], rotation=30, ha="right")
+            ax.set_yticks(np.arange(len(prop_order)))
+            ax.set_yticklabels(prop_order)
+            ax.set_xlabel("Proposal View")
+            ax.set_ylabel("Property")
+            for row_idx in range(mat.shape[0]):
+                for col_idx in range(mat.shape[1]):
+                    val = mat[row_idx, col_idx]
+                    if not np.isfinite(val):
+                        continue
+                    ax.text(
+                        col_idx,
+                        row_idx,
+                        f"{val:.2f}",
+                        ha="center",
+                        va="center",
+                        fontsize=max(9, font_size - 6),
+                        color="white" if val >= 0.55 * shared_vmax else COLOR_TEXT,
+                    )
+            cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label(cbar_label)
+            _panel_mark(ax, panel_tag, font_size)
+        return _save_plot_figure(fig, output_path, dpi), caption, "data"
+
     target_prop = _ordered_properties(common_props)[0]
     f5 = f5[f5["property"] == target_prop].copy()
     f5_topk = f5_topk[f5_topk["property"] == target_prop].copy()
@@ -2953,73 +3100,118 @@ def _fig5_inverse_design(
             size_order.append(s)
     if not size_order:
         size_order = ["unknown"]
-    size_to_x = {s: i for i, s in enumerate(size_order)}
 
     fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.3), squeeze=False)
     ax0, ax1 = axes[0]
-
     all_views = ordered_views(pd.concat([f5["proposal_view"], f5_topk["proposal_view"]], ignore_index=True).tolist())
-    for proposal_view in all_views:
-        sub = f5[f5["proposal_view"] == proposal_view].copy()
-        if sub.empty:
-            continue
-        sub["x"] = sub["model_size"].map(size_to_x)
-        sub = sub.dropna(subset=["x"]).sort_values("x")
-        if sub.empty:
-            continue
-        color = view_color(proposal_view)
-        x_vals = sub["x"].to_numpy(dtype=float)
-        ax0.plot(
-            x_vals,
-            sub["value"].to_numpy(dtype=float),
-            linestyle="-",
-            marker="o",
-            linewidth=2.0,
-            markersize=6.3,
-            color=color,
-            alpha=0.95,
-            label=view_label(proposal_view),
-        )
-    ax0.set_xticks(np.arange(len(size_order)))
-    ax0.set_xticklabels([s.upper() for s in size_order])
-    ax0.set_xlabel("Model Size")
-    ax0.set_ylabel("F5 Fair Hit Rate")
-    ax0.set_ylim(0.0, 1.0)
-    ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
-    handles0, labels0 = ax0.get_legend_handles_labels()
-    if handles0:
-        ax0.legend(handles0, labels0, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
-    _panel_mark(ax0, "(a)", font_size)
 
-    for proposal_view in all_views:
-        sub = f5_topk[f5_topk["proposal_view"] == proposal_view].copy()
-        if sub.empty:
-            continue
-        sub["x"] = sub["model_size"].map(size_to_x)
-        sub = sub.dropna(subset=["x"])
-        if sub.empty:
-            continue
-        color = view_color(proposal_view)
-        ax1.plot(
-            sub["x"].to_numpy(dtype=float),
-            sub["value"].to_numpy(dtype=float),
-            linestyle="-",
-            marker="s",
-            linewidth=2.2,
-            markersize=6.3,
-            color=color,
-            alpha=0.95,
-            label=view_label(proposal_view),
+    if len(size_order) <= 1:
+        fair_summary = (
+            f5.groupby("proposal_view", as_index=False)["value"]
+            .mean(numeric_only=True)
+            .set_index("proposal_view")
+            .reindex(all_views)
+            .reset_index()
         )
-    ax1.set_xticks(np.arange(len(size_order)))
-    ax1.set_xticklabels([s.upper() for s in size_order])
-    ax1.set_xlabel("Model Size")
-    ax1.set_ylabel("F5 Top-k Fair Hit Rate")
-    ax1.set_ylim(0.0, 1.0)
-    ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
-    handles1, labels1 = ax1.get_legend_handles_labels()
-    if handles1:
-        ax1.legend(handles1, labels1, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
+        topk_summary = (
+            f5_topk.groupby("proposal_view", as_index=False)["value"]
+            .mean(numeric_only=True)
+            .set_index("proposal_view")
+            .reindex(all_views)
+            .reset_index()
+        )
+        x = np.arange(len(all_views))
+        colors = [view_color(view) for view in all_views]
+        ax0.bar(
+            x,
+            pd.to_numeric(fair_summary["value"], errors="coerce").to_numpy(dtype=float),
+            color=colors,
+            edgecolor=COLOR_TEXT,
+            linewidth=0.7,
+        )
+        ax0.set_xticks(x)
+        ax0.set_xticklabels([view_label(view) for view in all_views], rotation=30, ha="right")
+        ax0.set_xlabel("Proposal View")
+        ax0.set_ylabel("F5 Fair Hit Rate")
+        ax0.set_ylim(0.0, 1.0)
+        ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+
+        ax1.bar(
+            x,
+            pd.to_numeric(topk_summary["value"], errors="coerce").to_numpy(dtype=float),
+            color=colors,
+            edgecolor=COLOR_TEXT,
+            linewidth=0.7,
+        )
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([view_label(view) for view in all_views], rotation=30, ha="right")
+        ax1.set_xlabel("Proposal View")
+        ax1.set_ylabel("F5 Top-k Fair Hit Rate")
+        ax1.set_ylim(0.0, 1.0)
+        ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+    else:
+        size_to_x = {s: i for i, s in enumerate(size_order)}
+        for proposal_view in all_views:
+            sub = f5[f5["proposal_view"] == proposal_view].copy()
+            if sub.empty:
+                continue
+            sub["x"] = sub["model_size"].map(size_to_x)
+            sub = sub.dropna(subset=["x"]).sort_values("x")
+            if sub.empty:
+                continue
+            color = view_color(proposal_view)
+            ax0.plot(
+                sub["x"].to_numpy(dtype=float),
+                sub["value"].to_numpy(dtype=float),
+                linestyle="-",
+                marker="o",
+                linewidth=2.0,
+                markersize=6.3,
+                color=color,
+                alpha=0.95,
+                label=view_label(proposal_view),
+            )
+        ax0.set_xticks(np.arange(len(size_order)))
+        ax0.set_xticklabels([s.upper() for s in size_order])
+        ax0.set_xlabel("Model Size")
+        ax0.set_ylabel("F5 Fair Hit Rate")
+        ax0.set_ylim(0.0, 1.0)
+        ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+        handles0, labels0 = ax0.get_legend_handles_labels()
+        if handles0:
+            ax0.legend(handles0, labels0, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
+
+        for proposal_view in all_views:
+            sub = f5_topk[f5_topk["proposal_view"] == proposal_view].copy()
+            if sub.empty:
+                continue
+            sub["x"] = sub["model_size"].map(size_to_x)
+            sub = sub.dropna(subset=["x"])
+            if sub.empty:
+                continue
+            color = view_color(proposal_view)
+            ax1.plot(
+                sub["x"].to_numpy(dtype=float),
+                sub["value"].to_numpy(dtype=float),
+                linestyle="-",
+                marker="s",
+                linewidth=2.2,
+                markersize=6.3,
+                color=color,
+                alpha=0.95,
+                label=view_label(proposal_view),
+            )
+        ax1.set_xticks(np.arange(len(size_order)))
+        ax1.set_xticklabels([s.upper() for s in size_order])
+        ax1.set_xlabel("Model Size")
+        ax1.set_ylabel("F5 Top-k Fair Hit Rate")
+        ax1.set_ylim(0.0, 1.0)
+        ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+        handles1, labels1 = ax1.get_legend_handles_labels()
+        if handles1:
+            ax1.legend(handles1, labels1, loc="best", ncol=2, frameon=False, fontsize=max(8, font_size - 4))
+
+    _panel_mark(ax0, "(a)", font_size)
     _panel_mark(ax1, "(b)", font_size)
 
     return _save_plot_figure(fig, output_path, dpi), caption, "data"
@@ -3032,6 +3224,8 @@ def _fig6_chem_physics(
     dpi: int,
     df_descriptor: pd.DataFrame,
     df_motif: pd.DataFrame,
+    df_physics: pd.DataFrame,
+    df_nearest: pd.DataFrame,
     fallback_panels: Sequence[Path],
     fallback_title: str,
     fallback_lines: Sequence[str],
@@ -3051,6 +3245,8 @@ def _fig6_chem_physics(
 
     desc = df_descriptor.copy() if df_descriptor is not None else pd.DataFrame()
     motif = df_motif.copy() if df_motif is not None else pd.DataFrame()
+    physics = df_physics.copy() if df_physics is not None else pd.DataFrame()
+    nearest = df_nearest.copy() if df_nearest is not None else pd.DataFrame()
 
     prop_col = _first_existing_col(desc, ["property", "Property"])
     desc_col = _first_existing_col(desc, ["descriptor", "feature", "name"])
@@ -3065,10 +3261,16 @@ def _fig6_chem_physics(
         motif,
         ["enrichment_ratio_topk_vs_ref", "enrichment_ratio", "log2_enrichment_topk_vs_ref", "delta_freq_topk_vs_ref"],
     )
+    physics_prop_col = _first_existing_col(physics, ["property", "Property"])
+    physics_sign_col = _first_existing_col(physics, ["sign_match"])
+    nn_prop_col = _first_existing_col(nearest, ["property", "Property"])
+    nn_val_col = _first_existing_col(nearest, ["nearest_tanimoto", "tanimoto", "similarity"])
 
     has_desc = prop_col is not None and desc_col is not None and desc_val_col is not None and not desc.empty
     has_motif = motif_prop_col is not None and motif_col is not None and motif_val_col is not None and not motif.empty
-    if not has_desc and not has_motif:
+    has_physics = physics_prop_col is not None and physics_sign_col is not None and not physics.empty
+    has_nn = nn_prop_col is not None and nn_val_col is not None and not nearest.empty
+    if not has_desc and not has_motif and not has_physics and not has_nn:
         ok, render_mode = _render_panels_or_placeholder(
             output_path=output_path,
             fallback_panels=fallback_panels,
@@ -3079,17 +3281,9 @@ def _fig6_chem_physics(
         )
         return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
-    layout_properties: list[str] = []
-    if has_desc and prop_col in desc.columns:
-        layout_properties = _ordered_properties(desc[prop_col].dropna().astype(str).str.strip().tolist())
-    max_prop_label_len = max([len(p) for p in layout_properties], default=12)
-    prop_count = max(1, len(layout_properties))
-    fig_width = max(15.8, 14.0 + 0.10 * max_prop_label_len)
-    fig_height = max(6.8, 5.2 + 0.45 * prop_count)
-    left_margin = min(0.36, 0.14 + 0.006 * max_prop_label_len)
-
-    fig, axes = plt.subplots(1, 2, figsize=(fig_width, fig_height), squeeze=False)
+    fig, axes = plt.subplots(2, 2, figsize=(16.4, 10.8), squeeze=False, constrained_layout=True)
     ax0, ax1 = axes[0]
+    ax2, ax3 = axes[1]
 
     if has_desc:
         d = desc[[prop_col, desc_col, desc_val_col]].copy()
@@ -3140,6 +3334,64 @@ def _fig6_chem_physics(
         ax0.set_yticks([])
     _panel_mark(ax0, "(a)", font_size)
 
+    if has_physics:
+        p = physics[[physics_prop_col, physics_sign_col]].copy()
+        p.columns = ["property", "sign_match"]
+        p["property"] = p["property"].astype(str).str.strip()
+        p["sign_match"] = p["sign_match"].fillna(False).astype(bool)
+        p = p.dropna(subset=["property"])
+        if not p.empty:
+            summary = (
+                p.groupby("property", as_index=False)
+                .agg(
+                    consistency_rate=("sign_match", "mean"),
+                    matched_rules=("sign_match", "sum"),
+                    total_rules=("sign_match", "size"),
+                )
+                .set_index("property")
+                .reindex(_ordered_properties(p["property"].tolist()))
+                .dropna(how="all")
+                .reset_index()
+            )
+            y = np.arange(len(summary))
+            rates = pd.to_numeric(summary["consistency_rate"], errors="coerce").to_numpy(dtype=float)
+            ax1.barh(
+                y,
+                rates,
+                color=NATURE_PALETTE[1],
+                edgecolor=COLOR_TEXT,
+                linewidth=0.7,
+            )
+            ax1.set_yticks(y)
+            ax1.set_yticklabels(summary["property"].tolist())
+            ax1.set_xlabel("Physics-rule consistency rate")
+            ax1.set_ylabel("Property")
+            ax1.set_xlim(0.0, 1.0)
+            ax1.grid(True, axis="x", linestyle="--", alpha=0.4)
+            for yi, rate, matched, total in zip(
+                y,
+                rates,
+                pd.to_numeric(summary["matched_rules"], errors="coerce").fillna(0).astype(int).tolist(),
+                pd.to_numeric(summary["total_rules"], errors="coerce").fillna(0).astype(int).tolist(),
+            ):
+                if not np.isfinite(rate):
+                    continue
+                ax1.text(
+                    min(rate + 0.02, 0.98),
+                    yi,
+                    f"{matched}/{max(total, 1)}",
+                    va="center",
+                    ha="left",
+                    fontsize=max(9, font_size - 6),
+                )
+        else:
+            has_physics = False
+    if not has_physics:
+        ax1.text(0.5, 0.5, "Physics-consistency data unavailable", ha="center", va="center", transform=ax1.transAxes)
+        ax1.set_xticks([])
+        ax1.set_yticks([])
+    _panel_mark(ax1, "(b)", font_size)
+
     if has_motif:
         m = motif[[motif_prop_col, motif_col, motif_val_col]].copy()
         m.columns = ["property", "motif", "value"]
@@ -3170,28 +3422,77 @@ def _fig6_chem_physics(
                 NATURE_PALETTE[0],
                 NATURE_PALETTE[3],
             )
-            ax1.bar(
+            ax2.bar(
                 np.arange(len(top)),
                 top["score"].to_numpy(dtype=float),
                 color=bar_colors,
                 edgecolor=COLOR_TEXT,
                 linewidth=0.7,
             )
-            ax1.set_xticks(np.arange(len(top)))
-            ax1.set_xticklabels(top["motif"].tolist(), rotation=35, ha="right")
-            ax1.set_ylabel(y_label)
-            ax1.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, linestyle="--")
-            ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
-            _wrap_ticklabels(ax1, axis="x", width=14, rotation=35)
+            ax2.set_xticks(np.arange(len(top)))
+            ax2.set_xticklabels(top["motif"].tolist(), rotation=35, ha="right")
+            ax2.set_ylabel(y_label)
+            ax2.axhline(0.0, color=COLOR_TEXT, linewidth=1.0, linestyle="--")
+            ax2.grid(True, axis="y", linestyle="--", alpha=0.4)
+            _wrap_ticklabels(ax2, axis="x", width=14, rotation=35)
         else:
             has_motif = False
     if not has_motif:
-        ax1.text(0.5, 0.5, "Motif-enrichment data unavailable", ha="center", va="center", transform=ax1.transAxes)
-        ax1.set_xticks([])
-        ax1.set_yticks([])
-    _panel_mark(ax1, "(b)", font_size)
+        ax2.text(0.5, 0.5, "Motif-enrichment data unavailable", ha="center", va="center", transform=ax2.transAxes)
+        ax2.set_xticks([])
+        ax2.set_yticks([])
+    _panel_mark(ax2, "(c)", font_size)
 
-    fig.subplots_adjust(left=left_margin, right=0.985, bottom=0.22, top=0.94, wspace=0.34)
+    if has_nn:
+        n = nearest[[nn_prop_col, nn_val_col]].copy()
+        n.columns = ["property", "nearest_tanimoto"]
+        n["property"] = n["property"].astype(str).str.strip()
+        n["nearest_tanimoto"] = pd.to_numeric(n["nearest_tanimoto"], errors="coerce")
+        n = n.dropna(subset=["property", "nearest_tanimoto"])
+        if not n.empty:
+            nn_props = _ordered_properties(n["property"].tolist())
+            if len(nn_props) > 1:
+                box_data = []
+                box_labels = []
+                for prop in nn_props:
+                    vals = n.loc[n["property"] == prop, "nearest_tanimoto"].dropna().to_numpy(dtype=float)
+                    if vals.size == 0:
+                        continue
+                    box_data.append(vals)
+                    box_labels.append(prop)
+                if box_data:
+                    bp = ax3.boxplot(box_data, patch_artist=True, showfliers=False)
+                    for idx, box in enumerate(bp["boxes"]):
+                        box.set_facecolor(NATURE_PALETTE[idx % len(NATURE_PALETTE)])
+                        box.set_alpha(0.85)
+                    ax3.set_xticks(np.arange(1, len(box_labels) + 1))
+                    ax3.set_xticklabels(box_labels, rotation=30, ha="right")
+                    ax3.set_xlabel("Property")
+                    ax3.set_ylabel("Nearest-neighbor Tanimoto")
+                    ax3.set_ylim(0.0, 1.0)
+                    ax3.grid(True, axis="y", linestyle="--", alpha=0.4)
+                else:
+                    has_nn = False
+            else:
+                vals = n["nearest_tanimoto"].dropna().to_numpy(dtype=float)
+                if vals.size:
+                    bins = min(12, max(4, int(np.sqrt(vals.size))))
+                    ax3.hist(vals, bins=bins, color=NATURE_PALETTE[2], edgecolor=COLOR_TEXT, linewidth=0.7)
+                    ax3.axvline(float(np.nanmedian(vals)), color=NATURE_PALETTE[3], linestyle="--", linewidth=1.4)
+                    ax3.set_xlabel("Nearest-neighbor Tanimoto")
+                    ax3.set_ylabel("Count")
+                    ax3.set_xlim(0.0, 1.0)
+                    ax3.grid(True, axis="y", linestyle="--", alpha=0.4)
+                else:
+                    has_nn = False
+        else:
+            has_nn = False
+    if not has_nn:
+        ax3.text(0.5, 0.5, "Nearest-neighbor data unavailable", ha="center", va="center", transform=ax3.transAxes)
+        ax3.set_xticks([])
+        ax3.set_yticks([])
+    _panel_mark(ax3, "(d)", font_size)
+
     return _save_plot_figure(fig, output_path, dpi), caption, "data"
 
 
@@ -3790,6 +4091,18 @@ def main(args):
                 "motif_enrichment.csv",
                 include_property_scopes=True,
             )
+            df_mvf_physics = _load_mvf_csv_multi(
+                mvf_results_dirs,
+                "step7_chem_physics_analysis",
+                "physics_consistency.csv",
+                include_property_scopes=True,
+            )
+            df_mvf_nearest = _load_mvf_csv_multi(
+                mvf_results_dirs,
+                "step7_chem_physics_analysis",
+                "nearest_neighbor_explanations.csv",
+                include_property_scopes=True,
+            )
 
             def _append_theme_panel(theme: str, panel: Path, *, prepend: bool = False) -> None:
                 bucket = themed_panels.setdefault(theme, [])
@@ -3840,28 +4153,28 @@ def main(args):
                     },
                 },
                 {
+                    "themes": ["mvf_f4"],
+                    "panel_fallback_order": ["mvf_f4"],
+                    "step_ids": ["F4"],
+                    "fallback_title": "Figure 3 unavailable",
+                    "fallback_note": "No non-empty MVF F4 embedding-research outputs were available during F8 export.",
+                    "si_seed_theme": "mvf_f4",
+                    "fn": _fig4_embedding_research,
+                    "kwargs": {
+                        "df_embedding_mvf": df_mvf_embedding,
+                    },
+                },
+                {
                     "themes": ["mvf_f3"],
                     "panel_fallback_order": ["mvf_f3"],
                     "step_ids": ["F3"],
-                    "fallback_title": "Figure 3 unavailable",
+                    "fallback_title": "Figure 4 unavailable",
                     "fallback_note": "No non-empty MVF F3 property-head outputs were available during F8 export.",
                     "si_seed_theme": "mvf_f3",
                     "fn": _fig3_property_prediction,
                     "kwargs": {
                         "df_property_base": df_agg_property,
                         "df_property_mvf": df_mvf_property,
-                    },
-                },
-                {
-                    "themes": ["mvf_f4"],
-                    "panel_fallback_order": ["mvf_f4"],
-                    "step_ids": ["F4"],
-                    "fallback_title": "Figure 4 unavailable",
-                    "fallback_note": "No non-empty MVF F4 embedding-research outputs were available during F8 export.",
-                    "si_seed_theme": "mvf_f4",
-                    "fn": _fig4_embedding_research,
-                    "kwargs": {
-                        "df_embedding_mvf": df_mvf_embedding,
                     },
                 },
                 {
@@ -3889,6 +4202,8 @@ def main(args):
                     "kwargs": {
                         "df_descriptor": df_mvf_desc,
                         "df_motif": df_mvf_motif,
+                        "df_physics": df_mvf_physics,
+                        "df_nearest": df_mvf_nearest,
                     },
                 },
             ]
