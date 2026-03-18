@@ -11,8 +11,8 @@
 #   evaluation.*
 # F3 property heads:
 #   property.*
-# F4 OOD analysis:
-#   ood.*
+# F4 embedding research:
+#   embedding_research.*
 # F5 foundation inverse (resample):
 #   foundation_inverse.*
 # F6 DiT interpretability:
@@ -63,12 +63,15 @@ evaluation:
   max_samples_d2: null
   generate_figures: true
 
-# F4 OOD args
-ood:
-  nn_k: 50
-  use_faiss: true
+# F4 embedding-research args
+embedding_research:
+  analysis_dataset: "d2"        # research summary focuses on real-polymer D2 embeddings
+  max_samples_per_view: 3000
+  tokenizer_sample_cap: 3000
+  knn_k: 10
+  property_knn_k: 5
+  min_class_samples: 20
   generate_figures: true
-  distance_metric: "cosine"
 
 # F3 property-head args
 property:
@@ -206,7 +209,7 @@ paper_results:
   results_dirs: []
   # Optional broad auto-discovery of BASE_DIR/results* (guarded; default off).
   auto_discover_results_dirs: true
-  include_large_csv: true        # include candidate_scores / full OOD score tables
+  include_large_csv: true        # include large candidate/interpretability tables
   include_figures: true
   max_panels_per_figure: 6       # subfigures per composite figure: (a), (b), ...
   figure_fontsize: 16            # force all generated F8 text labels to font size 16

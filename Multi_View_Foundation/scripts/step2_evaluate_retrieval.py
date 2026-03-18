@@ -14,6 +14,7 @@ sys.path.insert(0, str(BASE_DIR))
 
 from src.utils.config import load_config, save_config
 from src.evaluation.retrieval_metrics import compute_recall_at_k
+from src.utils.embedding_artifacts import load_view_embeddings, load_view_index
 from src.utils.output_layout import ensure_step_dirs, save_csv
 
 try:  # pragma: no cover
@@ -382,23 +383,6 @@ def _plot_f2_recall_bars(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
     fig.tight_layout()
     _save_figure_png(fig, figures_dir / "figure_f2_recall_bars")
     plt.close(fig)
-
-
-def _load_view_embeddings(results_dir: Path, view: str, dataset: str):
-    emb_path = results_dir / f"embeddings_{view}_{dataset}.npy"
-    if not emb_path.exists() and view == "smiles":
-        legacy = results_dir / f"embeddings_{dataset}.npy"
-        emb_path = legacy if legacy.exists() else emb_path
-    if not emb_path.exists():
-        return None
-    return np.load(emb_path)
-
-
-def _load_view_index(results_dir: Path, view: str):
-    idx_path = results_dir / f"embedding_index_{view}.csv"
-    if not idx_path.exists():
-        return None
-    return pd.read_csv(idx_path)
 
 
 def main(args):

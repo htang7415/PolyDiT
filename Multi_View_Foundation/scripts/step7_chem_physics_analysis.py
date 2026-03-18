@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""F7: Chemistry + physics analysis for OOD-aware inverse design results.
+"""F7: Chemistry + physics analysis for multi-view inverse design results.
 
 This step summarizes science-facing evidence across configured properties:
 - descriptor shifts (reference vs F5 candidates vs F6 top-k)
@@ -1891,8 +1891,9 @@ def _plot_view_summary_figure(view_summary_df: pd.DataFrame, output_base: Path, 
         axes[1].set_xticklabels(labels, rotation=20, ha="right")
         axes[1].grid(axis="y", alpha=0.25)
 
-        axes[2].bar(xpos, pd.to_numeric(df["topk_mean_ood_prop"], errors="coerce").fillna(0.0), color=colors, alpha=0.82)
-        axes[2].set_ylabel("Top-k mean OOD-prop")
+        value_col = "topk_mean_target_violation" if "topk_mean_target_violation" in df.columns else "topk_mean_prediction"
+        axes[2].bar(xpos, pd.to_numeric(df[value_col], errors="coerce").fillna(0.0), color=colors, alpha=0.82)
+        axes[2].set_ylabel("Top-k mean target violation" if value_col == "topk_mean_target_violation" else "Top-k mean prediction")
         axes[2].set_xticks(xpos)
         axes[2].set_xticklabels(labels, rotation=20, ha="right")
         axes[2].grid(axis="y", alpha=0.25)
@@ -2309,12 +2310,12 @@ def main(args):
                 fair_hit_rate_view = float(
                     pd.to_numeric(topk_view.get("fair_hit", pd.Series(dtype=float)), errors="coerce").fillna(0.0).mean()
                 ) if "fair_hit" in topk_view.columns else hit_rate_view
-                mean_ood_prop_view = float(
-                    pd.to_numeric(topk_view.get("ood_prop", pd.Series(dtype=float)), errors="coerce").mean()
-                ) if "ood_prop" in topk_view.columns else np.nan
-                mean_obj_view = float(
-                    pd.to_numeric(topk_view.get("conservative_objective", pd.Series(dtype=float)), errors="coerce").mean()
-                ) if "conservative_objective" in topk_view.columns else np.nan
+                mean_target_violation_view = float(
+                    pd.to_numeric(topk_view.get("target_violation", pd.Series(dtype=float)), errors="coerce").mean()
+                ) if "target_violation" in topk_view.columns else np.nan
+                mean_prediction_view = float(
+                    pd.to_numeric(topk_view.get("prediction", pd.Series(dtype=float)), errors="coerce").mean()
+                ) if "prediction" in topk_view.columns else np.nan
                 view_rows.append(
                     {
                         "property": prop,
@@ -2323,8 +2324,8 @@ def main(args):
                         "n_topk": int(len(topk_view)),
                         "topk_hit_rate": round(hit_rate_view, 4) if np.isfinite(hit_rate_view) else np.nan,
                         "topk_fair_hit_rate": round(fair_hit_rate_view, 4) if np.isfinite(fair_hit_rate_view) else np.nan,
-                        "topk_mean_ood_prop": round(mean_ood_prop_view, 6) if np.isfinite(mean_ood_prop_view) else np.nan,
-                        "topk_mean_conservative_objective": round(mean_obj_view, 6) if np.isfinite(mean_obj_view) else np.nan,
+                        "topk_mean_target_violation": round(mean_target_violation_view, 6) if np.isfinite(mean_target_violation_view) else np.nan,
+                        "topk_mean_prediction": round(mean_prediction_view, 6) if np.isfinite(mean_prediction_view) else np.nan,
                     }
                 )
             if view_rows:

@@ -94,7 +94,7 @@ MANUSCRIPT_CAPTIONS = [
     "Figure 1. Generation quality of five bidirectional diffusion models across molecular representation types. (a) Valid polymer fraction for each representation at the best-performing model size. (b) Unique fraction among valid generated polymers, reflecting generation diversity. (c) Validity-uniqueness trade-off colored by novelty.",
     "Figure 2. Cross-view molecular alignment in the multi-view foundation model. (a) Recall@1 heatmap: fraction of queries for which the correct paired molecule ranks first under cosine similarity. (b) Recall@10 heatmap: fraction of correct pairs recovered within the top-10 retrieved candidates.",
     "Figure 3. Property prediction with multi-view foundation embeddings across model scales. (a) Test-set R^2 versus model size across configured target properties, comparing the best baseline representation and the best MVF/fusion representation at each size. (b) Fusion gain in R^2 across model sizes.",
-    "Figure 4. Out-of-distribution (OOD) shift analysis across model scales. (a) Mean distance between training-set (D1) and target-domain (D2) polymer embeddings as a function of model size for baseline and MVF. (b) Fraction of generated polymers within the D2 neighborhood across model sizes.",
+    "Figure 4. Multi-view polymer embedding research across model scales. (a) Mean cross-view Recall@10 versus model size for each representation. (b) Embedding-space property smoothness versus model size for each representation, measured by kNN regression on D2 polymer embeddings.",
     "Figure 5. View-aligned inverse polymer design across model scales. (a) F5 fair hit rate versus model size for each proposal view under the shared SMILES scorer. (b) F5 per-view top-k fair hit rate versus model size for each proposal view.",
     "Figure 6. Chemistry and physics analysis of inversely designed polymers. (a) Normalized descriptor shifts of accepted candidates relative to the D1 reference set for key physicochemical features and each target property. (b) Motif enrichment ratios for discriminative polymer substructures in accepted candidates compared to the reference distribution.",
 ]
@@ -105,7 +105,7 @@ SI_CAPTIONS = [
     "Figure S3. Multi-view embedding extraction summary: embedding dimensionalities, model sizes, and sample counts per view.",
     "Figure S4. Cross-view retrieval evaluation: full Recall@K heatmaps across all view pairs.",
     "Figure S5. Property head training diagnostics: per-split metrics, head leaderboard, and coverage.",
-    "Figure S6. OOD diagnostics: distance distributions between D1/D2 and generated embedding sets.",
+    "Figure S6. Embedding-research diagnostics: tokenizer efficiency, geometry summaries, and semantic-structure metrics across views.",
     "Figure S7. Foundation-guided inverse design diagnostics: candidate score distributions and accepted-candidate profiles by view.",
     "Figure S8. F6 DiT interpretability diagnostics: integrated gradients, gradient-times-hidden, and attention-rollout analyses of the shared SMILES scorer, with faithfulness summaries across proposal views and outcome groups.",
     "Figure S9. Chemistry/physics analysis: per-property descriptor distributions, physics consistency checks, and nearest-neighbor explanations.",
@@ -539,7 +539,7 @@ def _has_mvf_step_artifacts(results_dir: Path) -> bool:
         "step1_alignment_embeddings",
         "step2_retrieval",
         "step3_property",
-        "step4_ood",
+        "step4_embedding_research",
         "step5_foundation_inverse",
         "step6_dit_interpretability",
         "step6_view_compare_analysis",
@@ -793,7 +793,7 @@ def _describe_panel(path: Path) -> str:
         step_hint = "MVF F2"
     elif "step3_property" in lower_rel:
         step_hint = "MVF F3"
-    elif "step4_ood" in lower_rel:
+    elif "step4_embedding_research" in lower_rel or "step4_ood" in lower_rel:
         step_hint = "MVF F4"
     elif "step5_foundation_inverse" in lower_rel:
         step_hint = "MVF F5"
@@ -2210,50 +2210,39 @@ def _fig3_property_prediction(
     return _save_plot_figure(fig, output_path, dpi), caption
 
 
-def _fig4_ood_analysis(
+def _fig4_embedding_research(
     *,
     output_path: Path,
     font_size: int,
     dpi: int,
-    df_ood_base: pd.DataFrame,
-    df_ood_mvf: pd.DataFrame,
+    df_embedding_mvf: pd.DataFrame,
     fallback_panels: Sequence[Path],
 ) -> tuple[bool, str]:
     caption = MANUSCRIPT_CAPTIONS[3]
     if plt is None:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
-    frames: list[pd.DataFrame] = []
-    for source, src_df in [("baseline", df_ood_base), ("mvf", df_ood_mvf)]:
-        if src_df is None or src_df.empty:
-            continue
-        df = src_df.copy()
-        dist_col = _first_existing_col(df, ["d1_to_d2_mean_dist", "d1_d2_mean_dist"])
-        frac_col = _first_existing_col(df, ["frac_generated_near_d2", "fraction_generated_near_d2"])
-        if dist_col is None and frac_col is None:
-            continue
-        size_col = _first_existing_col(df, ["model_size"])
-        if size_col is not None:
-            df["model_size"] = df[size_col].apply(_normalize_model_size)
-        else:
-            df["model_size"] = "unknown"
-        if dist_col is not None:
-            df["dist"] = pd.to_numeric(df[dist_col], errors="coerce")
-        else:
-            df["dist"] = np.nan
-        if frac_col is not None:
-            df["frac"] = pd.to_numeric(df[frac_col], errors="coerce")
-        else:
-            df["frac"] = np.nan
-        df["source_name"] = source
-        frames.append(df[["source_name", "model_size", "dist", "frac"]])
-
-    if not frames:
+    if df_embedding_mvf is None or df_embedding_mvf.empty:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
-    data = pd.concat(frames, ignore_index=True)
-    data = data.groupby(["source_name", "model_size"], as_index=False)[["dist", "frac"]].mean(numeric_only=True)
-    data = data.dropna(subset=["dist", "frac"], how="all")
+    data = df_embedding_mvf.copy()
+    view_col = _first_existing_col(data, ["view", "proposal_view", "representation"])
+    size_col = _first_existing_col(data, ["model_size"])
+    recall_col = _first_existing_col(data, ["mean_recall_at_10"])
+    smooth_col = _first_existing_col(data, ["property_smoothness_mean"])
+    if view_col is None or size_col is None or (recall_col is None and smooth_col is None):
+        return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
+
+    data["proposal_view"] = data[view_col].astype(str).map(normalize_view_name)
+    data = data[data["proposal_view"] != "all"].copy()
+    data["model_size"] = data[size_col].apply(_normalize_model_size)
+    data["mean_recall_at_10"] = pd.to_numeric(data[recall_col], errors="coerce") if recall_col else np.nan
+    data["property_smoothness_mean"] = pd.to_numeric(data[smooth_col], errors="coerce") if smooth_col else np.nan
+    data = (
+        data.groupby(["proposal_view", "model_size"], as_index=False)[["mean_recall_at_10", "property_smoothness_mean"]]
+        .mean(numeric_only=True)
+    )
+    data = data.dropna(subset=["mean_recall_at_10", "property_smoothness_mean"], how="all")
     if data.empty:
         return _render_fallback_panels(output_path=output_path, fallback_panels=fallback_panels, font_size=font_size, dpi=dpi), caption
 
@@ -2267,65 +2256,53 @@ def _fig4_ood_analysis(
 
     fig, axes = plt.subplots(1, 2, figsize=(15.4, 6.2), squeeze=False)
     ax0, ax1 = axes[0]
-    for source, color, marker, style in [
-        ("baseline", NATURE_PALETTE[3], "o", "--"),
-        ("mvf", NATURE_PALETTE[0], "s", "-"),
-    ]:
-        sub = data[data["source_name"] == source].copy()
+    for proposal_view in ordered_views(data["proposal_view"].tolist()):
+        sub = data[data["proposal_view"] == proposal_view].copy()
         if sub.empty:
             continue
         sub["x"] = sub["model_size"].map(size_to_x)
-        sub = sub.dropna(subset=["x", "dist"]).sort_values("x")
-        if sub.empty:
-            continue
-        label = "Baseline" if source == "baseline" else "MVF"
-        ax0.plot(
-            sub["x"].to_numpy(dtype=float),
-            sub["dist"].to_numpy(dtype=float),
-            linestyle=style,
-            marker=marker,
-            linewidth=2.2,
-            markersize=7.2,
-            color=color,
-            label=label,
-        )
+        color = view_color(proposal_view)
+        label = view_label(proposal_view)
+
+        sub_a = sub.dropna(subset=["x", "mean_recall_at_10"]).sort_values("x")
+        if not sub_a.empty:
+            ax0.plot(
+                sub_a["x"].to_numpy(dtype=float),
+                sub_a["mean_recall_at_10"].to_numpy(dtype=float),
+                linestyle="-",
+                marker="o",
+                linewidth=2.2,
+                markersize=7.2,
+                color=color,
+                label=label,
+            )
+
+        sub_b = sub.dropna(subset=["x", "property_smoothness_mean"]).sort_values("x")
+        if not sub_b.empty:
+            ax1.plot(
+                sub_b["x"].to_numpy(dtype=float),
+                sub_b["property_smoothness_mean"].to_numpy(dtype=float),
+                linestyle="-",
+                marker="o",
+                linewidth=2.2,
+                markersize=7.2,
+                color=color,
+                label=label,
+            )
+
     ax0.set_xticks(np.arange(len(size_order)))
     ax0.set_xticklabels([s.upper() for s in size_order])
     ax0.set_xlabel("Model Size")
-    ax0.set_ylabel("D1-D2 Mean Distance")
+    ax0.set_ylabel("Mean Recall@10")
+    ax0.set_ylim(0.0, 1.0)
     ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
     ax0.legend(loc="best", frameon=False)
     _panel_mark(ax0, "(a)", font_size)
 
-    for source, color, marker, style in [
-        ("baseline", NATURE_PALETTE[3], "o", "--"),
-        ("mvf", NATURE_PALETTE[0], "s", "-"),
-    ]:
-        sub = data[data["source_name"] == source].copy()
-        if sub.empty:
-            continue
-        sub["x"] = sub["model_size"].map(size_to_x)
-        sub = sub.dropna(subset=["x", "frac"]).sort_values("x")
-        if sub.empty:
-            continue
-        label = "Baseline" if source == "baseline" else "MVF"
-        ax1.plot(
-            sub["x"].to_numpy(dtype=float),
-            sub["frac"].to_numpy(dtype=float),
-            linestyle=style,
-            marker=marker,
-            linewidth=2.2,
-            markersize=7.2,
-            color=color,
-            label=label,
-        )
     ax1.set_xticks(np.arange(len(size_order)))
     ax1.set_xticklabels([s.upper() for s in size_order])
     ax1.set_xlabel("Model Size")
-    ax1.set_ylabel("Fraction Near D2")
-    max_frac = pd.to_numeric(data["frac"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
-    ymax = float(max_frac.max() * 1.1) if not max_frac.empty else 1.0
-    ax1.set_ylim(0.0, max(1.0, ymax))
+    ax1.set_ylabel("Property Smoothness")
     ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
     ax1.legend(loc="best", frameon=False)
     _panel_mark(ax1, "(b)", font_size)
@@ -2828,7 +2805,7 @@ def main(args):
     step_metric_map = [
         ("F2", "retrieval", "step2_retrieval", "metrics_alignment.csv", "table_f2_retrieval.csv"),
         ("F3", "property_heads", "step3_property", "metrics_property.csv", "table_f3_property_heads.csv"),
-        ("F4", "ood_analysis", "step4_ood", "metrics_ood.csv", "table_f4_ood_analysis.csv"),
+        ("F4", "embedding_research", "step4_embedding_research", "metrics_embedding_research.csv", "table_f4_embedding_research.csv"),
         ("F5", "foundation_inverse", "step5_foundation_inverse", "metrics_inverse.csv", "table_f5_inverse_design.csv"),
         (
             "F6",
@@ -2904,10 +2881,19 @@ def main(args):
             }
         )
 
+    step4_dirs: list[Path] = []
     step5_dirs: list[Path] = []
     step6_dirs: list[Path] = []
     step7_files_dirs: list[Path] = []
     for mvf_dir in mvf_results_dirs:
+        step4_dirs.extend(
+            _collect_step_artifact_dirs(
+                mvf_results_dir=mvf_dir,
+                step_subdir="step4_embedding_research",
+                include_property_scopes=False,
+                include_root_when_property_scopes=True,
+            )
+        )
         step5_dirs.extend(
             _collect_step_artifact_dirs(
                 mvf_results_dir=mvf_dir,
@@ -2932,6 +2918,7 @@ def main(args):
                 include_root_when_property_scopes=True,
             )
         )
+    step4_dirs = _unique_paths(step4_dirs)
     step5_dirs = _unique_paths(step5_dirs)
     step6_dirs = _unique_paths(step6_dirs)
     step7_files_dirs = _unique_paths(step7_files_dirs)
@@ -2991,6 +2978,34 @@ def main(args):
             if _is_relative_to(path, mvf_dir):
                 return _normalize_model_size(_infer_model_size_from_results_dir(mvf_dir))
         return "unknown"
+
+    for src in _collect_glob_unique(
+        step4_dirs,
+        [
+            "view_geometry_summary.csv",
+            "view_retrieval_summary.csv",
+            "view_tokenizer_efficiency.csv",
+            "view_semantic_structure.csv",
+            "view_complementarity_summary.csv",
+        ],
+    ):
+        rel_dst = _supplementary_dst_name(src, _size_tag_for(src))
+        _copy_file(
+            src,
+            tables_supp_dir / rel_dst,
+            category="table_supplementary",
+            copied=copied,
+            results_dir=results_dir,
+            output_dir=output_dir,
+        )
+        _copy_file(
+            src,
+            si_results_dir / rel_dst,
+            category="table_supplementary",
+            copied=copied,
+            results_dir=results_dir,
+            output_dir=output_dir,
+        )
 
     for src in f5_artifacts:
         rel_dst = _supplementary_dst_name(src, _size_tag_for(src))
@@ -3115,7 +3130,7 @@ def main(args):
                         mvf_dir / "step1_alignment_embeddings",
                         mvf_dir / "step2_retrieval",
                         mvf_dir / "step3_property",
-                        mvf_dir / "step4_ood",
+                        mvf_dir / "step4_embedding_research",
                         mvf_dir / "step5_foundation_inverse",
                         mvf_dir / "step6_dit_interpretability",
                         mvf_dir / "step6_view_compare_analysis",
@@ -3203,7 +3218,6 @@ def main(args):
             df_agg_generation = _load_aggregate_csv(repo_results_root, "metrics_generation.csv")
             df_agg_alignment = _load_aggregate_csv(repo_results_root, "metrics_alignment.csv")
             df_agg_property = _load_aggregate_csv(repo_results_root, "metrics_property.csv")
-            df_agg_ood = _load_aggregate_csv(repo_results_root, "metrics_ood.csv")
             df_agg_inverse = _load_aggregate_csv(repo_results_root, "metrics_inverse.csv")
 
             df_mvf_alignment = _load_mvf_csv_multi(mvf_results_dirs, "step2_retrieval", "metrics_alignment.csv")
@@ -3213,7 +3227,7 @@ def main(args):
                 "metrics_property.csv",
                 include_property_scopes=True,
             )
-            df_mvf_ood = _load_mvf_csv_multi(mvf_results_dirs, "step4_ood", "metrics_ood.csv")
+            df_mvf_embedding = _load_mvf_csv_multi(mvf_results_dirs, "step4_embedding_research", "metrics_embedding_research.csv")
             df_mvf_inverse = _load_mvf_csv_multi(
                 mvf_results_dirs,
                 "step5_foundation_inverse",
@@ -3267,10 +3281,9 @@ def main(args):
                 },
                 {
                     "themes": ["mvf_f4"],
-                    "fn": _fig4_ood_analysis,
+                    "fn": _fig4_embedding_research,
                     "kwargs": {
-                        "df_ood_base": df_agg_ood,
-                        "df_ood_mvf": df_mvf_ood,
+                        "df_embedding_mvf": df_mvf_embedding,
                     },
                 },
                 {
