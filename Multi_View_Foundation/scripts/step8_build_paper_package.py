@@ -94,11 +94,11 @@ METHOD_PLOT_COLORS = {
     "Bi_Diffusion_graph": "#8491B4",
 }
 MANUSCRIPT_CAPTIONS = [
-    "Figure 1. All five representation-specific generators produce valid polymers, but their diversity and novelty profiles differ, motivating a multi-view comparison. (a) Valid polymer fraction for each representation at the best-performing model size. (b) Unique fraction among valid generated polymers. (c) Validity-uniqueness trade-off colored by novelty.",
+    "Figure 1. All five representation-specific generators produce valid polymers, but no single method dominates all quality metrics, motivating a multi-view approach. (a) Core generation metrics per method: validity, uniqueness, novelty, and diversity at the best-performing model size. (b) Mean synthetic accessibility (SA) score; the dashed line marks the SA < 3.6 threshold used for practical design feasibility in inverse-design evaluation (Figure 5). (c) Per-metric ranking across methods: darker cells indicate higher rank, revealing that different representations excel at different aspects of generation quality.",
     "Figure 2. Cross-view alignment is strong enough to compare the same polymer across representation spaces. (a) Recall@1 heatmap: fraction of queries for which the correct paired molecule ranks first under cosine similarity. (b) Recall@10 heatmap: fraction of correct pairs recovered within the top-10 retrieved candidates.",
-    "Figure 3. Different polymer views provide complementary embedding structure rather than a single uniformly best representation. (a) Mean cross-view Recall@10 across available model sizes or, when only one size is available, across views directly. (b) Embedding-space property smoothness across available model sizes or across views directly.",
+    "Figure 3. Different polymer views provide complementary embedding structure rather than a single uniformly best representation. (a) Mean cross-view Recall@10 for each polymer representation. (b) Embedding-space property smoothness for each polymer representation.",
     "Figure 4. Fusing aligned views improves downstream property prediction over the strongest single-view alternative. (a) Test-set R^2 for the best single-view reference and the fused multi-view representation across configured target properties or model sizes, depending on available checkpoints. (b) Fusion gain in R^2, computed as fused multi-view performance minus the best single-view reference.",
-    "Figure 5. Inverse design success generalizes across target properties rather than a single polymer objective. (a) Fair hit rate for each proposal view across available properties, aggregating over model sizes when multiple sizes are present. (b) Top-k fair hit rate under the same multi-property comparison.",
+    "Figure 5. Inverse design success generalizes across target properties rather than a single polymer objective. (a) Fair hit rate for each proposal view across available properties, averaging over model sizes when multiple sizes are present. (b) Top-k fair hit rate under the same multi-property comparison.",
     "Figure 6. Accepted inverse designs remain chemically plausible under descriptor, physics-rule, motif, and nearest-neighbor checks. (a) Normalized descriptor shifts relative to the reference set. (b) Physics-rule consistency rate across properties. (c) Motif enrichment of accepted candidates relative to the reference distribution. (d) Nearest-neighbor similarity to known polymers.",
 ]
 
@@ -1774,6 +1774,170 @@ def _save_plot_figure(fig, output_path: Path, dpi: int) -> bool:
     return True
 
 
+def _build_table1_view_task_summary(
+    *,
+    seed_views: Optional[Sequence[object]] = None,
+    df_generation: pd.DataFrame,
+    df_alignment: pd.DataFrame,
+    df_property_base: pd.DataFrame,
+    df_property_mvf: pd.DataFrame,
+    df_inverse_base: pd.DataFrame,
+    df_inverse_mvf: pd.DataFrame,
+) -> pd.DataFrame:
+    rows: dict[str, dict[str, object]] = {}
+
+    def _ensure_row(view_raw: object) -> Optional[str]:
+        view = normalize_view_name(view_raw)
+        if not view or view == "all":
+            return None
+        rows.setdefault(
+            view,
+            {
+                "view": view_label(view),
+                "generation_validity": np.nan,
+                "generation_uniqueness": np.nan,
+                "generation_novelty": np.nan,
+                "alignment_recall_at_10": np.nan,
+                "best_property": "",
+                "best_property_r2": np.nan,
+                "inverse_hit_rate": np.nan,
+            },
+        )
+        return view
+
+    for seed_view in list(seed_views or []):
+        _ensure_row(seed_view)
+    if not rows:
+        for seed_view in ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]:
+            _ensure_row(seed_view)
+
+    if df_generation is not None and not df_generation.empty:
+        rep_col = _first_existing_col(df_generation, ["representation", "Representation", "view"])
+        val_col = _first_existing_col(df_generation, ["validity", "step2_validity"])
+        uniq_col = _first_existing_col(df_generation, ["uniqueness", "step2_uniqueness"])
+        nov_col = _first_existing_col(df_generation, ["novelty", "step2_novelty"])
+        if rep_col is not None and val_col is not None:
+            g = df_generation.copy()
+            g["view"] = g[rep_col].astype(str).map(normalize_view_name)
+            g = g[g["view"].astype(str) != ""].copy()
+            if not g.empty:
+                g[val_col] = pd.to_numeric(g[val_col], errors="coerce")
+                if uniq_col is not None:
+                    g[uniq_col] = pd.to_numeric(g[uniq_col], errors="coerce")
+                if nov_col is not None:
+                    g[nov_col] = pd.to_numeric(g[nov_col], errors="coerce")
+                for view, sub in g.groupby("view"):
+                    view_key = _ensure_row(view)
+                    if view_key is None:
+                        continue
+                    if sub[val_col].notna().any():
+                        rows[view_key]["generation_validity"] = float(sub[val_col].max())
+                    if uniq_col is not None and sub[uniq_col].notna().any():
+                        rows[view_key]["generation_uniqueness"] = float(sub[uniq_col].max())
+                    if nov_col is not None and sub[nov_col].notna().any():
+                        rows[view_key]["generation_novelty"] = float(sub[nov_col].max())
+
+    if df_alignment is not None and not df_alignment.empty:
+        a = df_alignment.copy()
+        r10_col = _first_existing_col(a, ["recall_at_10", "r10"])
+        if r10_col is not None:
+            a[r10_col] = pd.to_numeric(a[r10_col], errors="coerce")
+            if {"source_view", "target_view"}.issubset(a.columns):
+                a["source_norm"] = a["source_view"].astype(str).map(normalize_view_name)
+                a["target_norm"] = a["target_view"].astype(str).map(normalize_view_name)
+            elif "view_pair" in a.columns:
+                pairs = a["view_pair"].apply(_split_view_pair)
+                a["source_norm"] = [normalize_view_name(p[0]) if p[0] else "" for p in pairs]
+                a["target_norm"] = [normalize_view_name(p[1]) if p[1] else "" for p in pairs]
+            else:
+                a["source_norm"] = ""
+                a["target_norm"] = ""
+            contrib_rows: list[dict[str, object]] = []
+            for _, row in a.iterrows():
+                val = pd.to_numeric(row.get(r10_col), errors="coerce")
+                if pd.isna(val):
+                    continue
+                for view_col in ["source_norm", "target_norm"]:
+                    view_key = _ensure_row(row.get(view_col))
+                    if view_key is None:
+                        continue
+                    contrib_rows.append({"view": view_key, "recall_at_10": float(val)})
+            if contrib_rows:
+                contrib = pd.DataFrame(contrib_rows)
+                for view, sub in contrib.groupby("view"):
+                    if sub["recall_at_10"].notna().any():
+                        rows[view]["alignment_recall_at_10"] = float(sub["recall_at_10"].mean())
+
+    property_source = df_property_mvf if df_property_mvf is not None and not df_property_mvf.empty else df_property_base
+    if property_source is not None and not property_source.empty:
+        p = property_source.copy()
+        rep_col = _first_existing_col(p, ["representation", "Representation", "view"])
+        prop_col = _first_existing_col(p, ["property", "Property"])
+        r2_col = _first_existing_col(p, ["r2", "R2", "test_r2"])
+        if rep_col is not None and prop_col is not None and r2_col is not None:
+            if "split" in p.columns:
+                split_l = p["split"].astype(str).str.lower().str.strip()
+                if (split_l == "test").any():
+                    p = p.loc[split_l == "test"].copy()
+            rep_text = p[rep_col].astype(str).str.strip()
+            rep_lower = rep_text.str.lower()
+            p = p.loc[~rep_lower.str.contains("multiview|multi view|fusion", regex=True)].copy()
+            p["view"] = rep_text.map(normalize_view_name)
+            p["property"] = p[prop_col].astype(str).str.strip()
+            p["r2"] = pd.to_numeric(p[r2_col], errors="coerce")
+            p = p.dropna(subset=["view", "property", "r2"])
+            p = p[(p["view"].astype(str) != "") & (p["view"].astype(str) != "all")].copy()
+            if not p.empty:
+                summary = (
+                    p.groupby(["view", "property"], as_index=False)["r2"]
+                    .max(numeric_only=True)
+                    .sort_values(["view", "r2", "property"], ascending=[True, False, True])
+                )
+                best_rows = summary.groupby("view", as_index=False).first()
+                for _, row in best_rows.iterrows():
+                    view_key = _ensure_row(row.get("view"))
+                    if view_key is None:
+                        continue
+                    rows[view_key]["best_property"] = str(row.get("property", "")).strip()
+                    rows[view_key]["best_property_r2"] = float(row["r2"])
+
+    inverse_source = df_inverse_mvf if df_inverse_mvf is not None and not df_inverse_mvf.empty else df_inverse_base
+    if inverse_source is not None and not inverse_source.empty:
+        inv = inverse_source.copy()
+        value_col = _first_existing_col(inv, ["fair_success_rate", "success_rate"])
+        view_col = _first_existing_col(inv, ["proposal_view", "representation", "Representation", "view"])
+        prop_col = _first_existing_col(inv, ["property", "Property"])
+        if value_col is not None and view_col is not None:
+            view_text = inv[view_col].astype(str).str.strip()
+            inv["view"] = view_text.map(normalize_view_name)
+            inv["value"] = pd.to_numeric(inv[value_col], errors="coerce")
+            if prop_col is not None:
+                inv["property"] = inv[prop_col].astype(str).str.strip()
+            else:
+                inv["property"] = ""
+            inv = inv.dropna(subset=["view", "value"])
+            inv = inv[(inv["view"].astype(str) != "") & (inv["view"].astype(str) != "all")].copy()
+            if not inv.empty:
+                summary = (
+                    inv.groupby(["view", "property"], as_index=False)["value"]
+                    .mean(numeric_only=True)
+                    .groupby("view", as_index=False)["value"]
+                    .mean(numeric_only=True)
+                )
+                for _, row in summary.iterrows():
+                    view_key = _ensure_row(row.get("view"))
+                    if view_key is None:
+                        continue
+                    rows[view_key]["inverse_hit_rate"] = float(row["value"])
+
+    if not rows:
+        return pd.DataFrame()
+
+    ordered = ordered_views(list(rows.keys()))
+    out = pd.DataFrame([rows[view] for view in ordered if view in rows])
+    return out.reset_index(drop=True)
+
+
 def _split_view_pair(text: object) -> tuple[Optional[str], Optional[str]]:
     raw = str(text).strip()
     if not raw:
@@ -2173,161 +2337,303 @@ def _fig1_baseline_generation(
     fallback_note: str,
 ) -> tuple[bool, str, str]:
     caption = MANUSCRIPT_CAPTIONS[0]
+    primary_fallbacks = [p for p in primary_panels if Path(p).exists()]
 
-    # Highest priority for Figure 1 storyline: aggregate_step12 fig_01..03 panels.
-    primaries = [p for p in primary_panels if Path(p).exists()]
-    if primaries:
-        ok = _compose_multi_panel_figure(
-            panel_paths=primaries,
+    def _fallback_result() -> tuple[bool, str, str]:
+        merged_fallbacks = list(primary_fallbacks) + [Path(p) for p in fallback_panels if Path(p).exists()]
+        ok, render_mode = _render_panels_or_placeholder(
             output_path=output_path,
+            fallback_panels=merged_fallbacks,
             font_size=font_size,
             dpi=dpi,
+            empty_title=fallback_title,
+            empty_lines=fallback_lines,
         )
-        return ok, caption, "panels"
+        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
 
     if plt is None:
-        ok, render_mode = _render_panels_or_placeholder(
-            output_path=output_path,
-            fallback_panels=fallback_panels,
-            font_size=font_size,
-            dpi=dpi,
-            empty_title=fallback_title,
-            empty_lines=fallback_lines,
-        )
-        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
+        return _fallback_result()
+
+    def _resolve_representation(raw_value: object, method_dir_value: object) -> tuple[str, str]:
+        candidates = [raw_value, method_dir_value]
+        for candidate in candidates:
+            text = str(candidate).strip()
+            if not text:
+                continue
+            norm = normalize_view_name(text)
+            if norm:
+                return norm, view_label(norm)
+            lower = text.lower()
+            if lower.startswith("bi_diffusion_"):
+                norm = normalize_view_name(lower.replace("bi_diffusion_", ""))
+                if norm:
+                    return norm, view_label(norm)
+        method_dir_text = str(method_dir_value).strip()
+        if method_dir_text:
+            rep_guess = _representation_from_method_dir(method_dir_text)
+            norm = normalize_view_name(rep_guess)
+            if norm:
+                return norm, view_label(norm)
+            return "", _repr_label(rep_guess)
+        return "", _repr_label(raw_value)
+
+    def _add_quality_score(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        for col in ["validity", "uniqueness", "novelty", "avg_diversity", "mean_sa", "quality_score"]:
+            if col not in out.columns:
+                out[col] = np.nan
+        out = _coerce_numeric(out, ["validity", "uniqueness", "novelty", "avg_diversity", "mean_sa", "quality_score"])
+        if out["quality_score"].notna().any():
+            return out
+        sa = pd.to_numeric(out["mean_sa"], errors="coerce")
+        sa_component = pd.Series(np.nan, index=out.index, dtype=float)
+        if sa.notna().any():
+            sa_min = float(sa.min())
+            sa_max = float(sa.max())
+            if abs(sa_max - sa_min) > 1e-12:
+                sa_component = (sa_max - sa) / (sa_max - sa_min)
+            else:
+                sa_component = pd.Series(np.where(sa.notna(), 1.0, np.nan), index=out.index, dtype=float)
+        score_cols = ["validity", "uniqueness", "novelty", "avg_diversity"]
+        score_frame = out[score_cols].apply(pd.to_numeric, errors="coerce").copy()
+        score_frame["sa_component"] = sa_component
+        out["quality_score"] = score_frame.mean(axis=1, skipna=True)
+        out.loc[score_frame.notna().sum(axis=1) == 0, "quality_score"] = np.nan
+        return out
 
     use_df = pd.DataFrame()
-    if not df_generation.empty:
-        use_df = df_generation.copy()
-        use_df = _coerce_numeric(use_df, ["validity", "uniqueness", "novelty", "avg_diversity"])
-        if "avg_diversity" not in use_df.columns and "diversity" in use_df.columns:
-            use_df["avg_diversity"] = pd.to_numeric(use_df["diversity"], errors="coerce")
-        rep_col = _first_existing_col(use_df, ["representation", "method", "method_dir"])
-        size_col = _first_existing_col(use_df, ["model_size"])
-        if rep_col is None:
-            rep_col = _first_existing_col(use_df, ["method"])
-        if rep_col is not None:
-            use_df["representation_label"] = use_df[rep_col].astype(str).map(_repr_label)
-        else:
-            use_df["representation_label"] = "Unknown"
-        if size_col is None:
-            use_df["model_size"] = "unknown"
-        else:
-            use_df["model_size"] = use_df[size_col].astype(str).str.lower().str.strip()
-    elif not df_step12.empty:
+    if df_step12 is not None and not df_step12.empty:
         tmp = df_step12.copy()
-        rename_map = {
-            "step2_validity": "validity",
-            "step2_uniqueness": "uniqueness",
-            "step2_novelty": "novelty",
-            "step2_diversity": "avg_diversity",
-        }
-        tmp = tmp.rename(columns=rename_map)
-        tmp = _coerce_numeric(tmp, ["validity", "uniqueness", "novelty", "avg_diversity"])
+        tmp = tmp.rename(
+            columns={
+                "step2_validity": "validity",
+                "step2_uniqueness": "uniqueness",
+                "step2_novelty": "novelty",
+                "step2_diversity": "avg_diversity",
+                "step2_mean_sa": "mean_sa",
+                "step2_quality_score": "quality_score",
+            }
+        )
         rep_col = _first_existing_col(tmp, ["representation", "method", "method_dir"])
+        method_dir_col = _first_existing_col(tmp, ["method_dir"])
         if rep_col is not None:
-            tmp["representation_label"] = tmp[rep_col].astype(str).map(_repr_label)
-        else:
-            tmp["representation_label"] = "Unknown"
+            resolved = [
+                _resolve_representation(
+                    row.get(rep_col, ""),
+                    row.get(method_dir_col, "") if method_dir_col is not None else "",
+                )
+                for _, row in tmp.iterrows()
+            ]
+            tmp["representation_norm"] = [item[0] for item in resolved]
+            tmp["representation_label"] = [item[1] for item in resolved]
         if "model_size" not in tmp.columns:
             tmp["model_size"] = "unknown"
-        use_df = tmp
+        tmp["model_size"] = tmp["model_size"].apply(_normalize_model_size)
+        use_df = _add_quality_score(tmp)
+    elif df_generation is not None and not df_generation.empty:
+        tmp = df_generation.copy()
+        if "avg_diversity" not in tmp.columns and "diversity" in tmp.columns:
+            tmp["avg_diversity"] = pd.to_numeric(tmp["diversity"], errors="coerce")
+        if "mean_sa" not in tmp.columns and "avg_sa" in tmp.columns:
+            tmp["mean_sa"] = pd.to_numeric(tmp["avg_sa"], errors="coerce")
+        rep_col = _first_existing_col(tmp, ["representation", "Representation", "method", "method_dir"])
+        method_dir_col = _first_existing_col(tmp, ["method_dir"])
+        if rep_col is not None:
+            resolved = [
+                _resolve_representation(
+                    row.get(rep_col, ""),
+                    row.get(method_dir_col, "") if method_dir_col is not None else "",
+                )
+                for _, row in tmp.iterrows()
+            ]
+            tmp["representation_norm"] = [item[0] for item in resolved]
+            tmp["representation_label"] = [item[1] for item in resolved]
+        if "model_size" not in tmp.columns:
+            tmp["model_size"] = "unknown"
+        tmp["model_size"] = tmp["model_size"].apply(_normalize_model_size)
+        use_df = _add_quality_score(tmp)
 
-    metric_cols = ["validity", "uniqueness", "novelty", "avg_diversity"]
-    if use_df.empty or not any(col in use_df.columns for col in metric_cols):
-        ok, render_mode = _render_panels_or_placeholder(
-            output_path=output_path,
-            fallback_panels=fallback_panels,
-            font_size=font_size,
-            dpi=dpi,
-            empty_title=fallback_title,
-            empty_lines=fallback_lines,
-        )
-        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
+    metric_cols = ["validity", "uniqueness", "novelty", "avg_diversity", "mean_sa", "quality_score"]
+    if use_df.empty or "representation_norm" not in use_df.columns:
+        return _fallback_result()
+
+    for col in metric_cols:
+        if col not in use_df.columns:
+            use_df[col] = np.nan
+    use_df = use_df[use_df["representation_norm"].astype(str) != ""].copy()
+    if use_df.empty:
+        return _fallback_result()
 
     agg = (
-        use_df.groupby(["representation_label", "model_size"], as_index=False)[metric_cols]
+        use_df.groupby(["representation_norm", "representation_label", "model_size"], as_index=False)[metric_cols]
         .mean(numeric_only=True)
     )
-    agg = agg.dropna(subset=["validity", "uniqueness"], how="all")
+    agg["selection_score"] = pd.to_numeric(agg["quality_score"], errors="coerce")
+    fallback_score = agg[["validity", "uniqueness", "novelty", "avg_diversity"]].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+    agg.loc[agg["selection_score"].isna(), "selection_score"] = fallback_score.loc[agg["selection_score"].isna()]
+    agg.loc[agg["selection_score"].isna(), "selection_score"] = pd.to_numeric(agg["validity"], errors="coerce").loc[agg["selection_score"].isna()]
+    agg = agg.dropna(subset=["selection_score"], how="all")
     if agg.empty:
-        ok, render_mode = _render_panels_or_placeholder(
-            output_path=output_path,
-            fallback_panels=fallback_panels,
-            font_size=font_size,
-            dpi=dpi,
-            empty_title=fallback_title,
-            empty_lines=fallback_lines,
-        )
-        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
+        return _fallback_result()
 
-    best_idx = agg.groupby("representation_label")["validity"].idxmax()
-    best_idx = pd.to_numeric(best_idx, errors="coerce").dropna().astype(int)
+    best_idx = (
+        agg.groupby("representation_norm")["selection_score"]
+        .idxmax()
+        .dropna()
+        .astype(int)
+    )
     if best_idx.empty:
-        ok, render_mode = _render_panels_or_placeholder(
-            output_path=output_path,
-            fallback_panels=fallback_panels,
-            font_size=font_size,
-            dpi=dpi,
-            empty_title=fallback_title,
-            empty_lines=fallback_lines,
-        )
-        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
+        return _fallback_result()
     best = agg.loc[best_idx].copy()
-    best = best.dropna(subset=["validity"], how="any")
     if best.empty:
-        ok, render_mode = _render_panels_or_placeholder(
-            output_path=output_path,
-            fallback_panels=fallback_panels,
-            font_size=font_size,
-            dpi=dpi,
-            empty_title=fallback_title,
-            empty_lines=fallback_lines,
-        )
-        return ok, _caption_with_render_note(caption, render_mode, fallback_note), render_mode
-    best = best.sort_values("validity", ascending=False).reset_index(drop=True)
-    scatter_df = agg.copy()
+        return _fallback_result()
 
-    fig, axes = plt.subplots(1, 3, figsize=(19.2, 6.2), squeeze=False)
+    ordered_norms = ordered_views(best["representation_norm"].tolist())
+    order_map = {view: idx for idx, view in enumerate(ordered_norms)}
+    best["view_rank"] = best["representation_norm"].map(order_map)
+    best = best.sort_values(["view_rank", "representation_label"]).reset_index(drop=True)
+    if best.empty:
+        return _fallback_result()
+
+    fig, axes = plt.subplots(1, 3, figsize=(20.8, 6.8), squeeze=False, constrained_layout=True)
     ax0, ax1, ax2 = axes[0]
-
+    labels = best["representation_label"].tolist()
     x = np.arange(len(best))
-    ax0.bar(x, best["validity"].to_numpy(dtype=float), color=NATURE_PALETTE[3], edgecolor=COLOR_TEXT, linewidth=0.8)
-    ax0.set_ylim(0.0, 1.02)
-    ax0.set_ylabel("Validity")
-    ax0.set_xticks(x)
-    ax0.set_xticklabels(best["representation_label"].tolist(), rotation=25, ha="right")
-    ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
-    _wrap_ticklabels(ax0, axis="x", width=14, rotation=32)
+
+    grouped_metrics = [
+        ("validity", "Validity", NATURE_PALETTE[3]),
+        ("uniqueness", "Uniqueness", NATURE_PALETTE[0]),
+        ("novelty", "Novelty", NATURE_PALETTE[2]),
+        ("avg_diversity", "Diversity", NATURE_PALETTE[4 % len(NATURE_PALETTE)]),
+    ]
+    available_grouped = [
+        (col, label, color)
+        for col, label, color in grouped_metrics
+        if pd.to_numeric(best.get(col), errors="coerce").notna().any()
+    ]
+    if available_grouped:
+        width = 0.18 if len(available_grouped) >= 4 else max(0.22, 0.72 / max(1, len(available_grouped)))
+        offsets = np.linspace(
+            -width * (len(available_grouped) - 1) / 2.0,
+            width * (len(available_grouped) - 1) / 2.0,
+            len(available_grouped),
+        )
+        for offset, (col, metric_label, color) in zip(offsets, available_grouped):
+            vals = pd.to_numeric(best[col], errors="coerce").to_numpy(dtype=float)
+            ax0.bar(
+                x + offset,
+                vals,
+                width=width,
+                color=color,
+                edgecolor=COLOR_TEXT,
+                linewidth=0.8,
+                label=metric_label,
+            )
+        ax0.set_ylim(0.0, 1.05)
+        ax0.set_ylabel("Generation Metric")
+        ax0.set_xticks(x)
+        ax0.set_xticklabels(labels, rotation=28, ha="right")
+        ax0.grid(True, axis="y", linestyle="--", alpha=0.4)
+        ax0.legend(loc="best", frameon=False, ncol=2, fontsize=max(9, font_size - 4))
+        _wrap_ticklabels(ax0, axis="x", width=14, rotation=30)
+    else:
+        ax0.text(0.5, 0.5, "Generation metrics unavailable", ha="center", va="center", transform=ax0.transAxes)
+        ax0.set_xticks([])
+        ax0.set_yticks([])
     _panel_mark(ax0, "(a)", font_size)
 
-    ax1.bar(x, best["uniqueness"].to_numpy(dtype=float), color=NATURE_PALETTE[0], edgecolor=COLOR_TEXT, linewidth=0.8)
-    ax1.set_ylim(0.0, 1.02)
-    ax1.set_ylabel("Uniqueness")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(best["representation_label"].tolist(), rotation=25, ha="right")
-    ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
-    _wrap_ticklabels(ax1, axis="x", width=14, rotation=32)
+    sa_threshold = 3.6
+    sa_vals = pd.to_numeric(best.get("mean_sa"), errors="coerce").to_numpy(dtype=float)
+    if np.isfinite(sa_vals).any():
+        sa_colors = ["#1B9E77" if np.isfinite(val) and val <= sa_threshold else "#D95F02" for val in sa_vals]
+        ax1.bar(
+            x,
+            sa_vals,
+            color=sa_colors,
+            edgecolor=COLOR_TEXT,
+            linewidth=0.8,
+        )
+        ax1.axhline(sa_threshold, color=COLOR_TEXT, linestyle="--", linewidth=1.2, alpha=0.9)
+        ax1.text(
+            0.98,
+            sa_threshold,
+            " SA = 3.6 threshold",
+            transform=ax1.get_yaxis_transform(),
+            ha="right",
+            va="bottom",
+            fontsize=max(9, font_size - 5),
+        )
+        y_max = max(sa_threshold + 0.5, float(np.nanmax(sa_vals)) * 1.15 if np.isfinite(sa_vals).any() else 4.2)
+        ax1.set_ylim(0.0, y_max)
+        ax1.set_ylabel("Mean SA Score")
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(labels, rotation=28, ha="right")
+        ax1.grid(True, axis="y", linestyle="--", alpha=0.4)
+        _wrap_ticklabels(ax1, axis="x", width=14, rotation=30)
+    else:
+        ax1.text(0.5, 0.5, "SA metrics unavailable", ha="center", va="center", transform=ax1.transAxes)
+        ax1.set_xticks([])
+        ax1.set_yticks([])
     _panel_mark(ax1, "(b)", font_size)
 
-    novelty_vals = pd.to_numeric(scatter_df.get("novelty"), errors="coerce")
-    scatter = ax2.scatter(
-        pd.to_numeric(scatter_df.get("validity"), errors="coerce"),
-        pd.to_numeric(scatter_df.get("uniqueness"), errors="coerce"),
-        c=novelty_vals,
-        cmap=_nature_sequential_cmap(),
-        s=140,
-        edgecolors=COLOR_TEXT,
-        linewidths=0.6,
-        alpha=0.9,
-    )
-    ax2.set_xlim(0.0, 1.02)
-    ax2.set_ylim(0.0, 1.02)
-    ax2.set_xlabel("Validity")
-    ax2.set_ylabel("Uniqueness")
-    ax2.grid(True, linestyle="--", alpha=0.4)
-    cbar = fig.colorbar(scatter, ax=ax2, fraction=0.046, pad=0.04)
-    cbar.set_label("Novelty")
+    rank_specs = [
+        ("validity", "Validity ↑", True),
+        ("uniqueness", "Uniqueness ↑", True),
+        ("novelty", "Novelty ↑", True),
+        ("avg_diversity", "Diversity ↑", True),
+        ("mean_sa", "SA ↓", False),
+    ]
+    rank_scores = np.full((len(rank_specs), len(best)), np.nan, dtype=float)
+    display_values = np.full((len(rank_specs), len(best)), np.nan, dtype=float)
+    for row_idx, (col, _, higher_is_better) in enumerate(rank_specs):
+        vals = pd.to_numeric(best.get(col), errors="coerce").to_numpy(dtype=float)
+        display_values[row_idx, :] = vals
+        finite_mask = np.isfinite(vals)
+        if not finite_mask.any():
+            continue
+        ranks = pd.Series(vals[finite_mask]).rank(method="min", ascending=not higher_is_better).to_numpy(dtype=float)
+        if finite_mask.sum() == 1:
+            scores = np.ones_like(ranks, dtype=float)
+        else:
+            scores = 1.0 - (ranks - 1.0) / float(finite_mask.sum() - 1)
+        rank_scores[row_idx, finite_mask] = scores
+
+    if np.isfinite(rank_scores).any():
+        try:
+            cmap = plt.get_cmap("RdYlGn").copy()
+        except Exception:
+            cmap = plt.get_cmap("RdYlGn")
+        if hasattr(cmap, "set_bad"):
+            cmap.set_bad(color="#D1D5DB")
+        im = ax2.imshow(np.ma.masked_invalid(rank_scores), cmap=cmap, vmin=0.0, vmax=1.0, aspect="auto")
+        ax2.set_xticks(np.arange(len(labels)))
+        ax2.set_xticklabels(labels, rotation=28, ha="right")
+        ax2.set_yticks(np.arange(len(rank_specs)))
+        ax2.set_yticklabels([item[1] for item in rank_specs])
+        ax2.set_xlabel("Generator")
+        ax2.set_ylabel("Metric")
+        for i in range(rank_scores.shape[0]):
+            for j in range(rank_scores.shape[1]):
+                score = rank_scores[i, j]
+                val = display_values[i, j]
+                if not (np.isfinite(score) and np.isfinite(val)):
+                    continue
+                ax2.text(
+                    j,
+                    i,
+                    f"{val:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=max(9, font_size - 6),
+                    color="white" if score >= 0.65 else COLOR_TEXT,
+                )
+        cbar = fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
+        cbar.set_label("Within-metric rank")
+        _wrap_ticklabels(ax2, axis="x", width=14, rotation=30)
+    else:
+        ax2.text(0.5, 0.5, "Ranking metrics unavailable", ha="center", va="center", transform=ax2.transAxes)
+        ax2.set_xticks([])
+        ax2.set_yticks([])
     _panel_mark(ax2, "(c)", font_size)
 
     return _save_plot_figure(fig, output_path, dpi), caption, "data"
@@ -3017,13 +3323,13 @@ def _fig5_inverse_design(
         prop_order = _ordered_properties(common_props)
         fair_best = (
             f5.groupby(["property", "proposal_view"], as_index=False)["value"]
-            .max(numeric_only=True)
+            .mean(numeric_only=True)
             .pivot_table(index="property", columns="proposal_view", values="value", aggfunc="mean")
             .reindex(index=prop_order, columns=common_views)
         )
         topk_best = (
             f5_topk.groupby(["property", "proposal_view"], as_index=False)["value"]
-            .max(numeric_only=True)
+            .mean(numeric_only=True)
             .pivot_table(index="property", columns="proposal_view", values="value", aggfunc="mean")
             .reindex(index=prop_order, columns=common_views)
         )
@@ -3262,7 +3568,10 @@ def _fig6_chem_physics(
         ["enrichment_ratio_topk_vs_ref", "enrichment_ratio", "log2_enrichment_topk_vs_ref", "delta_freq_topk_vs_ref"],
     )
     physics_prop_col = _first_existing_col(physics, ["property", "Property"])
-    physics_sign_col = _first_existing_col(physics, ["sign_match"])
+    physics_sign_col = _first_existing_col(
+        physics,
+        ["sign_match", "rule_match", "physics_consistent", "consistency_flag", "consistent"],
+    )
     nn_prop_col = _first_existing_col(nearest, ["property", "Property"])
     nn_val_col = _first_existing_col(nearest, ["nearest_tanimoto", "tanimoto", "similarity"])
 
@@ -3462,8 +3771,8 @@ def _fig6_chem_physics(
                     box_labels.append(prop)
                 if box_data:
                     bp = ax3.boxplot(box_data, patch_artist=True, showfliers=False)
-                    for idx, box in enumerate(bp["boxes"]):
-                        box.set_facecolor(NATURE_PALETTE[idx % len(NATURE_PALETTE)])
+                    for box in bp["boxes"]:
+                        box.set_facecolor(NATURE_PALETTE[2])
                         box.set_alpha(0.85)
                     ax3.set_xticks(np.arange(1, len(box_labels) + 1))
                     ax3.set_xticklabels(box_labels, rotation=30, ha="right")
@@ -3708,6 +4017,56 @@ def main(args):
                 "destination": _safe_rel(manuscript_dst, output_dir),
             }
         )
+
+    repo_results_root = REPO_ROOT / "results"
+    df_agg_generation = _load_aggregate_csv(repo_results_root, "metrics_generation.csv")
+    df_agg_alignment = _load_aggregate_csv(repo_results_root, "metrics_alignment.csv")
+    df_agg_property = _load_aggregate_csv(repo_results_root, "metrics_property.csv")
+    df_agg_inverse = _load_aggregate_csv(repo_results_root, "metrics_inverse.csv")
+    df_mvf_alignment = _load_mvf_csv_multi(mvf_results_dirs, "step2_retrieval", "metrics_alignment.csv")
+    df_mvf_property = _load_mvf_csv_multi(
+        mvf_results_dirs,
+        "step3_property",
+        "metrics_property.csv",
+        include_property_scopes=True,
+    )
+    df_mvf_inverse = _load_mvf_csv_multi(
+        mvf_results_dirs,
+        "step5_foundation_inverse",
+        "metrics_inverse.csv",
+        include_property_scopes=True,
+    )
+
+    table1_df = _build_table1_view_task_summary(
+        seed_views=f1_df["view"].tolist() if "view" in f1_df.columns else [],
+        df_generation=df_agg_generation,
+        df_alignment=df_mvf_alignment if not df_mvf_alignment.empty else df_agg_alignment,
+        df_property_base=df_agg_property,
+        df_property_mvf=df_mvf_property,
+        df_inverse_base=df_agg_inverse,
+        df_inverse_mvf=df_mvf_inverse,
+    )
+    table1_path = tables_main_dir / "table_1_view_task_summary.csv"
+    table1_manuscript_path = manuscript_results_dir / "table_1_view_task_summary.csv"
+    if not table1_df.empty:
+        table1_df.to_csv(table1_path, index=False)
+        table1_df.to_csv(table1_manuscript_path, index=False)
+        copied.append(
+            {
+                "category": "table_main",
+                "source": "generated_cross_task_view_summary",
+                "destination": _safe_rel(table1_path, output_dir),
+            }
+        )
+        copied.append(
+            {
+                "category": "table_main",
+                "source": "generated_cross_task_view_summary",
+                "destination": _safe_rel(table1_manuscript_path, output_dir),
+            }
+        )
+    else:
+        missing.append({"category": "table_main", "name": "table_1_view_task_summary.csv"})
 
     step4_dirs: list[Path] = []
     step5_dirs: list[Path] = []
