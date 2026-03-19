@@ -59,7 +59,7 @@ alignment_embeddings:
 # F2 retrieval args
 evaluation:
   recall_ks: [1, 5, 10]
-  max_samples_d1: 5000
+  max_samples_d1: 10000
   max_samples_d2: null
   generate_figures: true
 
@@ -92,7 +92,7 @@ property:
   generate_figures: true
   hyperparameter_tuning:
     cv_folds: 5
-    n_trials: 50
+    n_trials: 200
     enabled: true
     tuning_epochs: 50
     tuning_patience: 10
@@ -111,7 +111,7 @@ foundation_inverse:
   run_all_properties: false
   property: "Tg"
   targets:
-    Tg: 300.0
+    Tg: 320.0
     Tm: 300.0
     Td: 450.0
     Eg: 6.0
