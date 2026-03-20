@@ -104,6 +104,7 @@ property:
       learning_rate: [4.0e-4, 6.0e-4, 8.0e-4, 1.0e-3]
       dropout: [0.1, 0.2, 0.3]
       batch_size: [4, 8, 16, 32, 64, 128]
+      # Optional: finetune_last_layers. If omitted, F3 searches the per-view range [0, backbone_num_layers].
 
 # F5 foundation inverse args
 foundation_inverse:

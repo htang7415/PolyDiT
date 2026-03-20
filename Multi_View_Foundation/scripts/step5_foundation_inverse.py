@@ -1213,12 +1213,15 @@ def _build_prediction_columns_from_all_models(
             "models_used": {},
         }
 
-    view_cache: Dict[str, Dict[str, Any]] = {}
+    view_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
     prediction_by_model: Dict[str, np.ndarray] = {}
     models_used: Dict[str, str] = {}
+    selected_view_packs: Dict[str, Dict[str, Any]] = {}
 
-    def _view_pack(view: str) -> Dict[str, Any]:
-        cached = view_cache.get(view)
+    def _view_pack(view: str, *, model, model_path: Path) -> Dict[str, Any]:
+        cache_token = str(model_path) if isinstance(model, _TorchPropertyPredictor) and model.has_backbone_override else "__base__"
+        cache_key = (view, cache_token)
+        cached = view_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -1227,6 +1230,8 @@ def _build_prediction_columns_from_all_models(
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
         assets = _load_view_assets(config=config, view=view, device=device)
+        if isinstance(model, _TorchPropertyPredictor):
+            model.apply_backbone_to_assets(assets)
         embeddings, kept_indices = _embed_candidates(
             view=view,
             smiles_list=smiles_list,
@@ -1237,7 +1242,7 @@ def _build_prediction_columns_from_all_models(
             "embeddings": embeddings,
             "kept_indices": [int(i) for i in kept_indices],
         }
-        view_cache[view] = packed
+        view_cache[cache_key] = packed
         return packed
 
     # Per-view models
@@ -1245,10 +1250,11 @@ def _build_prediction_columns_from_all_models(
         model_path = model_paths.get(view)
         if model_path is None:
             continue
-        packed = _view_pack(view)
+        model = _load_property_model(model_path)
+        packed = _view_pack(view, model=model, model_path=model_path)
+        selected_view_packs[view] = packed
         pred_col = np.full((n,), np.nan, dtype=np.float32)
         if packed["embeddings"].size and packed["kept_indices"]:
-            model = _load_property_model(model_path)
             preds = np.asarray(model.predict(packed["embeddings"]), dtype=np.float32).reshape(-1)
             for local_i, global_i in enumerate(packed["kept_indices"]):
                 pred_col[global_i] = preds[local_i]
@@ -1261,7 +1267,7 @@ def _build_prediction_columns_from_all_models(
         available_views = [v for v in SUPPORTED_VIEWS if v in prediction_by_model]
         common_indices = None
         for view in available_views:
-            idx_set = set(view_cache[view]["kept_indices"])
+            idx_set = set(selected_view_packs[view]["kept_indices"])
             common_indices = idx_set if common_indices is None else common_indices.intersection(idx_set)
         common = sorted(common_indices) if common_indices else []
 
@@ -1270,7 +1276,7 @@ def _build_prediction_columns_from_all_models(
             dim_set = set()
             fused_blocks = []
             for view in available_views:
-                packed = view_cache[view]
+                packed = selected_view_packs[view]
                 idx_to_row = {idx: row_i for row_i, idx in enumerate(packed["kept_indices"])}
                 block = packed["embeddings"][[idx_to_row[i] for i in common]]
                 fused_blocks.append(block)
@@ -3378,6 +3384,8 @@ def main(args):
             raise FileNotFoundError(f"Property model not found: {model_path}")
 
     model = _load_property_model(Path(model_path))
+    if isinstance(model, _TorchPropertyPredictor):
+        model.apply_backbone_to_assets(assets)
     target_value = _resolve_target_value(args.target, args.property, f5_cfg)
     target_mode = _resolve_target_mode(args.target_mode, args.property, f5_cfg)
     epsilon = _resolve_epsilon(args.epsilon, args.property, f5_cfg)

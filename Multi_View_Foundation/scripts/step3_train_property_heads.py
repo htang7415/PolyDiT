@@ -196,6 +196,7 @@ def _load_sequence_backbone(
         "backbone": backbone,
         "tokenizer": tokenizer,
         "model_size": model_size or "base",
+        "backbone_num_layers": int(backbone_config["num_layers"]),
         "pooling": encoder_cfg.get("pooling", "mean"),
         "timestep": int(encoder_cfg.get("timestep", 1)),
         "batch_size": int(encoder_cfg.get("batch_size", 256)),
@@ -307,63 +308,197 @@ def _load_graph_backbone(encoder_cfg: dict, device: str):
         "backbone": backbone,
         "tokenizer": tokenizer,
         "model_size": model_size or "base",
+        "backbone_num_layers": int(backbone_config["num_layers"]),
         "pooling": encoder_cfg.get("pooling", "mean"),
         "timestep": int(encoder_cfg.get("timestep", 1)),
         "batch_size": int(encoder_cfg.get("batch_size", 64)),
     }
 
 
-def _embed_sequence(inputs: List[str], assets: dict, device: str) -> np.ndarray:
-    if not inputs:
+def _embed_sequence_arrays(
+    input_ids: np.ndarray,
+    attention_mask: np.ndarray,
+    assets: dict,
+    device: str,
+) -> np.ndarray:
+    if input_ids.shape[0] == 0:
         return np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32)
     embeddings = []
-    for start in range(0, len(inputs), assets["batch_size"]):
-        batch = inputs[start:start + assets["batch_size"]]
-        encoded = assets["tokenizer"].batch_encode(batch)
-        input_ids = torch.tensor(encoded["input_ids"], device=device)
-        attention_mask = torch.tensor(encoded["attention_mask"], device=device)
-        timesteps = torch.full((input_ids.size(0),), int(assets["timestep"]), device=device, dtype=torch.long)
+    for start in range(0, int(input_ids.shape[0]), assets["batch_size"]):
+        batch_ids = torch.tensor(input_ids[start:start + assets["batch_size"]], device=device, dtype=torch.long)
+        batch_mask = torch.tensor(attention_mask[start:start + assets["batch_size"]], device=device, dtype=torch.long)
+        timesteps = torch.full((batch_ids.size(0),), int(assets["timestep"]), device=device, dtype=torch.long)
         with torch.no_grad():
             pooled = assets["backbone"].get_pooled_output(
-                input_ids=input_ids,
+                input_ids=batch_ids,
                 timesteps=timesteps,
-                attention_mask=attention_mask,
+                attention_mask=batch_mask,
                 pooling=assets["pooling"],
             )
         embeddings.append(pooled.cpu().numpy())
     return np.concatenate(embeddings, axis=0)
 
 
-def _embed_graph(smiles_list: List[str], assets: dict, device: str) -> tuple[np.ndarray, List[int]]:
-    if not smiles_list:
-        return np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32), []
-    valid_indices = []
-    graph_batches = []
-    for idx, smi in enumerate(smiles_list):
-        try:
-            data = assets["tokenizer"].encode(smi)
-            graph_batches.append(data)
-            valid_indices.append(idx)
-        except Exception:
-            continue
+def _embed_sequence(inputs: List[str], assets: dict, device: str) -> np.ndarray:
+    if not inputs:
+        return np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32)
+    encoded = assets["tokenizer"].batch_encode(inputs)
+    input_ids = np.asarray(encoded["input_ids"], dtype=np.int64)
+    attention_mask = np.asarray(encoded["attention_mask"], dtype=np.int64)
+    return _embed_sequence_arrays(input_ids, attention_mask, assets, device)
+
+
+def _embed_graph_arrays(
+    X: np.ndarray,
+    E: np.ndarray,
+    M: np.ndarray,
+    assets: dict,
+    device: str,
+) -> np.ndarray:
+    if X.shape[0] == 0:
+        return np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32)
     embeddings = []
-    for start in range(0, len(graph_batches), assets["batch_size"]):
-        batch = graph_batches[start:start + assets["batch_size"]]
-        if not batch:
-            continue
-        X = np.stack([b["X"] for b in batch])
-        E = np.stack([b["E"] for b in batch])
-        M = np.stack([b["M"] for b in batch])
-        X_t = torch.tensor(X, device=device)
-        E_t = torch.tensor(E, device=device)
-        M_t = torch.tensor(M, device=device)
+    for start in range(0, int(X.shape[0]), assets["batch_size"]):
+        X_t = torch.tensor(X[start:start + assets["batch_size"]], device=device, dtype=torch.long)
+        E_t = torch.tensor(E[start:start + assets["batch_size"]], device=device, dtype=torch.long)
+        M_t = torch.tensor(M[start:start + assets["batch_size"]], device=device, dtype=torch.float32)
         timesteps = torch.full((X_t.size(0),), int(assets["timestep"]), device=device, dtype=torch.long)
         with torch.no_grad():
             pooled = assets["backbone"].get_node_embeddings(X_t, E_t, timesteps, M_t, pooling=assets["pooling"])
         embeddings.append(pooled.cpu().numpy())
     if embeddings:
-        return np.concatenate(embeddings, axis=0), valid_indices
-    return np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32), valid_indices
+        return np.concatenate(embeddings, axis=0)
+    return np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32)
+
+
+def _embed_graph(smiles_list: List[str], assets: dict, device: str) -> tuple[np.ndarray, List[int]]:
+    if not smiles_list:
+        return np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32), []
+    valid_indices = []
+    graph_rows = []
+    for idx, smi in enumerate(smiles_list):
+        try:
+            graph_rows.append(assets["tokenizer"].encode(smi))
+            valid_indices.append(idx)
+        except Exception:
+            continue
+    if not graph_rows:
+        return np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32), valid_indices
+    X = np.stack([row["X"] for row in graph_rows], axis=0).astype(np.int64, copy=False)
+    E = np.stack([row["E"] for row in graph_rows], axis=0).astype(np.int64, copy=False)
+    M = np.stack([row["M"] for row in graph_rows], axis=0).astype(np.float32, copy=False)
+    return _embed_graph_arrays(X, E, M, assets, device), valid_indices
+
+
+def _empty_sequence_inputs(tokenizer) -> dict:
+    max_length = int(getattr(tokenizer, "max_length", 0))
+    return {
+        "input_ids": np.zeros((0, max_length), dtype=np.int64),
+        "attention_mask": np.zeros((0, max_length), dtype=np.int64),
+    }
+
+
+def _empty_graph_inputs(tokenizer) -> dict:
+    nmax = int(getattr(tokenizer, "Nmax", 0))
+    return {
+        "X": np.zeros((0, nmax), dtype=np.int64),
+        "E": np.zeros((0, nmax, nmax), dtype=np.int64),
+        "M": np.zeros((0, nmax), dtype=np.float32),
+    }
+
+
+def _encode_sequence_text(text: str, assets: dict) -> Optional[dict]:
+    try:
+        encoded = assets["tokenizer"].encode(
+            text,
+            add_special_tokens=True,
+            padding=True,
+            return_attention_mask=True,
+        )
+    except Exception:
+        return None
+    return {
+        "input_ids": np.asarray(encoded["input_ids"], dtype=np.int64),
+        "attention_mask": np.asarray(encoded["attention_mask"], dtype=np.int64),
+    }
+
+
+def _populate_sequence_caches(
+    *,
+    smiles_values: List[str],
+    assets: dict,
+    device: str,
+    embedding_cache: Dict[str, np.ndarray],
+    raw_input_cache: Dict[str, dict],
+    invalid_cache: set,
+    text_transform=None,
+) -> None:
+    new_smiles = []
+    input_ids_rows = []
+    attention_mask_rows = []
+    for smi in smiles_values:
+        if smi in embedding_cache or smi in raw_input_cache or smi in invalid_cache:
+            continue
+        text = text_transform(smi) if text_transform is not None else smi
+        if not text:
+            invalid_cache.add(smi)
+            continue
+        encoded = _encode_sequence_text(text, assets)
+        if encoded is None:
+            invalid_cache.add(smi)
+            continue
+        raw_input_cache[smi] = encoded
+        new_smiles.append(smi)
+        input_ids_rows.append(encoded["input_ids"])
+        attention_mask_rows.append(encoded["attention_mask"])
+
+    if not new_smiles:
+        return
+
+    input_ids = np.stack(input_ids_rows, axis=0).astype(np.int64, copy=False)
+    attention_mask = np.stack(attention_mask_rows, axis=0).astype(np.int64, copy=False)
+    new_embeddings = _embed_sequence_arrays(input_ids, attention_mask, assets, device)
+    for idx, smi in enumerate(new_smiles):
+        embedding_cache[smi] = new_embeddings[idx]
+
+
+def _populate_graph_caches(
+    *,
+    smiles_values: List[str],
+    assets: dict,
+    device: str,
+    embedding_cache: Dict[str, np.ndarray],
+    raw_input_cache: Dict[str, dict],
+    invalid_cache: set,
+) -> None:
+    new_smiles = []
+    graph_rows = []
+    for smi in smiles_values:
+        if smi in embedding_cache or smi in raw_input_cache or smi in invalid_cache:
+            continue
+        try:
+            encoded = assets["tokenizer"].encode(smi)
+        except Exception:
+            invalid_cache.add(smi)
+            continue
+        payload = {
+            "X": np.asarray(encoded["X"], dtype=np.int64),
+            "E": np.asarray(encoded["E"], dtype=np.int64),
+            "M": np.asarray(encoded["M"], dtype=np.float32),
+        }
+        raw_input_cache[smi] = payload
+        new_smiles.append(smi)
+        graph_rows.append(payload)
+
+    if not new_smiles:
+        return
+
+    X = np.stack([row["X"] for row in graph_rows], axis=0).astype(np.int64, copy=False)
+    E = np.stack([row["E"] for row in graph_rows], axis=0).astype(np.int64, copy=False)
+    M = np.stack([row["M"] for row in graph_rows], axis=0).astype(np.float32, copy=False)
+    new_embeddings = _embed_graph_arrays(X, E, M, assets, device)
+    for idx, smi in enumerate(new_smiles):
+        embedding_cache[smi] = new_embeddings[idx]
 
 
 def _collect_property_files(property_dir: Path, file_list) -> List[Path]:
@@ -1057,7 +1192,7 @@ def _save_optuna_process_artifacts(
     _save_figure_png(fig1, figures_dir / f"figure_f3_optuna_history_{safe_property}_{safe_view}")
     plt.close(fig1)
 
-    param_cols = [c for c in ["num_layers", "neurons", "learning_rate", "dropout", "batch_size"] if c in df.columns]
+    param_cols = [c for c in ["num_layers", "neurons", "learning_rate", "dropout", "batch_size", "finetune_last_layers"] if c in df.columns]
     if not param_cols:
         return
 
@@ -1313,7 +1448,253 @@ class _PropertyMLP(torch.nn.Module):
         return self.net(x).squeeze(-1)
 
 
-def _build_tuning_config(hyper_cfg: dict, force_enable: Optional[bool] = None) -> dict:
+class _SequencePropertyPredictor(torch.nn.Module):
+    def __init__(
+        self,
+        backbone: torch.nn.Module,
+        head: _PropertyMLP,
+        pooling: str,
+        default_timestep: int,
+        scaler_mean: np.ndarray,
+        scaler_scale: np.ndarray,
+    ):
+        super().__init__()
+        self.backbone = backbone
+        self.head = head
+        self.pooling = pooling
+        self.default_timestep = int(default_timestep)
+        self.register_buffer("feature_mean", torch.tensor(scaler_mean, dtype=torch.float32))
+        self.register_buffer("feature_scale", torch.tensor(scaler_scale, dtype=torch.float32))
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        timesteps = torch.full(
+            (input_ids.size(0),),
+            self.default_timestep,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
+        pooled = self.backbone.get_pooled_output(
+            input_ids=input_ids,
+            timesteps=timesteps,
+            attention_mask=attention_mask,
+            pooling=self.pooling,
+        )
+        scaled = (pooled - self.feature_mean) / self.feature_scale
+        return self.head(scaled)
+
+
+class _GraphPropertyPredictor(torch.nn.Module):
+    def __init__(
+        self,
+        backbone: torch.nn.Module,
+        head: _PropertyMLP,
+        pooling: str,
+        default_timestep: int,
+        scaler_mean: np.ndarray,
+        scaler_scale: np.ndarray,
+    ):
+        super().__init__()
+        self.backbone = backbone
+        self.head = head
+        self.pooling = pooling
+        self.default_timestep = int(default_timestep)
+        self.register_buffer("feature_mean", torch.tensor(scaler_mean, dtype=torch.float32))
+        self.register_buffer("feature_scale", torch.tensor(scaler_scale, dtype=torch.float32))
+
+    def forward(self, X: torch.Tensor, E: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
+        timesteps = torch.full(
+            (X.size(0),),
+            self.default_timestep,
+            device=X.device,
+            dtype=torch.long,
+        )
+        pooled = self.backbone.get_node_embeddings(
+            X,
+            E,
+            timesteps,
+            M,
+            pooling=self.pooling,
+        )
+        scaled = (pooled - self.feature_mean) / self.feature_scale
+        return self.head(scaled)
+
+
+def _sanitize_scaler(scaler: StandardScaler) -> StandardScaler:
+    scaler.scale_ = np.where(np.abs(scaler.scale_) < 1e-12, 1.0, scaler.scale_).astype(np.float32, copy=False)
+    scaler.mean_ = np.asarray(scaler.mean_, dtype=np.float32)
+    scaler.var_ = np.asarray(scaler.var_, dtype=np.float32)
+    return scaler
+
+
+def _fit_feature_scaler(features: np.ndarray) -> StandardScaler:
+    scaler = StandardScaler()
+    scaler.fit(features)
+    return _sanitize_scaler(scaler)
+
+
+def _get_backbone_num_layers(backbone: torch.nn.Module) -> int:
+    if hasattr(backbone, "layers"):
+        return int(len(backbone.layers))
+    if hasattr(backbone, "blocks"):
+        return int(len(backbone.blocks))
+    return int(getattr(backbone, "num_layers", 0))
+
+
+def _normalize_finetune_options(options, backbone_num_layers: int) -> List[int]:
+    max_layers = max(int(backbone_num_layers), 0)
+    if options is None:
+        return [0, max_layers]
+    normalized = _normalize_numeric_options(options, [0, max_layers], cast=int)
+    clipped = []
+    for value in normalized:
+        clipped.append(min(max(int(value), 0), max_layers))
+    clipped = sorted(set(clipped))
+    return clipped or [0, max_layers]
+
+
+def _suggest_finetune_last_layers(trial, options: List[int]) -> int:
+    values = sorted(set(int(v) for v in options))
+    if not values:
+        return 0
+    if len(values) == 1:
+        return int(values[0])
+    if len(values) == 2:
+        low, high = values
+        return int(trial.suggest_int("finetune_last_layers", low, high))
+    return int(trial.suggest_categorical("finetune_last_layers", values))
+
+
+def _set_torch_seed(seed: int) -> None:
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
+
+
+def _set_backbone_finetune_mode(backbone: torch.nn.Module, view_type: str, finetune_last_layers: int) -> None:
+    for param in backbone.parameters():
+        param.requires_grad = False
+
+    finetune_last_layers = max(int(finetune_last_layers), 0)
+    if finetune_last_layers <= 0:
+        return
+
+    if view_type == "graph":
+        trainable_blocks = list(backbone.blocks[-finetune_last_layers:]) if hasattr(backbone, "blocks") else []
+        for block in trainable_blocks:
+            for param in block.parameters():
+                param.requires_grad = True
+        if hasattr(backbone, "ln_final"):
+            for param in backbone.ln_final.parameters():
+                param.requires_grad = True
+        return
+
+    trainable_layers = list(backbone.layers[-finetune_last_layers:]) if hasattr(backbone, "layers") else []
+    for layer in trainable_layers:
+        for param in layer.parameters():
+            param.requires_grad = True
+    if hasattr(backbone, "final_norm"):
+        for param in backbone.final_norm.parameters():
+            param.requires_grad = True
+
+
+def _build_property_predictor(
+    *,
+    assets: dict,
+    scaler: StandardScaler,
+    trial_params: dict,
+    device: str,
+    view_type: str,
+) -> torch.nn.Module:
+    backbone = copy.deepcopy(assets["backbone"]).to(device)
+    _set_backbone_finetune_mode(backbone, view_type=view_type, finetune_last_layers=int(trial_params.get("finetune_last_layers", 0)))
+    head = _PropertyMLP(
+        input_dim=int(scaler.mean_.shape[0]),
+        num_layers=int(trial_params["num_layers"]),
+        neurons=int(trial_params["neurons"]),
+        dropout=float(trial_params["dropout"]),
+    )
+    if view_type == "graph":
+        predictor = _GraphPropertyPredictor(
+            backbone=backbone,
+            head=head,
+            pooling=str(assets["pooling"]),
+            default_timestep=int(assets["timestep"]),
+            scaler_mean=np.asarray(scaler.mean_, dtype=np.float32),
+            scaler_scale=np.asarray(scaler.scale_, dtype=np.float32),
+        )
+    else:
+        predictor = _SequencePropertyPredictor(
+            backbone=backbone,
+            head=head,
+            pooling=str(assets["pooling"]),
+            default_timestep=int(assets["timestep"]),
+            scaler_mean=np.asarray(scaler.mean_, dtype=np.float32),
+            scaler_scale=np.asarray(scaler.scale_, dtype=np.float32),
+        )
+    return predictor.to(device)
+
+
+def _capture_predictor_state(predictor: torch.nn.Module) -> dict:
+    trainable_keys = {name for name, param in predictor.named_parameters() if param.requires_grad}
+    keep_keys = trainable_keys | {"feature_mean", "feature_scale"}
+    return {
+        key: value.detach().cpu().clone()
+        for key, value in predictor.state_dict().items()
+        if key in keep_keys
+    }
+
+
+def _make_model_batch(raw_inputs: dict, batch_rows: np.ndarray, view_type: str, device: str) -> dict:
+    row_idx = np.asarray(batch_rows, dtype=np.int64)
+    if view_type == "graph":
+        return {
+            "X": torch.tensor(raw_inputs["X"][row_idx], device=device, dtype=torch.long),
+            "E": torch.tensor(raw_inputs["E"][row_idx], device=device, dtype=torch.long),
+            "M": torch.tensor(raw_inputs["M"][row_idx], device=device, dtype=torch.float32),
+        }
+    return {
+        "input_ids": torch.tensor(raw_inputs["input_ids"][row_idx], device=device, dtype=torch.long),
+        "attention_mask": torch.tensor(raw_inputs["attention_mask"][row_idx], device=device, dtype=torch.long),
+    }
+
+
+def _predict_joint_model(
+    predictor: torch.nn.Module,
+    raw_inputs: dict,
+    rows: List[int],
+    *,
+    view_type: str,
+    device: str,
+    batch_size: int,
+) -> np.ndarray:
+    if not rows:
+        return np.zeros((0,), dtype=np.float32)
+    predictor = predictor.to(device)
+    predictor.eval()
+    preds = []
+    row_idx = np.asarray(rows, dtype=np.int64)
+    with torch.no_grad():
+        for start in range(0, len(row_idx), max(int(batch_size), 1)):
+            batch_rows = row_idx[start:start + max(int(batch_size), 1)]
+            batch = _make_model_batch(raw_inputs, batch_rows, view_type=view_type, device=device)
+            preds.append(predictor(**batch).detach().cpu().numpy())
+    return np.concatenate(preds, axis=0)
+
+
+def _extract_trainable_backbone_state(backbone: torch.nn.Module) -> dict:
+    trainable_keys = {name for name, param in backbone.named_parameters() if param.requires_grad}
+    return {
+        key: value.detach().cpu().clone()
+        for key, value in backbone.state_dict().items()
+        if key in trainable_keys
+    }
+
+
+def _build_tuning_config(
+    hyper_cfg: dict,
+    force_enable: Optional[bool] = None,
+    backbone_num_layers: Optional[int] = None,
+) -> dict:
     hyper_cfg = hyper_cfg or {}
     search = hyper_cfg.get("search_space", {})
 
@@ -1339,6 +1720,7 @@ def _build_tuning_config(hyper_cfg: dict, force_enable: Optional[bool] = None) -
             "learning_rate": _normalize_numeric_options(search.get("learning_rate"), [4e-4, 6e-4, 8e-4, 1e-3], cast=float),
             "dropout": _normalize_numeric_options(search.get("dropout"), [0.1, 0.2, 0.3], cast=float),
             "batch_size": _normalize_numeric_options(search.get("batch_size"), [8, 16, 32, 64, 128], cast=int),
+            "finetune_last_layers": _normalize_finetune_options(search.get("finetune_last_layers"), int(backbone_num_layers or 0)),
         },
     }
     return cfg
@@ -1386,8 +1768,9 @@ def _train_one_trial(
     trial_seed: int,
     device: str,
 ) -> tuple[torch.nn.Module, StandardScaler, dict, int]:
-    scaler = StandardScaler()
-    train_scaled = scaler.fit_transform(train_X).astype(np.float32, copy=False)
+    _set_torch_seed(trial_seed)
+    scaler = _fit_feature_scaler(train_X)
+    train_scaled = scaler.transform(train_X).astype(np.float32, copy=False)
     val_scaled = scaler.transform(val_X).astype(np.float32, copy=False) if val_X.shape[0] > 0 else np.zeros((0, train_scaled.shape[1]), dtype=np.float32)
 
     model = _PropertyMLP(
@@ -1469,6 +1852,135 @@ def _train_one_trial(
     }, int(trained_epochs)
 
 
+def _train_one_trial_joint(
+    *,
+    base_features: np.ndarray,
+    targets: np.ndarray,
+    raw_inputs: dict,
+    train_rows: np.ndarray,
+    val_rows: np.ndarray,
+    assets: dict,
+    view_type: str,
+    trial_params: dict,
+    tuning_epochs: int,
+    tuning_patience: int,
+    objective_metric: str,
+    trial_seed: int,
+    device: str,
+) -> tuple[torch.nn.Module, StandardScaler, dict, int]:
+    train_rows = np.asarray(train_rows, dtype=np.int64)
+    val_rows = np.asarray(val_rows, dtype=np.int64)
+    if train_rows.size == 0:
+        raise ValueError("Cannot train joint property predictor: empty training rows.")
+
+    _set_torch_seed(trial_seed)
+    scaler = _fit_feature_scaler(base_features[train_rows])
+    predictor = _build_property_predictor(
+        assets=assets,
+        scaler=scaler,
+        trial_params=trial_params,
+        device=device,
+        view_type=view_type,
+    )
+
+    optimizer = torch.optim.Adam(
+        [param for param in predictor.parameters() if param.requires_grad],
+        lr=float(trial_params["learning_rate"]),
+    )
+    criterion = torch.nn.MSELoss()
+
+    batch_size = max(1, int(trial_params["batch_size"]))
+    local_idx = np.arange(train_rows.shape[0])
+    rng = np.random.default_rng(trial_seed)
+
+    use_val = val_rows.size > 0
+    score_split = "val" if use_val else "train"
+
+    best_state = None
+    best_metrics = None
+    best_score = -float("inf") if objective_metric == "r2" else float("inf")
+    patience_counter = 0
+    best_epoch = 0
+    trained_epochs = 0
+
+    for epoch in range(1, int(tuning_epochs) + 1):
+        trained_epochs = epoch
+        rng.shuffle(local_idx)
+        predictor.train()
+        for start in range(0, len(local_idx), batch_size):
+            batch_local = local_idx[start:start + batch_size]
+            batch_rows = train_rows[batch_local]
+            batch = _make_model_batch(raw_inputs, batch_rows, view_type=view_type, device=device)
+            yb = torch.tensor(targets[batch_rows].astype(np.float32, copy=False), device=device, dtype=torch.float32)
+            optimizer.zero_grad()
+            pred = predictor(**batch)
+            loss = criterion(pred, yb)
+            loss.backward()
+            optimizer.step()
+
+        predictor.eval()
+        if use_val:
+            y_pred = _predict_joint_model(
+                predictor,
+                raw_inputs,
+                val_rows.tolist(),
+                view_type=view_type,
+                device=device,
+                batch_size=batch_size,
+            )
+            y_true = targets[val_rows]
+        else:
+            y_pred = _predict_joint_model(
+                predictor,
+                raw_inputs,
+                train_rows.tolist(),
+                view_type=view_type,
+                device=device,
+                batch_size=batch_size,
+            )
+            y_true = targets[train_rows]
+
+        metrics = _compute_metrics(y_true, y_pred)
+        score, maximize_metric = _objective_value(metrics, objective_metric)
+        improved = score > best_score if maximize_metric else score < best_score
+
+        if improved:
+            best_score = score
+            best_metrics = metrics
+            best_state = _capture_predictor_state(predictor)
+            patience_counter = 0
+            best_epoch = epoch
+        else:
+            patience_counter += 1
+            if patience_counter >= int(tuning_patience):
+                break
+
+    if best_state is None:
+        best_state = _capture_predictor_state(predictor)
+        best_metrics = _compute_metrics(
+            targets[train_rows],
+            _predict_joint_model(
+                predictor,
+                raw_inputs,
+                train_rows.tolist(),
+                view_type=view_type,
+                device=device,
+                batch_size=batch_size,
+            ),
+        )
+        best_epoch = int(tuning_epochs)
+
+    predictor.load_state_dict(best_state, strict=False)
+    return predictor, scaler, {
+        "objective_split": score_split,
+        "objective_metric": objective_metric,
+        "best_epoch": int(best_epoch),
+        "rmse": float(best_metrics["rmse"]),
+        "mae": float(best_metrics["mae"]),
+        "r2": float(best_metrics["r2"]),
+    }, int(trained_epochs)
+
+
 def _fit_mlp_with_hpo(
     train_X: np.ndarray,
     train_y: np.ndarray,
@@ -1476,11 +1988,19 @@ def _fit_mlp_with_hpo(
     seed: int,
     device: str,
     force_enable: Optional[bool] = None,
+    raw_inputs: Optional[dict] = None,
+    assets: Optional[dict] = None,
+    view_type: str = "sequence",
+    backbone_num_layers: Optional[int] = None,
 ) -> tuple[dict, dict, pd.DataFrame]:
     if train_X.shape[0] == 0:
         raise ValueError("Cannot train MLP: empty training set.")
 
-    cfg = _build_tuning_config(hyper_cfg, force_enable=force_enable)
+    cfg = _build_tuning_config(
+        hyper_cfg,
+        force_enable=force_enable,
+        backbone_num_layers=backbone_num_layers,
+    )
     enabled = bool(cfg["enabled"])
     n_trials = int(cfg["n_trials"]) if enabled else 1
     search = cfg["search_space"]
@@ -1495,6 +2015,8 @@ def _fit_mlp_with_hpo(
     )
 
     trial_rows = []
+    supports_joint_training = raw_inputs is not None and assets is not None
+    full_train_rows = np.arange(train_X.shape[0], dtype=np.int64)
 
     def _evaluate_params_cv(params: dict, trial_seed: int) -> dict:
         folds = KFold(n_splits=cv_folds, shuffle=True, random_state=trial_seed)
@@ -1503,20 +2025,40 @@ def _fit_mlp_with_hpo(
         fold_mae = []
         fold_best_epoch = []
         fold_epochs_trained = []
+        finetune_last_layers = int(params.get("finetune_last_layers", 0))
 
         for fold_idx, (idx_tr, idx_va) in enumerate(folds.split(train_X)):
-            _, _, fold_result, epochs_trained = _train_one_trial(
-                train_X=train_X[idx_tr],
-                train_y=train_y[idx_tr],
-                val_X=train_X[idx_va],
-                val_y=train_y[idx_va],
-                trial_params=params,
-                tuning_epochs=int(cfg["tuning_epochs"]),
-                tuning_patience=int(cfg["tuning_patience"]),
-                objective_metric=objective_metric,
-                trial_seed=trial_seed + 1009 * (fold_idx + 1),
-                device=device,
-            )
+            if finetune_last_layers > 0:
+                if not supports_joint_training:
+                    raise RuntimeError("Joint backbone fine-tuning requested but raw inputs/assets are unavailable.")
+                _, _, fold_result, epochs_trained = _train_one_trial_joint(
+                    base_features=train_X,
+                    targets=train_y,
+                    raw_inputs=raw_inputs,
+                    train_rows=idx_tr,
+                    val_rows=idx_va,
+                    assets=assets,
+                    view_type=view_type,
+                    trial_params=params,
+                    tuning_epochs=int(cfg["tuning_epochs"]),
+                    tuning_patience=int(cfg["tuning_patience"]),
+                    objective_metric=objective_metric,
+                    trial_seed=trial_seed + 1009 * (fold_idx + 1),
+                    device=device,
+                )
+            else:
+                _, _, fold_result, epochs_trained = _train_one_trial(
+                    train_X=train_X[idx_tr],
+                    train_y=train_y[idx_tr],
+                    val_X=train_X[idx_va],
+                    val_y=train_y[idx_va],
+                    trial_params=params,
+                    tuning_epochs=int(cfg["tuning_epochs"]),
+                    tuning_patience=int(cfg["tuning_patience"]),
+                    objective_metric=objective_metric,
+                    trial_seed=trial_seed + 1009 * (fold_idx + 1),
+                    device=device,
+                )
             fold_r2.append(float(fold_result["r2"]))
             fold_rmse.append(float(fold_result["rmse"]))
             fold_mae.append(float(fold_result["mae"]))
@@ -1548,6 +2090,7 @@ def _fit_mlp_with_hpo(
                 "learning_rate": float(trial.suggest_categorical("learning_rate", search["learning_rate"])),
                 "dropout": float(trial.suggest_categorical("dropout", search["dropout"])),
                 "batch_size": int(trial.suggest_categorical("batch_size", search["batch_size"])),
+                "finetune_last_layers": _suggest_finetune_last_layers(trial, search["finetune_last_layers"]),
             }
             cv_summary = _evaluate_params_cv(params, trial_seed=seed + 10007 * (trial.number + 1))
             row = {
@@ -1582,6 +2125,7 @@ def _fit_mlp_with_hpo(
             "learning_rate": float(search["learning_rate"][0]),
             "dropout": float(search["dropout"][0]),
             "batch_size": int(search["batch_size"][0]),
+            "finetune_last_layers": int(search["finetune_last_layers"][0]),
         }
         cv_summary = _evaluate_params_cv(params, trial_seed=seed + 10007)
         best_summary = {
@@ -1610,25 +2154,54 @@ def _fit_mlp_with_hpo(
         "learning_rate": float(best_summary["learning_rate"]),
         "dropout": float(best_summary["dropout"]),
         "batch_size": int(best_summary["batch_size"]),
+        "finetune_last_layers": int(best_summary.get("finetune_last_layers", 0)),
     }
 
-    final_model, final_scaler, final_result, final_epochs_ran = _train_one_trial(
-        train_X=train_X,
-        train_y=train_y,
-        val_X=np.zeros((0, train_X.shape[1]), dtype=np.float32),
-        val_y=np.zeros((0,), dtype=np.float32),
-        trial_params=best_params,
-        tuning_epochs=final_training_epochs,
-        tuning_patience=final_training_patience,
-        objective_metric=objective_metric,
-        trial_seed=seed + 1000003,
-        device=device,
-    )
-    final_bundle = {
-        "model": final_model,
-        "scaler": final_scaler,
-        "params": best_params,
-    }
+    if int(best_params.get("finetune_last_layers", 0)) > 0:
+        if not supports_joint_training:
+            raise RuntimeError("Joint backbone fine-tuning selected but raw inputs/assets are unavailable.")
+        final_predictor, final_scaler, final_result, final_epochs_ran = _train_one_trial_joint(
+            base_features=train_X,
+            targets=train_y,
+            raw_inputs=raw_inputs,
+            train_rows=full_train_rows,
+            val_rows=np.zeros((0,), dtype=np.int64),
+            assets=assets,
+            view_type=view_type,
+            trial_params=best_params,
+            tuning_epochs=final_training_epochs,
+            tuning_patience=final_training_patience,
+            objective_metric=objective_metric,
+            trial_seed=seed + 1000003,
+            device=device,
+        )
+        final_bundle = {
+            "model": final_predictor.head,
+            "predictor": final_predictor,
+            "scaler": final_scaler,
+            "params": best_params,
+            "backbone_state_dict": _extract_trainable_backbone_state(final_predictor.backbone),
+        }
+    else:
+        final_model, final_scaler, final_result, final_epochs_ran = _train_one_trial(
+            train_X=train_X,
+            train_y=train_y,
+            val_X=np.zeros((0, train_X.shape[1]), dtype=np.float32),
+            val_y=np.zeros((0,), dtype=np.float32),
+            trial_params=best_params,
+            tuning_epochs=final_training_epochs,
+            tuning_patience=final_training_patience,
+            objective_metric=objective_metric,
+            trial_seed=seed + 1000003,
+            device=device,
+        )
+        final_bundle = {
+            "model": final_model,
+            "predictor": None,
+            "scaler": final_scaler,
+            "params": best_params,
+            "backbone_state_dict": {},
+        }
 
     hpo_best = {
         "tuning_enabled": enabled,
@@ -1654,6 +2227,7 @@ def _fit_mlp_with_hpo(
         "final_r2": float(final_result["r2"]),
         "final_epochs_ran": int(final_epochs_ran),
         "activation": "relu",
+        "backbone_num_layers": int(backbone_num_layers or 0),
         **final_bundle["params"],
     }
 
@@ -1664,6 +2238,7 @@ def _save_mlp_bundle(model_path: Path, bundle: dict) -> None:
     model = bundle["model"].to("cpu")
     scaler: StandardScaler = bundle["scaler"]
     params = bundle["params"]
+    backbone_state = bundle.get("backbone_state_dict") or {}
     checkpoint = {
         "format": "mvf_torch_mlp",
         "input_dim": int(model.net[0].in_features),
@@ -1674,6 +2249,11 @@ def _save_mlp_bundle(model_path: Path, bundle: dict) -> None:
         "state_dict": model.state_dict(),
         "scaler_mean": scaler.mean_.astype(np.float32),
         "scaler_scale": scaler.scale_.astype(np.float32),
+        "finetune_last_layers": int(params.get("finetune_last_layers", 0)),
+        "backbone_state_dict": {
+            key: value.detach().cpu().clone()
+            for key, value in backbone_state.items()
+        },
     }
     torch.save(checkpoint, model_path)
 
@@ -1691,6 +2271,14 @@ def _save_mlp_bundle_with_legacy(model_path: Path, bundle: dict, legacy_paths: O
         seen.add(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         _save_mlp_bundle(path, bundle)
+
+
+def _slice_model_inputs(raw_inputs: dict, rows: List[int]) -> dict:
+    row_idx = np.asarray(rows, dtype=np.int64)
+    return {
+        key: np.asarray(value[row_idx]).copy()
+        for key, value in raw_inputs.items()
+    }
 
 
 def main(args):
@@ -1854,6 +2442,7 @@ def main(args):
                 device=view_device,
             )
         view_assets[view]["device"] = view_device
+        view_assets[view]["view_type"] = spec["type"]
         print(f"Loaded view={view} on device={view_device}")
 
     if not view_assets:
@@ -1885,6 +2474,7 @@ def main(args):
 
     # Cache per-view embeddings by raw p-SMILES across property files.
     view_embedding_cache: Dict[str, Dict[str, np.ndarray]] = {view: {} for view in view_assets}
+    view_raw_input_cache: Dict[str, Dict[str, dict]] = {view: {} for view in view_assets}
     view_invalid_cache: Dict[str, set] = {view: set() for view in view_assets}
 
     rows = []
@@ -1926,6 +2516,7 @@ def main(args):
         view_data: Dict[str, Dict] = {}
         for view, assets in view_assets.items():
             cache = view_embedding_cache[view]
+            raw_cache = view_raw_input_cache[view]
             invalid = view_invalid_cache[view]
             view_device = str(assets.get("device", training_device))
 
@@ -1935,47 +2526,50 @@ def main(args):
                 if smi in seen:
                     continue
                 seen.add(smi)
-                if smi in cache or smi in invalid:
+                if (smi in cache and smi in raw_cache) or smi in invalid:
                     continue
                 unique_missing.append(smi)
 
             if unique_missing:
                 if view == "selfies":
-                    seq_inputs = []
-                    seq_smiles = []
-                    for smi in unique_missing:
-                        s = smiles_to_selfies(smi)
-                        if s:
-                            seq_inputs.append(s)
-                            seq_smiles.append(smi)
-                        else:
-                            invalid.add(smi)
-                    if seq_inputs:
-                        new_emb = _embed_sequence(seq_inputs, assets, view_device)
-                        for i, smi in enumerate(seq_smiles):
-                            cache[smi] = new_emb[i]
+                    _populate_sequence_caches(
+                        smiles_values=unique_missing,
+                        assets=assets,
+                        device=view_device,
+                        embedding_cache=cache,
+                        raw_input_cache=raw_cache,
+                        invalid_cache=invalid,
+                        text_transform=smiles_to_selfies,
+                    )
                 elif view == "graph":
-                    new_emb, valid_indices = _embed_graph(unique_missing, assets, view_device)
-                    valid_set = set(valid_indices)
-                    emb_row = 0
-                    for i, smi in enumerate(unique_missing):
-                        if i in valid_set:
-                            cache[smi] = new_emb[emb_row]
-                            emb_row += 1
-                        else:
-                            invalid.add(smi)
+                    _populate_graph_caches(
+                        smiles_values=unique_missing,
+                        assets=assets,
+                        device=view_device,
+                        embedding_cache=cache,
+                        raw_input_cache=raw_cache,
+                        invalid_cache=invalid,
+                    )
                 else:
-                    new_emb = _embed_sequence(unique_missing, assets, view_device)
-                    for i, smi in enumerate(unique_missing):
-                        cache[smi] = new_emb[i]
+                    _populate_sequence_caches(
+                        smiles_values=unique_missing,
+                        assets=assets,
+                        device=view_device,
+                        embedding_cache=cache,
+                        raw_input_cache=raw_cache,
+                        invalid_cache=invalid,
+                    )
 
             emb_rows = []
             view_indices = []
+            raw_rows = []
             for idx, smi in enumerate(smiles_list):
                 emb = cache.get(smi)
-                if emb is None:
+                raw_payload = raw_cache.get(smi)
+                if emb is None or raw_payload is None:
                     continue
                 emb_rows.append(emb)
+                raw_rows.append(raw_payload)
                 view_indices.append(idx)
 
             if emb_rows:
@@ -1983,16 +2577,37 @@ def main(args):
             else:
                 embeddings = np.zeros((0, assets["backbone"].hidden_size), dtype=np.float32)
 
+            if raw_rows:
+                if assets["view_type"] == "graph":
+                    raw_inputs = {
+                        "X": np.stack([row["X"] for row in raw_rows], axis=0).astype(np.int64, copy=False),
+                        "E": np.stack([row["E"] for row in raw_rows], axis=0).astype(np.int64, copy=False),
+                        "M": np.stack([row["M"] for row in raw_rows], axis=0).astype(np.float32, copy=False),
+                    }
+                else:
+                    raw_inputs = {
+                        "input_ids": np.stack([row["input_ids"] for row in raw_rows], axis=0).astype(np.int64, copy=False),
+                        "attention_mask": np.stack([row["attention_mask"] for row in raw_rows], axis=0).astype(np.int64, copy=False),
+                    }
+            else:
+                raw_inputs = _empty_graph_inputs(assets["tokenizer"]) if assets["view_type"] == "graph" else _empty_sequence_inputs(assets["tokenizer"])
+
             index_map = {orig_idx: row_idx for row_idx, orig_idx in enumerate(view_indices)}
             view_data[view] = {
                 "embeddings": embeddings,
+                "raw_inputs": raw_inputs,
                 "index_map": index_map,
                 "model_size": assets["model_size"],
+                "view_type": assets["view_type"],
+                "backbone_num_layers": int(assets.get("backbone_num_layers", _get_backbone_num_layers(assets["backbone"]))),
             }
 
         for view, data in view_data.items():
             embeddings = data["embeddings"]
+            raw_inputs = data["raw_inputs"]
             index_map = data["index_map"]
+            view_type = str(data.get("view_type", "sequence"))
+            backbone_num_layers = int(data.get("backbone_num_layers", 0))
 
             if not index_map:
                 continue
@@ -2011,12 +2626,28 @@ def main(args):
                 seed=_stable_seed(seed, f"{prop_name}:{view}"),
                 device=training_device,
                 force_enable=args.tune,
+                raw_inputs=_slice_model_inputs(raw_inputs, train_rows),
+                assets=view_assets[view],
+                view_type=view_type,
+                backbone_num_layers=backbone_num_layers,
             )
             model = model_bundle["model"]
+            predictor = model_bundle.get("predictor")
             scaler = model_bundle["scaler"]
+            eval_batch_size = max(1, int(model_bundle["params"].get("batch_size", 64)))
             rep = "Group_SELFIES" if view == "group_selfies" else "Graph" if view == "graph" else view.upper()
 
-            train_preds = _predict_torch_model(model, scaler, embeddings[train_rows], device=training_device)
+            if predictor is not None:
+                train_preds = _predict_joint_model(
+                    predictor,
+                    raw_inputs,
+                    train_rows,
+                    view_type=view_type,
+                    device=training_device,
+                    batch_size=eval_batch_size,
+                )
+            else:
+                train_preds = _predict_torch_model(model, scaler, embeddings[train_rows], device=training_device)
             train_metrics = _compute_metrics(targets[train_indices], train_preds)
             rows.append(
                 {
@@ -2047,7 +2678,17 @@ def main(args):
             rows_by_property.setdefault(prop_name, []).append(rows[-1])
 
             if test_rows:
-                test_preds = _predict_torch_model(model, scaler, embeddings[test_rows], device=training_device)
+                if predictor is not None:
+                    test_preds = _predict_joint_model(
+                        predictor,
+                        raw_inputs,
+                        test_rows,
+                        view_type=view_type,
+                        device=training_device,
+                        batch_size=eval_batch_size,
+                    )
+                else:
+                    test_preds = _predict_torch_model(model, scaler, embeddings[test_rows], device=training_device)
                 test_metrics = _compute_metrics(targets[test_indices], test_preds)
             else:
                 test_metrics = {"mae": float("nan"), "rmse": float("nan"), "r2": float("nan")}

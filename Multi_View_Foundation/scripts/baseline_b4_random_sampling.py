@@ -332,6 +332,8 @@ def main():
     step5 = _get_step5()
     enc_cfg = config.get("selfies_encoder", {})
     encoder_assets = step5._load_sequence_backbone(enc_cfg, device)
+    if hasattr(prop_model, "apply_backbone_to_assets"):
+        prop_model.apply_backbone_to_assets(encoder_assets)
 
     # ── Sampling loop ─────────────────────────────────────────────────────────
     n_generated     = 0

@@ -372,6 +372,12 @@ class TorchPropertyPredictor:
         self.mean = np.asarray(checkpoint["scaler_mean"], dtype=np.float32)
         self.scale = np.asarray(checkpoint["scaler_scale"], dtype=np.float32)
         self.scale = np.where(np.abs(self.scale) < 1e-12, 1.0, self.scale).astype(np.float32, copy=False)
+        self.finetune_last_layers = int(checkpoint.get("finetune_last_layers", 0) or 0)
+        raw_backbone_state = checkpoint.get("backbone_state_dict") or {}
+        self.backbone_state_dict = {
+            str(key): value.detach().cpu().clone() if isinstance(value, torch.Tensor) else value
+            for key, value in raw_backbone_state.items()
+        }
         self.model = PropertyMLP(
             input_dim=int(checkpoint["input_dim"]),
             num_layers=int(checkpoint["num_layers"]),
@@ -389,6 +395,21 @@ class TorchPropertyPredictor:
         with torch.no_grad():
             preds = self.model(torch.tensor(x, dtype=torch.float32)).cpu().numpy()
         return preds
+
+    @property
+    def has_backbone_override(self) -> bool:
+        return bool(self.backbone_state_dict)
+
+    def apply_backbone_to_assets(self, assets: dict) -> None:
+        if not self.backbone_state_dict:
+            return
+        backbone = assets.get("backbone")
+        if backbone is None:
+            raise ValueError("Cannot apply backbone override: assets['backbone'] is missing.")
+        missing, unexpected = backbone.load_state_dict(self.backbone_state_dict, strict=False)
+        if unexpected:
+            raise ValueError(f"Unexpected backbone keys in property checkpoint: {unexpected}")
+        backbone.eval()
 
 
 def load_property_model(model_path: Path):

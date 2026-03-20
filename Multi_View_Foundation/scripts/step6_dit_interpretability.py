@@ -228,6 +228,7 @@ def _load_property_scorer(config: dict, results_dir: Path, property_name: str, e
     predictor = load_property_model(model_path)
     if not isinstance(predictor, TorchPropertyPredictor):
         raise TypeError(f"F6 interpretability requires MVF torch MLP checkpoint, got {type(predictor).__name__}")
+    predictor.apply_backbone_to_assets(assets)
     predictor.model.to(device)
     predictor.model.eval()
     mean = torch.tensor(predictor.mean, dtype=torch.float32, device=device)
