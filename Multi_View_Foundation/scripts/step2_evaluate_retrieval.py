@@ -37,6 +37,25 @@ def _save_figure_png(fig, output_base: Path) -> None:
     shared_save_figure_png(fig, output_base, font_size=16, legend_loc="best")
 
 
+def _stable_seed_offset(text: str) -> int:
+    total = 0
+    for idx, ch in enumerate(str(text)):
+        total = (total + (idx + 1) * ord(ch)) % (2 ** 32)
+    return total
+
+
+def _subset_view_records(ids, embeddings: np.ndarray, selected_ids):
+    if not selected_ids:
+        return [], embeddings[:0]
+    rank = {str(pid): idx for idx, pid in enumerate(selected_ids)}
+    keep = [(rank[str(pid)], pos) for pos, pid in enumerate(ids) if str(pid) in rank]
+    keep.sort()
+    if not keep:
+        return [], embeddings[:0]
+    positions = [pos for _, pos in keep]
+    return [str(ids[pos]) for pos in positions], embeddings[positions]
+
+
 def _metric_label(metric: str) -> str:
     if metric.startswith("recall_at_"):
         suffix = str(metric).split("_")[-1]
@@ -404,6 +423,7 @@ def main(args):
     ks = config.get("evaluation", {}).get("recall_ks", [1, 5, 10])
     max_eval_d1 = _to_int_or_none(eval_cfg.get("max_samples_d1"))
     max_eval_d2 = _to_int_or_none(eval_cfg.get("max_samples_d2"))
+    seed = int((config.get("data", {}) or {}).get("random_seed", 42))
 
     view_data = {}
     view_dims = {}
@@ -424,12 +444,35 @@ def main(args):
             )
             if ids is None or emb_aligned is None:
                 continue
-            dataset_cap = max_eval_d1 if dataset == "d1" else max_eval_d2
-            if dataset_cap is not None and len(ids) > dataset_cap:
-                ids = ids[:dataset_cap]
-                emb_aligned = emb_aligned[:dataset_cap]
             view_data[view][dataset] = {"embeddings": emb_aligned, "ids": ids}
             view_dims[view] = emb_aligned.shape[1]
+
+    for dataset in ["d1", "d2"]:
+        dataset_cap = max_eval_d1 if dataset == "d1" else max_eval_d2
+        available_views = [v for v in views if dataset in view_data.get(v, {})]
+        if dataset_cap is None or int(dataset_cap) <= 0 or not available_views:
+            continue
+        common_ids = None
+        for view in available_views:
+            ids_set = {str(pid) for pid in view_data[view][dataset]["ids"]}
+            common_ids = ids_set if common_ids is None else (common_ids & ids_set)
+        if not common_ids:
+            print(f"Warning: no common IDs across views for dataset={dataset}; skipping evaluation cap.")
+            continue
+        ordered_ids = sorted(common_ids)
+        if len(ordered_ids) > int(dataset_cap):
+            rng = np.random.default_rng(seed + _stable_seed_offset(dataset))
+            perm = rng.permutation(len(ordered_ids))
+            selected_ids = [ordered_ids[int(i)] for i in perm[: int(dataset_cap)]]
+        else:
+            selected_ids = ordered_ids
+        for view in available_views:
+            ids_subset, emb_subset = _subset_view_records(
+                view_data[view][dataset]["ids"],
+                view_data[view][dataset]["embeddings"],
+                selected_ids,
+            )
+            view_data[view][dataset] = {"embeddings": emb_subset, "ids": ids_subset}
 
     rows = []
     for dataset in ["d1", "d2"]:

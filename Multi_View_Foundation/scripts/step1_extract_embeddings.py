@@ -59,6 +59,22 @@ def _save_figure_png(fig, output_base: Path) -> None:
     shared_save_figure_png(fig, output_base, font_size=16, legend_loc="best")
 
 
+def _stable_seed_offset(text: str) -> int:
+    total = 0
+    for idx, ch in enumerate(str(text)):
+        total = (total + (idx + 1) * ord(ch)) % (2 ** 32)
+    return total
+
+
+def _shuffled_df(df: pd.DataFrame, seed: int) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    order = np.arange(len(df), dtype=np.int64)
+    rng = np.random.default_rng(int(seed))
+    rng.shuffle(order)
+    return df.iloc[order].reset_index(drop=True)
+
+
 def _load_f1_meta_table(results_dir: Path, step_dirs: dict) -> pd.DataFrame:
     rows = []
     files_dir = step_dirs["files_dir"]
@@ -605,7 +621,10 @@ def main(args):
 
     views = config.get("alignment_views", ["smiles"])
     data_cfg = config.get("data", {})
+    seed = int(data_cfg.get("random_seed", 42))
     views_cfg = config.get("views", {})
+    shuffled_d1_df = _shuffled_df(d1_df, seed + _stable_seed_offset("d1"))
+    shuffled_d2_df = _shuffled_df(d2_df, seed + _stable_seed_offset("d2"))
     primary_smiles_view = None
     for candidate in views:
         if candidate in {"smiles", "smiles_bpe"}:
@@ -694,8 +713,8 @@ def main(args):
         max_d1 = encoder_cfg.get("max_samples_d1") or data_cfg.get("max_samples_d1")
         max_d2 = encoder_cfg.get("max_samples_d2") or data_cfg.get("max_samples_d2")
 
-        view_d1 = d1_df.copy()
-        view_d2 = d2_df.copy()
+        view_d1 = shuffled_d1_df.copy()
+        view_d2 = shuffled_d2_df.copy()
         if view == "selfies":
             view_d1 = _ensure_selfies_column(view_d1)
             view_d2 = _ensure_selfies_column(view_d2)

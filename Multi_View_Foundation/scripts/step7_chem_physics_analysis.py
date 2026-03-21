@@ -443,7 +443,13 @@ def _resolve_property_columns(df: pd.DataFrame, property_name: str) -> Tuple[str
     return smiles_col, value_col
 
 
-def _load_property_reference(property_dir: Path, property_name: str, max_samples: Optional[int]) -> pd.DataFrame:
+def _load_property_reference(
+    property_dir: Path,
+    property_name: str,
+    max_samples: Optional[int],
+    *,
+    random_seed: int = 42,
+) -> pd.DataFrame:
     candidates = [property_dir / name for name in property_file_candidates(property_name)]
     path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
     if not path.exists():
@@ -455,8 +461,8 @@ def _load_property_reference(property_dir: Path, property_name: str, max_samples
     out["property_value"] = pd.to_numeric(out["property_value"], errors="coerce")
     out = out.dropna(subset=["smiles", "property_value"])
     out["smiles"] = out["smiles"].astype(str)
-    if max_samples is not None and max_samples > 0:
-        out = out.head(int(max_samples)).copy()
+    if max_samples is not None and max_samples > 0 and len(out) > int(max_samples):
+        out = out.sample(n=int(max_samples), random_state=int(random_seed)).reset_index(drop=True)
     out["property"] = property_name
     return out
 
@@ -2127,6 +2133,7 @@ def main(args):
     max_ref_samples = _to_int_or_none(args.max_reference_samples)
     if max_ref_samples is None:
         max_ref_samples = _to_int_or_none(cfg_step7.get("max_reference_samples"))
+    random_seed = int((config.get("data", {}) or {}).get("random_seed", 42))
 
     top_k_override = _to_int_or_none(args.top_k)
     if top_k_override is None:
@@ -2247,7 +2254,7 @@ def main(args):
         prop_step_dirs = ensure_step_dirs(results_dir, "step7_chem_physics_analysis", prop)
         save_config(config, prop_step_dirs["files_dir"] / "config_used.yaml")
         try:
-            ref_df = _load_property_reference(property_dir, prop, max_samples=max_ref_samples)
+            ref_df = _load_property_reference(property_dir, prop, max_samples=max_ref_samples, random_seed=random_seed)
         except Exception as exc:
             msg = f"{prop}: failed to load reference property data ({exc})"
             if skip_missing:

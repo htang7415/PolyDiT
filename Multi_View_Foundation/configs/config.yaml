@@ -33,8 +33,10 @@ paths:
 
 data:
   random_seed: 42
-  max_samples_d1: null
+  max_samples_d1: 50000
   max_samples_d2: null
+  random_sample_d1: true
+  random_sample_d2: false
 
 # F0/F1 view selection
 alignment_views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]

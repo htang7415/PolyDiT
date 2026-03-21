@@ -6,6 +6,7 @@ Currently builds a paired index with p-SMILES for D1 (SMiPoly) and D2 (PolyInfo)
 
 import argparse
 from pathlib import Path
+import random
 import sys
 
 import pandas as pd
@@ -42,7 +43,22 @@ def _load_group_tokenizer(tokenizer_path: Path):
     return tokenizer_cls.load(str(tokenizer_path))
 
 
-def _load_smiles(path: Path, max_rows=None):
+def _is_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _clean_smiles_series(series: pd.Series) -> tuple[list[str], int, int]:
+    cleaned = series.where(series.notna(), "").astype(str).str.strip()
+    invalid = cleaned.eq("") | cleaned.str.lower().isin({"nan", "none", "null"})
+    valid = cleaned[~invalid].tolist()
+    return valid, int(len(cleaned)), int((~invalid).sum())
+
+
+def _load_smiles(path: Path, max_rows=None, *, random_sample=False, random_seed=42, chunk_size=200000):
     max_rows = _to_int_or_none(max_rows)
     header_df = pd.read_csv(path, nrows=0, compression="infer")
     columns = set(header_df.columns)
@@ -56,13 +72,31 @@ def _load_smiles(path: Path, max_rows=None):
         raise ValueError(f"SMILES column not found in {path}")
 
     read_kwargs = {"usecols": [smiles_col], "compression": "infer"}
+    if random_sample and max_rows is None:
+        raise ValueError("random_sample=True requires max_rows to be set.")
+
+    if random_sample:
+        rng = random.Random(int(random_seed))
+        reservoir: list[str] = []
+        total_raw = 0
+        total_valid = 0
+        for chunk in pd.read_csv(path, chunksize=int(chunk_size), **read_kwargs):
+            valid, raw_count, _ = _clean_smiles_series(chunk[smiles_col])
+            total_raw += raw_count
+            for smi in valid:
+                total_valid += 1
+                if len(reservoir) < int(max_rows):
+                    reservoir.append(smi)
+                    continue
+                replace_idx = rng.randrange(total_valid)
+                if replace_idx < int(max_rows):
+                    reservoir[replace_idx] = smi
+        return reservoir, total_raw, total_valid
+
     if max_rows is not None:
         read_kwargs["nrows"] = int(max_rows)
     df = pd.read_csv(path, **read_kwargs)
-    raw = df[smiles_col]
-    cleaned = raw.where(raw.notna(), "").astype(str).str.strip()
-    invalid = cleaned.eq("") | cleaned.str.lower().isin({"nan", "none", "null"})
-    return cleaned[~invalid].reset_index(drop=True), int(len(cleaned)), int((~invalid).sum())
+    return _clean_smiles_series(df[smiles_col])
 
 
 def main(args):
@@ -76,11 +110,25 @@ def main(args):
     d1_path = _resolve_path(config["paths"]["polymer_file"])
     d2_path = _resolve_path(config["paths"].get("polymer_file_d2", "../Data/Polymer/PolyInfo_Homopolymer.csv"))
 
-    max_d1 = _to_int_or_none(config.get("data", {}).get("max_samples_d1"))
-    max_d2 = _to_int_or_none(config.get("data", {}).get("max_samples_d2"))
+    data_cfg = config.get("data", {})
+    max_d1 = _to_int_or_none(data_cfg.get("max_samples_d1"))
+    max_d2 = _to_int_or_none(data_cfg.get("max_samples_d2"))
+    random_seed = int(data_cfg.get("random_seed", 42))
+    random_sample_d1 = _is_truthy(data_cfg.get("random_sample_d1", False))
+    random_sample_d2 = _is_truthy(data_cfg.get("random_sample_d2", False))
 
-    d1_smiles, d1_total_raw, d1_total_valid = _load_smiles(d1_path, max_rows=max_d1)
-    d2_smiles, d2_total_raw, d2_total_valid = _load_smiles(d2_path, max_rows=max_d2)
+    d1_smiles, d1_total_raw, d1_total_valid = _load_smiles(
+        d1_path,
+        max_rows=max_d1,
+        random_sample=random_sample_d1,
+        random_seed=random_seed,
+    )
+    d2_smiles, d2_total_raw, d2_total_valid = _load_smiles(
+        d2_path,
+        max_rows=max_d2,
+        random_sample=random_sample_d2,
+        random_seed=random_seed + 1,
+    )
 
     views_cfg = config.get("views", {})
     selfies_enabled = views_cfg.get("selfies", {}).get("enabled", False)
