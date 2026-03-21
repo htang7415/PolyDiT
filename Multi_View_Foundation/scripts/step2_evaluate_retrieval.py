@@ -13,7 +13,10 @@ sys.path.insert(0, str(BASE_DIR))
 
 from src.utils.config import load_config, save_config
 from src.evaluation.retrieval_metrics import compute_recall_at_k
-from src.utils.embedding_artifacts import load_view_embeddings, load_view_index
+from src.utils.embedding_artifacts import (
+    load_view_embeddings as _load_view_embeddings,
+    load_view_index as _load_view_index,
+)
 from src.utils.output_layout import ensure_step_dirs, save_csv
 from src.utils.runtime import resolve_path as _shared_resolve_path, to_bool as _to_bool, to_int_or_none as _to_int_or_none
 from src.utils.visualization import VIEW_ORDER, ordered_views, save_figure_png as shared_save_figure_png, set_publication_style

@@ -3036,20 +3036,6 @@ def _read_optional_csv(path: Optional[Path], *, label: str, property_name: Optio
     return _read_required_csv(path, label=label, property_name=property_name)
 
 
-def _parse_view_list(value) -> List[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        raw = [item.strip() for item in value.split(",")]
-    elif isinstance(value, (list, tuple, set)):
-        raw = [str(item).strip() for item in value]
-    else:
-        raw = [str(value).strip()]
-    views = []
-    for item in raw:
-        if item and item not in views:
-            views.append(item)
-    return views
 
 
 def _infer_f5_model_size(metrics_df: pd.DataFrame, *, scoring_view: str, config: dict) -> str:

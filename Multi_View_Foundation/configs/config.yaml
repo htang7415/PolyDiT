@@ -33,7 +33,7 @@ paths:
 
 data:
   random_seed: 42
-  max_samples_d1: 50000
+  max_samples_d1: 500000
   max_samples_d2: null
   random_sample_d1: true
   random_sample_d2: false
@@ -61,15 +61,15 @@ alignment_embeddings:
 # F2 retrieval args
 evaluation:
   recall_ks: [1, 5, 10]
-  max_samples_d1: 10000
+  max_samples_d1: 20000
   max_samples_d2: null
   generate_figures: true
 
 # F4 embedding-research args
 embedding_research:
   analysis_dataset: "d2"        # research summary focuses on real-polymer D2 embeddings
-  max_samples_per_view: 3000
-  tokenizer_sample_cap: 3000
+  max_samples_per_view: 10000
+  tokenizer_sample_cap: 10000
   knn_k: 10
   property_knn_k: 5
   min_class_samples: 20
