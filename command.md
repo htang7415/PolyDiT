@@ -111,12 +111,36 @@ Use these only when you intentionally want to override `config.yaml`.
 
 One argument: `model_size` (`small`, `medium`, `large`, or `xl`). Requires matching trained backbones under `Bi_Diffusion_*/results_<model_size>/`.
 
+Local separate submissions:
+
+```bash
+bash water_miscible/scripts/submit_local_chi.sh small
+bash water_miscible/scripts/submit_local_water.sh small
+```
+
+Show local output in terminal:
+
+```bash
+WM_LOCAL_FOREGROUND=1 bash water_miscible/scripts/submit_local_chi.sh small
+WM_LOCAL_FOREGROUND=1 bash water_miscible/scripts/submit_local_water.sh small
+```
+
+Local debug:
+
+```bash
+bash water_miscible/scripts/submit_local_chi.sh small --no_tune --max_rows 800
+bash water_miscible/scripts/submit_local_water.sh small --no_tune --max_rows 800
+```
+
+Euler/NREL:
+
 ```bash
 bash water_miscible/scripts/submit_euler.sh small
 bash water_miscible/scripts/submit_nrel.sh small
 ```
 
-Submits 17 jobs: 5 shared embedding precompute jobs, `5 views x 2 tasks` train jobs, then one chi postprocess job and one water postprocess job. Outputs go to `water_miscible/results_<model_size>/`.
+Local outputs/logs go to `water_miscible/results_<model_size>/` and `water_miscible/logs/local_*`.
+Euler/NREL submit 17 jobs: 5 shared embedding precompute jobs, `5 views x 2 tasks` train jobs, then one chi postprocess job and one water postprocess job.
 
 ## 10) Key outputs
 
