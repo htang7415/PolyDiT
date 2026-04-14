@@ -1,8 +1,10 @@
 # Python
 __pycache__/
+water_miscible/scripts/__pycache__/
 *.pyc
 *.pyo
 results/
+water_miscible/results*/
 results_1
 Data/
 *Data
@@ -17,8 +19,10 @@ Experiments*/
 
 *.md
 !README.md
+!command.md
 
 *.txt
+!requirements.txt
 *.csv
 *.pkl
 *.pt

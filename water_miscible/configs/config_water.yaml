@@ -1,0 +1,133 @@
+# Five-view chi regression and water-miscible classification.
+
+paths:
+  results_dir: "water_miscible/results"
+  chi_dataset: "Data/chi/polymers_T_phi.csv"
+  water_miscible_dataset: "Data/water_solvent/water_miscible_polymer.csv"
+  water_immiscible_dataset: "Data/water_solvent/water_immiscible_polymer.csv"
+
+data:
+  random_seed: 42
+  split_mode: "smiles"                   # chi regression split: smiles | random
+  classification_split_mode: "random"    # water classification split: smiles | random
+  holdout_test_ratio: 0.1
+  default_temperature: 293.15
+  default_phi: 0.2
+  default_chi: 0.0
+
+views:
+  enabled: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
+
+backbones:
+  model_size: "small"
+  pooling: "mean"
+  timestep: 1
+  device: "auto"
+  embedding_batch_size: 256
+  graph_embedding_batch_size: 64
+
+  smiles:
+    method_dir: "Bi_Diffusion_SMILES"
+    config_path: "Bi_Diffusion_SMILES/configs/config.yaml"
+    results_dir: "Bi_Diffusion_SMILES/results"
+    tokenizer_path: "Bi_Diffusion_SMILES/results/tokenizer.json"
+    checkpoint_path: "Bi_Diffusion_SMILES/results_small/step1_backbone/checkpoints/backbone_best.pt"
+
+  smiles_bpe:
+    method_dir: "Bi_Diffusion_SMILES_BPE"
+    config_path: "Bi_Diffusion_SMILES_BPE/configs/config.yaml"
+    results_dir: "Bi_Diffusion_SMILES_BPE/results"
+    tokenizer_path: "Bi_Diffusion_SMILES_BPE/results/tokenizer.json"
+    checkpoint_path: "Bi_Diffusion_SMILES_BPE/results_small/step1_backbone/checkpoints/backbone_best.pt"
+
+  selfies:
+    method_dir: "Bi_Diffusion_SELFIES"
+    config_path: "Bi_Diffusion_SELFIES/configs/config.yaml"
+    results_dir: "Bi_Diffusion_SELFIES/results"
+    tokenizer_path: "Bi_Diffusion_SELFIES/results/tokenizer.json"
+    checkpoint_path: "Bi_Diffusion_SELFIES/results_small/step1_backbone/checkpoints/backbone_best.pt"
+
+  group_selfies:
+    method_dir: "Bi_Diffusion_Group_SELFIES"
+    config_path: "Bi_Diffusion_Group_SELFIES/configs/config.yaml"
+    results_dir: "Bi_Diffusion_Group_SELFIES/results"
+    tokenizer_path: "Bi_Diffusion_Group_SELFIES/results/tokenizer.pkl"
+    checkpoint_path: "Bi_Diffusion_Group_SELFIES/results_small/step1_backbone/checkpoints/backbone_best.pt"
+
+  graph:
+    method_dir: "Bi_Diffusion_graph"
+    config_path: "Bi_Diffusion_graph/configs/config.yaml"
+    results_dir: "Bi_Diffusion_graph/results"
+    tokenizer_path: "Bi_Diffusion_graph/results/graph_tokenizer.json"
+    graph_config_path: "Bi_Diffusion_graph/results/graph_config.json"
+    checkpoint_path: "Bi_Diffusion_graph/results_small/step1_backbone/checkpoints/graph_backbone_best.pt"
+
+chi_regression:
+  enabled: true
+  tune: true
+  n_trials: 100
+  tuning_epochs: 50
+  tuning_patience: 10
+  tuning_objective: "val_poly_nrmse"      # val_r2 | val_poly_nrmse
+  tuning_cv_folds: 5
+  num_epochs: 500
+  final_epochs_from_cv: true
+  patience: 20
+  batch_size: 128
+  predict_batch_size: 1024
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+  gradient_clip_norm: 1.0
+  use_scheduler: true
+  scheduler_min_lr: 1.0e-6
+  hidden_sizes: [256, 512, 128]
+  dropout: 0.1
+  loss_weighting: "polymer_balanced"      # uniform | polymer_balanced
+  loss_weight_clip_ratio: 10.0
+  nrmse_std_floor: 0.02
+  nrmse_clip: 10.0
+  optuna_search_space:
+    num_layers: [2, 3, 4, 5]
+    hidden_units: [64, 128, 256, 512, 1024]
+    dropout: [0.0, 0.1, 0.2, 0.3]
+    learning_rate: [1.0e-4, 5.0e-3]
+    learning_rate_log: true
+    weight_decay: [1.0e-7, 1.0e-3]
+    weight_decay_log: true
+    batch_size: [4, 8, 16, 32, 64, 128]
+
+water_classification:
+  enabled: true
+  tune: true
+  n_trials: 100
+  tuning_epochs: 50
+  tuning_patience: 10
+  tuning_objective: "balanced_accuracy"
+  tuning_cv_folds: 5
+  num_epochs: 500
+  final_epochs_from_cv: true
+  patience: 20
+  batch_size: 128
+  predict_batch_size: 1024
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+  gradient_clip_norm: 1.0
+  use_scheduler: true
+  scheduler_min_lr: 1.0e-6
+  hidden_sizes: [256, 512, 128]
+  dropout: 0.1
+  loss_weighting: "class_balanced"       # uniform | class_balanced
+  optuna_search_space:
+    num_layers: [2, 3, 4, 5]
+    hidden_units: [64, 128, 256, 512, 1024]
+    dropout: [0.0, 0.1, 0.2, 0.3]
+    learning_rate: [1.0e-4, 5.0e-3]
+    learning_rate_log: true
+    weight_decay: [1.0e-7, 1.0e-3]
+    weight_decay_log: true
+    batch_size: [4, 8, 16, 32, 64]
+
+plotting:
+  generate_figures: true
+  dpi: 600
+  font_size: 16
