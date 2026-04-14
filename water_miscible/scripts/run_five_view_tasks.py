@@ -1387,12 +1387,13 @@ def plot_hpo_progress(trials: pd.DataFrame, out_path: Path, dpi: int, font_size:
     if df.empty:
         return
     direction = str(df["objective_direction"].iloc[0])
+    trial_x = df["trial"].to_numpy(dtype=float)
     vals = df["objective_value"].to_numpy(dtype=float)
     best = np.minimum.accumulate(vals) if direction == "minimize" else np.maximum.accumulate(vals)
     with plt.rc_context(plot_rc(font_size)):
         fig, ax = plt.subplots(figsize=(6, 4.2))
-        ax.plot(df["trial"], vals, "o", alpha=0.65, label="trial")
-        ax.plot(df["trial"], best, "-", linewidth=2.0, label="best")
+        ax.plot(trial_x, vals, "o", alpha=0.65, label="trial")
+        ax.plot(trial_x, best, "-", linewidth=2.0, label="best")
         ax.set_xlabel("Trial")
         ax.set_ylabel(metric_label(str(df["objective_metric"].iloc[0])))
         ax.grid(alpha=0.3)

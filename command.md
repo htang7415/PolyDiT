@@ -107,12 +107,13 @@ cd ..
 
 Use these only when you intentionally want to override `config.yaml`.
 
-## 9) water_miscible five-view run (Euler)
+## 9) water_miscible five-view run
 
 One argument: `model_size` (`small`, `medium`, `large`, or `xl`). Requires matching trained backbones under `Bi_Diffusion_*/results_<model_size>/`.
 
 ```bash
 bash water_miscible/scripts/submit_euler.sh small
+bash water_miscible/scripts/submit_nrel.sh small
 ```
 
 Submits 17 jobs: 5 shared embedding precompute jobs, `5 views x 2 tasks` train jobs, then one chi postprocess job and one water postprocess job. Outputs go to `water_miscible/results_<model_size>/`.
