@@ -141,6 +141,7 @@ bash water_miscible/scripts/submit_nrel.sh small
 
 Local outputs/logs go to `water_miscible/results_<model_size>/` and `water_miscible/logs/local_*`.
 Euler/NREL submit 17 jobs: 5 shared embedding precompute jobs, `5 views x 2 tasks` train jobs, then one chi postprocess job and one water postprocess job.
+NREL walltime: precompute/train jobs use 24h; postprocess jobs use 2h.
 
 ## 10) Key outputs
 
