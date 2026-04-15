@@ -95,6 +95,7 @@ chi_regression:
     weight_decay: [1.0e-7, 1.0e-3]
     weight_decay_log: true
     batch_size: [4, 8, 16, 32, 64, 128]
+    finetune_last_layers: null           # null searches integer range [0, backbone_num_layers]
 
 water_classification:
   enabled: true
@@ -126,6 +127,7 @@ water_classification:
     weight_decay: [1.0e-7, 1.0e-3]
     weight_decay_log: true
     batch_size: [4, 8, 16, 32, 64]
+    finetune_last_layers: null           # null searches integer range [0, backbone_num_layers]
 
 plotting:
   generate_figures: true
