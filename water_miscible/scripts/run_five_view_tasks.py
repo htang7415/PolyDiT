@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -29,12 +30,15 @@ from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
     brier_score_loss,
+    confusion_matrix,
     mean_absolute_error,
     mean_squared_error,
+    precision_recall_curve,
     r2_score,
+    roc_curve,
     roc_auc_score,
 )
-from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 
 try:  # pragma: no cover
@@ -43,8 +47,10 @@ try:  # pragma: no cover
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 except Exception:  # pragma: no cover
     plt = None
+    Line2D = None
 
 try:  # pragma: no cover
     import optuna
@@ -66,9 +72,13 @@ TASK_KINDS = {"chi_regression": "regression", "water_classification": "classific
 TASK_ALIASES = {
     "chi": "chi_regression",
     "chi_regression": "chi_regression",
+    "step4_1": "chi_regression",
+    "step4_1_regression": "chi_regression",
     "water": "water_classification",
     "water_miscible": "water_classification",
     "water_classification": "water_classification",
+    "step4_2": "water_classification",
+    "step4_2_classification": "water_classification",
 }
 REPRESENTATION_LABELS = {
     "smiles": "SMILES",
@@ -104,6 +114,11 @@ METRIC_LABELS = {
     "val_poly_nrmse": "NRMSE",
 }
 FINAL_TRAINING_POLICY = "train_plus_val_fixed_epoch_budget_from_cv_no_final_validation"
+REQUIRED_CHI_COLUMNS = ["Polymer", "SMILES", "temperature", "phi", "chi", "water_miscible"]
+CLASS_DISPLAY_LABELS = {0: "water-immiscible", 1: "water-miscible"}
+CLASS_DISPLAY_TICKLABELS = ["water-\nimmiscible", "water-\nmiscible"]
+CLASS_DISPLAY_LEGEND_TITLE = "Class"
+WATER_SOLUBLE_PALETTE = {0: "#d62728", 1: "#1f77b4"}
 
 
 def resolve_path(path: str | Path) -> Path:
@@ -666,23 +681,48 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def normalize_water_miscible_column(df: pd.DataFrame) -> pd.DataFrame:
+    out = normalize_columns(df)
+    label_aliases = {
+        "water_solubel",
+        "water_solubility",
+        "water_soluble",
+        "water_miscible",
+        "water miscible",
+        "watermiscible",
+        "water_missible",
+    }
+    matched = [col for col in out.columns if str(col).strip().lower() in label_aliases]
+    if matched and "water_miscible" not in out.columns:
+        out = out.rename(columns={matched[0]: "water_miscible"})
+    for col in matched:
+        if col == "water_miscible" or col not in out.columns:
+            continue
+        out["water_miscible"] = out["water_miscible"].where(out["water_miscible"].notna(), out[col])
+    return out
+
+
 def fill_polymer_names(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "Polymer" not in out.columns:
         out["Polymer"] = ""
     out["Polymer"] = out["Polymer"].where(out["Polymer"].notna(), "").astype(str).str.strip()
     missing = out["Polymer"].eq("") | out["Polymer"].str.lower().isin({"nan", "none", "null"})
-    out.loc[missing, "Polymer"] = out.loc[missing, "SMILES"].astype(str)
+    smiles = out["SMILES"].astype(str).str.strip()
+
+    def fallback_name(smi: str) -> str:
+        digest = hashlib.sha1(str(smi).encode("utf-8")).hexdigest()[:12]
+        return f"unnamed_polymer_{digest}"
+
+    out.loc[missing, "Polymer"] = smiles.loc[missing].map(fallback_name)
     return out
 
 
 def add_polymer_ids(df: pd.DataFrame) -> pd.DataFrame:
     out = fill_polymer_names(df).reset_index(drop=True).copy()
-    out["split_group_key"] = out["SMILES"].astype(str).str.strip()
+    out["split_group_key"] = out["Polymer"].astype(str).str.strip()
     group_order = sorted(out["split_group_key"].unique())
     group_to_id = {group: idx for idx, group in enumerate(group_order)}
-    # Keep the existing column name because downstream loss/metrics use it,
-    # but derive it from SMILES to avoid relying on incomplete Polymer names.
     out["polymer_id"] = out["split_group_key"].map(group_to_id).astype(int)
     out["row_id"] = np.arange(len(out), dtype=np.int64)
     return out
@@ -690,19 +730,19 @@ def add_polymer_ids(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_chi_dataset(config: Dict[str, Any], max_rows: Optional[int] = None) -> pd.DataFrame:
     path = resolve_path(config["paths"]["chi_dataset"])
-    df = normalize_columns(pd.read_csv(path, nrows=max_rows))
-    required = {"SMILES", "temperature", "phi", "chi"}
+    df = normalize_water_miscible_column(pd.read_csv(path, nrows=max_rows))
+    required = set(REQUIRED_CHI_COLUMNS)
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Chi dataset missing required columns: {sorted(missing)}")
-    if "water_miscible" not in df.columns:
-        df["water_miscible"] = 0
     df = df.copy()
+    df = fill_polymer_names(df)
+    df["SMILES"] = df["SMILES"].astype(str).str.strip()
     df["temperature"] = pd.to_numeric(df["temperature"], errors="coerce")
     df["phi"] = pd.to_numeric(df["phi"], errors="coerce")
     df["chi"] = pd.to_numeric(df["chi"], errors="coerce")
     df["water_miscible"] = pd.to_numeric(df["water_miscible"], errors="coerce").fillna(0).astype(int)
-    df = df.dropna(subset=["SMILES", "temperature", "phi", "chi"]).reset_index(drop=True)
+    df = df.dropna(subset=["Polymer", "SMILES", "temperature", "phi", "chi"]).reset_index(drop=True)
     return add_polymer_ids(df)
 
 
@@ -742,15 +782,17 @@ def load_water_dataset(config: Dict[str, Any], max_rows: Optional[int] = None) -
         resolve_path(config["paths"]["water_miscible_dataset"]),
         resolve_path(config["paths"]["water_immiscible_dataset"]),
     ]
-    frames = [normalize_columns(pd.read_csv(path)) for path in paths]
+    frames = [normalize_water_miscible_column(pd.read_csv(path)) for path in paths]
     df = pd.concat(frames, ignore_index=True)
-    required = {"SMILES", "water_miscible"}
+    required = {"Polymer", "SMILES", "water_miscible"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Water dataset missing required columns: {sorted(missing)}")
     df = df.copy()
+    df = fill_polymer_names(df)
+    df["SMILES"] = df["SMILES"].astype(str).str.strip()
     df["water_miscible"] = pd.to_numeric(df["water_miscible"], errors="coerce").fillna(0).astype(int)
-    df = df.dropna(subset=["SMILES", "water_miscible"]).reset_index(drop=True)
+    df = df.dropna(subset=["Polymer", "SMILES", "water_miscible"]).reset_index(drop=True)
     if max_rows is not None:
         df = class_balanced_debug_sample(df, int(max_rows), "water_miscible", seed=int(config.get("data", {}).get("random_seed", 42)))
     defaults = config.get("data", {})
@@ -815,47 +857,69 @@ def make_splits(
     stratify_target: str = "water_miscible",
 ) -> pd.DataFrame:
     out = df.copy().reset_index(drop=True)
-    split_mode = "smiles" if split_mode == "polymer" else split_mode
+    split_mode = str(split_mode).strip().lower()
+    if split_mode == "smiles":
+        split_mode = "polymer"
     dev_ratio = 1.0 - float(test_ratio)
     val_ratio = dev_ratio / float(max(2, int(cv_folds)))
-    val_fraction_of_dev = val_ratio / dev_ratio
+    train_ratio = dev_ratio - val_ratio
     out["split"] = "train"
 
-    if split_mode == "smiles":
-        units = split_units_for_stratification(out)
-        unit_ids = units["polymer_id"].to_numpy()
-        if len(unit_ids) < 3:
-            return make_splits(df, split_mode="random", test_ratio=test_ratio, cv_folds=cv_folds, seed=seed, stratify_target=stratify_target)
-        stratify = stratification_labels(units, stratify_target)
-        train_units, test_units = safe_train_test_split(unit_ids, test_size=test_ratio, random_state=seed, shuffle=True, stratify=stratify)
-        if len(train_units) < 2:
-            return make_splits(df, split_mode="random", test_ratio=test_ratio, cv_folds=cv_folds, seed=seed, stratify_target=stratify_target)
-        train_units_df = units.set_index("polymer_id").loc[train_units].reset_index()
-        stratify_dev = stratification_labels(train_units_df, stratify_target)
-        train_units, val_units = safe_train_test_split(
-            train_units,
-            test_size=val_fraction_of_dev,
-            random_state=seed + 17,
-            shuffle=True,
-            stratify=stratify_dev,
+    if split_mode == "polymer":
+        polymer_df = (
+            out[["polymer_id", "Polymer", "water_miscible"]]
+            .drop_duplicates(subset=["polymer_id"])
+            .sort_values("polymer_id")
+            .reset_index(drop=True)
         )
-        out.loc[out["polymer_id"].isin(test_units), "split"] = "test"
-        out.loc[out["polymer_id"].isin(val_units), "split"] = "val"
-        out.loc[out["polymer_id"].isin(train_units), "split"] = "train"
+        if len(polymer_df) < 3:
+            return make_splits(df, split_mode="random", test_ratio=test_ratio, cv_folds=cv_folds, seed=seed, stratify_target=stratify_target)
+        train_poly, temp_poly = safe_train_test_split(
+            polymer_df,
+            test_size=(1.0 - train_ratio),
+            random_state=seed,
+            shuffle=True,
+            stratify=polymer_df["water_miscible"],
+        )
+        temp_test_ratio = float(test_ratio) / float(val_ratio + float(test_ratio))
+        val_poly, test_poly = safe_train_test_split(
+            temp_poly,
+            test_size=temp_test_ratio,
+            random_state=seed,
+            shuffle=True,
+            stratify=temp_poly["water_miscible"],
+        )
+        out.loc[out["polymer_id"].isin(test_poly["polymer_id"]), "split"] = "test"
+        out.loc[out["polymer_id"].isin(val_poly["polymer_id"]), "split"] = "val"
+        out.loc[out["polymer_id"].isin(train_poly["polymer_id"]), "split"] = "train"
         return out
 
     if split_mode != "random":
-        raise ValueError("split_mode must be 'smiles' or 'random'")
+        raise ValueError("split_mode must be 'polymer' or 'random'")
     if len(out) < 3:
         out["split"] = "train"
         if len(out) >= 1:
             out.loc[out.index[-1], "split"] = "test"
         return out
-    indices = np.arange(len(out))
-    stratify = stratification_labels(out, stratify_target)
-    dev_idx, test_idx = safe_train_test_split(indices, test_size=test_ratio, random_state=seed, shuffle=True, stratify=stratify)
-    stratify_dev = stratification_labels(out.iloc[dev_idx], stratify_target)
-    train_idx, val_idx = safe_train_test_split(dev_idx, test_size=val_fraction_of_dev, random_state=seed + 17, shuffle=True, stratify=stratify_dev)
+    row_df = out[["row_id", "water_miscible"]].copy()
+    train_rows, temp_rows = safe_train_test_split(
+        row_df,
+        test_size=(1.0 - train_ratio),
+        random_state=seed,
+        shuffle=True,
+        stratify=row_df["water_miscible"],
+    )
+    temp_test_ratio = float(test_ratio) / float(val_ratio + float(test_ratio))
+    val_rows, test_rows = safe_train_test_split(
+        temp_rows,
+        test_size=temp_test_ratio,
+        random_state=seed,
+        shuffle=True,
+        stratify=temp_rows["water_miscible"],
+    )
+    train_idx = train_rows["row_id"].to_numpy(dtype=int)
+    val_idx = val_rows["row_id"].to_numpy(dtype=int)
+    test_idx = test_rows["row_id"].to_numpy(dtype=int)
     out.loc[test_idx, "split"] = "test"
     out.loc[val_idx, "split"] = "val"
     out.loc[train_idx, "split"] = "train"
@@ -1029,6 +1093,25 @@ def sanitize_scaler(scaler: StandardScaler) -> StandardScaler:
     scaler.mean_ = np.asarray(scaler.mean_, dtype=np.float32)
     scaler.var_ = np.asarray(scaler.var_, dtype=np.float32)
     return scaler
+
+
+class IdentityScaler:
+    def fit(self, X: np.ndarray) -> "IdentityScaler":
+        arr = np.asarray(X, dtype=np.float32)
+        n_features = int(arr.shape[1]) if arr.ndim == 2 else 0
+        self.mean_ = np.zeros(n_features, dtype=np.float32)
+        self.scale_ = np.ones(n_features, dtype=np.float32)
+        self.var_ = np.ones(n_features, dtype=np.float32)
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        return np.asarray(X, dtype=np.float32)
+
+
+def build_feature_scaler(X: np.ndarray, standardize_features: bool) -> StandardScaler | IdentityScaler:
+    if standardize_features:
+        return sanitize_scaler(StandardScaler().fit(X))
+    return IdentityScaler().fit(X)
 
 
 def build_finetune_predictor(
@@ -1303,15 +1386,23 @@ def align_embeddings_and_raw(
     raw_map: Dict[str, Dict[str, np.ndarray]],
     assets: ViewAssets | ViewInfo | str,
 ) -> Tuple[pd.DataFrame, np.ndarray, Dict[str, np.ndarray]]:
-    keys = split_df["SMILES"].astype(str).str.strip()
-    mask = keys.isin(set(embedding_map)) & keys.isin(set(raw_map))
+    row_keys = split_df["SMILES"].astype(str).str.strip()
+    representative = (
+        split_df[["polymer_id", "SMILES"]]
+        .drop_duplicates(subset=["polymer_id"])
+        .assign(SMILES=lambda d: d["SMILES"].astype(str).str.strip())
+        .set_index("polymer_id")["SMILES"]
+    )
+    embedding_keys = split_df["polymer_id"].map(representative).astype(str).str.strip()
+    mask = embedding_keys.isin(set(embedding_map)) & row_keys.isin(set(raw_map))
     if not bool(mask.any()):
         empty_raw = empty_raw_inputs(assets) if isinstance(assets, ViewAssets) else empty_raw_inputs_for_view(view_type_from_source(assets))
         return split_df.iloc[0:0].copy(), np.zeros((0, 0), dtype=np.float32), empty_raw
     filtered = split_df.loc[mask].reset_index(drop=True)
-    filtered_keys = keys.loc[mask].reset_index(drop=True)
-    embeddings = np.stack([embedding_map[smi] for smi in filtered_keys], axis=0).astype(np.float32, copy=False)
-    raw_inputs = stack_raw_rows([raw_map[smi] for smi in filtered_keys], assets)
+    filtered_embedding_keys = embedding_keys.loc[mask].reset_index(drop=True)
+    filtered_row_keys = row_keys.loc[mask].reset_index(drop=True)
+    embeddings = np.stack([embedding_map[smi] for smi in filtered_embedding_keys], axis=0).astype(np.float32, copy=False)
+    raw_inputs = stack_raw_rows([raw_map[smi] for smi in filtered_row_keys], assets)
     return filtered, embeddings, raw_inputs
 
 
@@ -1455,11 +1546,12 @@ def train_eval_model(
     val_polymer_ids: Optional[np.ndarray] = None,
     nrmse_std_floor: float = 0.02,
     nrmse_clip: float = 10.0,
+    standardize_features: bool = False,
     predict_batch_size: int = 1024,
-) -> Tuple[MLP, StandardScaler, Dict[str, List[float]], Dict[str, float]]:
+) -> Tuple[MLP, StandardScaler | IdentityScaler, Dict[str, List[float]], Dict[str, float]]:
     set_seed(seed)
-    scaler = StandardScaler()
-    train_Xs = scaler.fit_transform(train_X).astype(np.float32)
+    scaler = build_feature_scaler(train_X, standardize_features=standardize_features)
+    train_Xs = scaler.transform(train_X).astype(np.float32)
     val_Xs = scaler.transform(val_X).astype(np.float32) if len(val_X) else np.zeros((0, train_X.shape[1]), dtype=np.float32)
     model = MLP(train_X.shape[1], hidden_sizes, dropout=dropout).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
@@ -1477,6 +1569,7 @@ def train_eval_model(
     has_val = len(val_Xs) > 0
     best_state = None
     best_value = float("inf") if objective_metric in {"rmse", "loss", "poly_nrmse", "val_poly_nrmse"} else -float("inf")
+    best_epoch = 0
     wait = 0
     history: Dict[str, List[float]] = {"epoch": [], "train_loss": [], "val_loss": [], "metric": []}
     loss_fn_cls = nn.BCEWithLogitsLoss(reduction="none")
@@ -1530,6 +1623,7 @@ def train_eval_model(
             if improved or best_state is None:
                 best_value = float(metric) if np.isfinite(metric) else best_value
                 best_state = copy.deepcopy(model.state_dict())
+                best_epoch = int(epoch)
                 wait = 0
             else:
                 wait += 1
@@ -1539,6 +1633,7 @@ def train_eval_model(
             val_loss = float("nan")
             metric = float("nan")
             best_state = copy.deepcopy(model.state_dict())
+            best_epoch = int(epoch)
 
         history["epoch"].append(epoch)
         history["train_loss"].append(float(np.mean(batch_losses)) if batch_losses else float("nan"))
@@ -1547,12 +1642,16 @@ def train_eval_model(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    summary = {"best_metric": float(best_value) if np.isfinite(best_value) else float("nan"), "epochs_trained": int(len(history["epoch"]))}
+    summary = {
+        "best_metric": float(best_value) if np.isfinite(best_value) else float("nan"),
+        "best_epoch": int(best_epoch or len(history["epoch"])),
+        "epochs_trained": int(len(history["epoch"])),
+    }
     return model, scaler, history, summary
 
 
 @torch.no_grad()
-def predict_model(model: MLP, scaler: StandardScaler, X: np.ndarray, *, device: str, task: str, batch_size: int = 1024) -> np.ndarray:
+def predict_model(model: MLP, scaler: StandardScaler | IdentityScaler, X: np.ndarray, *, device: str, task: str, batch_size: int = 1024) -> np.ndarray:
     if len(X) == 0:
         return np.asarray([], dtype=np.float32)
     xs = scaler.transform(X).astype(np.float32)
@@ -1625,15 +1724,16 @@ def train_eval_joint_model(
     val_polymer_ids: Optional[np.ndarray] = None,
     nrmse_std_floor: float = 0.02,
     nrmse_clip: float = 10.0,
+    standardize_features: bool = False,
     predict_batch_size: int = 1024,
-) -> Tuple[nn.Module, StandardScaler, Dict[str, List[float]], Dict[str, float]]:
+) -> Tuple[nn.Module, StandardScaler | IdentityScaler, Dict[str, List[float]], Dict[str, float]]:
     train_rows = np.asarray(train_rows, dtype=np.int64)
     val_rows = np.asarray(val_rows, dtype=np.int64)
     if train_rows.size == 0:
         raise ValueError("Cannot train joint backbone/head model with an empty train set.")
 
     set_seed(seed)
-    scaler = sanitize_scaler(StandardScaler().fit(features[train_rows]))
+    scaler = build_feature_scaler(features[train_rows], standardize_features=standardize_features)
     params = {
         "hidden_sizes": [int(x) for x in hidden_sizes],
         "dropout": float(dropout),
@@ -1662,6 +1762,7 @@ def train_eval_joint_model(
     has_val = val_rows.size > 0
     best_state = None
     best_value = float("inf") if objective_metric in {"rmse", "loss", "poly_nrmse", "val_poly_nrmse"} else -float("inf")
+    best_epoch = 0
     wait = 0
     history: Dict[str, List[float]] = {"epoch": [], "train_loss": [], "val_loss": [], "metric": []}
     loss_fn_cls = nn.BCEWithLogitsLoss(reduction="none")
@@ -1729,6 +1830,7 @@ def train_eval_joint_model(
             if improved or best_state is None:
                 best_value = float(metric) if np.isfinite(metric) else best_value
                 best_state = capture_predictor_state(predictor)
+                best_epoch = int(epoch)
                 wait = 0
             else:
                 wait += 1
@@ -1737,6 +1839,7 @@ def train_eval_joint_model(
             val_loss = float("nan")
             metric = float("nan")
             best_state = capture_predictor_state(predictor)
+            best_epoch = int(epoch)
 
         history["epoch"].append(epoch)
         history["train_loss"].append(float(np.mean(batch_losses)) if batch_losses else float("nan"))
@@ -1747,7 +1850,11 @@ def train_eval_joint_model(
 
     if best_state is not None:
         predictor.load_state_dict(best_state, strict=False)
-    summary = {"best_metric": float(best_value) if np.isfinite(best_value) else float("nan"), "epochs_trained": int(len(history["epoch"]))}
+    summary = {
+        "best_metric": float(best_value) if np.isfinite(best_value) else float("nan"),
+        "best_epoch": int(best_epoch or len(history["epoch"])),
+        "epochs_trained": int(len(history["epoch"])),
+    }
     return predictor, scaler, history, summary
 
 
@@ -1806,47 +1913,58 @@ def task_allows_backbone_finetune(task_cfg: Dict[str, Any], backbone_num_layers:
 
 
 def build_cv_folds(split_df: pd.DataFrame, split_mode: str, cv_folds: int, seed: int, task: str) -> List[Tuple[np.ndarray, np.ndarray]]:
-    split_mode = "smiles" if split_mode == "polymer" else split_mode
     dev = split_df[split_df["split"].isin(["train", "val"])].copy().reset_index(drop=True)
-    stratify_target = "chi" if task == "regression" else "water_miscible"
+    if dev.empty:
+        raise ValueError("No train/val rows available for cross-validation.")
+
+    split_mode = str(split_mode).strip().lower()
     if split_mode == "smiles":
-        units = split_units_for_stratification(dev)
-        unit_ids = units["polymer_id"].to_numpy()
-        if len(unit_ids) < 2:
-            split_mode = "random"
-        else:
-            labels = stratification_labels(units, stratify_target)
-            if labels is not None:
-                n_splits = min(int(cv_folds), len(unit_ids), int(np.min(np.bincount(labels))))
-                splitter = StratifiedKFold(n_splits=max(2, n_splits), shuffle=True, random_state=seed)
-            else:
-                n_splits = min(int(cv_folds), len(unit_ids))
-                splitter = KFold(n_splits=max(2, n_splits), shuffle=True, random_state=seed)
-            folds = []
-            split_iter = splitter.split(unit_ids, labels) if labels is not None else splitter.split(unit_ids)
-            for tr_u, va_u in split_iter:
-                train_units = set(unit_ids[tr_u].tolist())
-                val_units = set(unit_ids[va_u].tolist())
-                train_idx = dev.index[dev["polymer_id"].isin(train_units)].to_numpy(dtype=np.int64)
-                val_idx = dev.index[dev["polymer_id"].isin(val_units)].to_numpy(dtype=np.int64)
-                folds.append((train_idx, val_idx))
-            return folds
+        split_mode = "polymer"
 
-    if split_mode == "random":
-        indices = np.arange(len(dev), dtype=np.int64)
-        if len(indices) < 2:
-            if len(indices) == 0:
-                raise ValueError("No train/val rows available for cross-validation.")
-            return [(indices, indices)]
-        labels = stratification_labels(dev, stratify_target)
-        if labels is not None:
-            n_splits = min(int(cv_folds), int(np.min(np.bincount(labels))))
-            splitter = StratifiedKFold(n_splits=max(2, n_splits), shuffle=True, random_state=seed)
-            return [(indices[tr], indices[va]) for tr, va in splitter.split(indices, labels)]
-        splitter = KFold(n_splits=max(2, min(int(cv_folds), len(indices))), shuffle=True, random_state=seed)
-        return [(indices[tr], indices[va]) for tr, va in splitter.split(indices)]
+    if split_mode == "polymer":
+        unit_df = (
+            dev[["polymer_id", "water_miscible"]]
+            .drop_duplicates(subset=["polymer_id"])
+            .sort_values("polymer_id")
+            .reset_index(drop=True)
+        )
+        unit_key = "polymer_id"
+    elif split_mode == "random":
+        unit_df = (
+            dev[["row_id", "water_miscible"]]
+            .drop_duplicates(subset=["row_id"])
+            .sort_values("row_id")
+            .reset_index(drop=True)
+        )
+        unit_key = "row_id"
+    else:
+        raise ValueError("split_mode must be 'polymer' or 'random'")
 
-    raise ValueError("split_mode must be 'smiles' or 'random'")
+    class_counts = unit_df["water_miscible"].value_counts()
+    max_folds = int(min(len(unit_df), class_counts.min())) if not class_counts.empty else 0
+    if max_folds < 2:
+        train_idx = dev.index[dev["split"] == "train"].to_numpy(dtype=np.int64)
+        val_idx = dev.index[dev["split"] == "val"].to_numpy(dtype=np.int64)
+        if len(train_idx) == 0 or len(val_idx) == 0:
+            indices = np.arange(len(dev), dtype=np.int64)
+            val_idx = indices[(indices % 5) == 0]
+            train_idx = indices[(indices % 5) != 0]
+            if len(val_idx) == 0:
+                val_idx = indices[-1:]
+                train_idx = indices[:-1] if len(indices) > 1 else indices
+        return [(train_idx, val_idx)]
+
+    resolved_folds = int(min(max(2, int(cv_folds)), max_folds))
+    splitter = StratifiedKFold(n_splits=resolved_folds, shuffle=True, random_state=seed)
+    unit_ids = unit_df[unit_key].to_numpy()
+    labels = unit_df["water_miscible"].to_numpy(dtype=int)
+    folds = []
+    for _, val_idx_units in splitter.split(unit_ids, labels):
+        val_ids = set(unit_ids[val_idx_units].tolist())
+        val_idx = dev.index[dev[unit_key].isin(val_ids)].to_numpy(dtype=np.int64)
+        train_idx = dev.index[~dev[unit_key].isin(val_ids)].to_numpy(dtype=np.int64)
+        folds.append((train_idx, val_idx))
+    return folds
 
 
 def evaluate_params_cv(
@@ -1914,6 +2032,7 @@ def evaluate_params_cv(
                 val_polymer_ids=dev_df.iloc[val_idx]["polymer_id"].to_numpy(dtype=int) if task == "regression" else None,
                 nrmse_std_floor=float(task_cfg.get("nrmse_std_floor", 0.02)),
                 nrmse_clip=float(task_cfg.get("nrmse_clip", 10.0)),
+                standardize_features=bool(task_cfg.get("standardize_features", False)),
                 predict_batch_size=predict_batch_size,
             )
             pred = predict_joint_model(
@@ -1950,6 +2069,7 @@ def evaluate_params_cv(
                 val_polymer_ids=dev_df.iloc[val_idx]["polymer_id"].to_numpy(dtype=int) if task == "regression" else None,
                 nrmse_std_floor=float(task_cfg.get("nrmse_std_floor", 0.02)),
                 nrmse_clip=float(task_cfg.get("nrmse_clip", 10.0)),
+                standardize_features=bool(task_cfg.get("standardize_features", False)),
                 predict_batch_size=predict_batch_size,
             )
             pred = predict_model(
@@ -1973,7 +2093,18 @@ def evaluate_params_cv(
                 clip=float(task_cfg.get("nrmse_clip", 10.0)),
             )
             objective_value = metrics["r2"] if objective_metric == "val_r2" else metrics["poly_nrmse"]
-        row = {"fold": fold_id, "objective_value": float(objective_value), "epochs_trained": summary["epochs_trained"]}
+        steps_per_epoch_train = max(1, int(math.ceil(len(train_idx) / float(max(1, int(params["batch_size"]))))))
+        best_epoch = int(summary.get("best_epoch", summary["epochs_trained"]))
+        row = {
+            "fold": fold_id,
+            "objective_value": float(objective_value),
+            "best_epoch": best_epoch,
+            "epochs_trained": int(summary["epochs_trained"]),
+            "n_train_rows": int(len(train_idx)),
+            "n_val_rows": int(len(val_idx)),
+            "steps_per_epoch_train": steps_per_epoch_train,
+            "best_step": int(max(1, best_epoch * steps_per_epoch_train)),
+        }
         row.update(metrics)
         fold_rows.append(row)
     def _safe_nan_stat(values: Sequence[float], reducer) -> float:
@@ -1984,6 +2115,8 @@ def evaluate_params_cv(
     metric_cols = [k for k in fold_rows[0].keys() if k not in {"fold"}] if fold_rows else []
     out = {f"cv_mean_{col}": _safe_nan_stat([r.get(col, np.nan) for r in fold_rows], np.mean) for col in metric_cols}
     out.update({f"cv_std_{col}": _safe_nan_stat([r.get(col, np.nan) for r in fold_rows], np.std) for col in metric_cols})
+    out["cv_median_best_step"] = _safe_nan_stat([r.get("best_step", np.nan) for r in fold_rows], np.median)
+    out["cv_median_best_epoch"] = _safe_nan_stat([r.get("best_epoch", np.nan) for r in fold_rows], np.median)
     out["fold_metrics"] = pd.DataFrame(fold_rows)
     return out
 
@@ -2126,6 +2259,11 @@ def final_epoch_budget(task_cfg: Dict[str, Any], best_payload: Mapping[str, Any]
     default_epochs = int(task_cfg.get("num_epochs", 500))
     if not bool(task_cfg.get("final_epochs_from_cv", True)):
         return default_epochs
+    if best_payload.get("final_training_derived_epochs") is not None:
+        try:
+            return max(1, min(default_epochs, int(best_payload["final_training_derived_epochs"])))
+        except (TypeError, ValueError):
+            pass
     value = best_payload.get("cv_mean_epochs_trained", best_payload.get("epochs_trained", np.nan))
     try:
         epochs = int(round(float(value)))
@@ -2134,6 +2272,69 @@ def final_epoch_budget(task_cfg: Dict[str, Any], best_payload: Mapping[str, Any]
     if epochs < 1:
         epochs = default_epochs
     return max(1, min(default_epochs, epochs))
+
+
+def derive_regression_final_epoch_budget(
+    *,
+    split_df: pd.DataFrame,
+    X: np.ndarray,
+    y: np.ndarray,
+    task_cfg: Dict[str, Any],
+    params: Dict[str, Any],
+    split_mode: str,
+    seed: int,
+    device: str,
+    raw_inputs: Optional[Dict[str, np.ndarray]],
+    assets: Optional[ViewAssets],
+    aux_features: Optional[np.ndarray],
+    metrics_dir: Path,
+) -> Dict[str, Any]:
+    budget_epochs = int(task_cfg.get("budget_search_epochs", task_cfg.get("tuning_epochs", 60)))
+    budget_patience = int(task_cfg.get("budget_search_patience", task_cfg.get("tuning_patience", 10)))
+    cv = evaluate_params_cv(
+        task="regression",
+        split_df=split_df,
+        X=X,
+        y=y,
+        task_cfg=task_cfg,
+        params=params,
+        split_mode=split_mode,
+        seed=seed,
+        device=device,
+        objective_metric=str(task_cfg.get("epoch_selection_metric", task_cfg.get("tuning_objective", "val_poly_nrmse"))),
+        epochs=budget_epochs,
+        patience=budget_patience,
+        raw_inputs=raw_inputs,
+        assets=assets,
+        aux_features=aux_features,
+    )
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    fold_metrics = cv.get("fold_metrics")
+    if isinstance(fold_metrics, pd.DataFrame):
+        fold_metrics.to_csv(metrics_dir / "post_optuna_cv_folds.csv", index=False)
+
+    final_df = split_df.copy().reset_index(drop=True)
+    final_df.loc[final_df["split"] == "val", "split"] = "train"
+    n_train = int((final_df["split"] == "train").sum())
+    steps_per_epoch_final = max(1, int(math.ceil(n_train / float(max(1, int(params["batch_size"]))))))
+    target_steps = int(max(1, round(float(cv.get("cv_median_best_step", 1)))))
+    derived_epochs = int(math.ceil(target_steps / float(steps_per_epoch_final)))
+    derived_epochs = int(np.clip(derived_epochs, 1, int(task_cfg.get("num_epochs", 500))))
+    summary = {
+        "budget_search_epochs": budget_epochs,
+        "budget_search_patience": budget_patience,
+        "epoch_selection_metric": str(task_cfg.get("epoch_selection_metric", task_cfg.get("tuning_objective", "val_poly_nrmse"))),
+        "final_training_derived_steps": target_steps,
+        "final_training_derived_epochs": derived_epochs,
+        "steps_per_epoch_final": steps_per_epoch_final,
+        "n_final_train_rows": n_train,
+        "cv_median_best_epoch": cv.get("cv_median_best_epoch"),
+        "cv_median_best_step": cv.get("cv_median_best_step"),
+        "cv_mean_poly_nrmse": cv.get("cv_mean_poly_nrmse"),
+        "cv_mean_r2": cv.get("cv_mean_r2"),
+    }
+    save_json(summary, metrics_dir / "post_optuna_cv_summary.json")
+    return summary
 
 
 def train_final_and_predict(
@@ -2171,7 +2372,10 @@ def train_final_and_predict(
         "backbone_num_layers": int(backbone_num_layers),
         "final_training_policy": FINAL_TRAINING_POLICY,
         "final_early_stopping_enabled": False,
+        "feature_standardization": bool(task_cfg.get("standardize_features", False)),
     }
+    if task == "regression":
+        checkpoint_extra["regression_mode"] = str(task_cfg.get("regression_mode", "direct_chi"))
     if finetune_last_layers > 0:
         if assets is None or raw_inputs is None:
             raise RuntimeError("Backbone fine-tuning requested but view assets/raw inputs are unavailable.")
@@ -2199,6 +2403,7 @@ def train_final_and_predict(
             objective_metric=str(task_cfg.get("tuning_objective", "balanced_accuracy" if task == "classification" else "val_r2")),
             finetune_last_layers=finetune_last_layers,
             train_weight=weights,
+            standardize_features=bool(task_cfg.get("standardize_features", False)),
             predict_batch_size=predict_batch_size,
         )
         model = predictor.head
@@ -2224,6 +2429,7 @@ def train_final_and_predict(
             seed=seed,
             objective_metric=str(task_cfg.get("tuning_objective", "balanced_accuracy" if task == "classification" else "val_r2")),
             train_weight=weights,
+            standardize_features=bool(task_cfg.get("standardize_features", False)),
             predict_batch_size=predict_batch_size,
         )
         checkpoint_extra["backbone_state_dict"] = {}
@@ -2404,17 +2610,79 @@ def plot_parity(pred_df: pd.DataFrame, out_path: Path, dpi: int, font_size: int)
         return
     with plt.rc_context(plot_rc(font_size)):
         fig, ax = plt.subplots(figsize=(5.2, 5.0))
-        ax.scatter(test["chi"], test["chi_pred"], s=18, alpha=0.75, color="#4E79A7")
-        lo = float(min(test["chi"].min(), test["chi_pred"].min()))
-        hi = float(max(test["chi"].max(), test["chi_pred"].max()))
-        ax.plot([lo, hi], [lo, hi], "k--", linewidth=1.0)
-        ax.set_xlabel("True chi")
-        ax.set_ylabel("Pred chi")
-        ax.grid(alpha=0.3)
+        _plot_regression_parity_panel(ax, test, split="test", show_legend=True)
         fig.tight_layout()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
+
+
+def _class_display_label(value: object) -> str:
+    try:
+        return CLASS_DISPLAY_LABELS.get(int(float(value)), str(value))
+    except Exception:
+        return str(value)
+
+
+def _class_display_labels(values: Iterable[object]) -> List[str]:
+    return [_class_display_label(v) for v in values]
+
+
+def _legend_handles_for_classes():
+    return [
+        Line2D([], [], marker="o", linestyle="None", color=WATER_SOLUBLE_PALETTE[0], markersize=6),
+        Line2D([], [], marker="o", linestyle="None", color=WATER_SOLUBLE_PALETTE[1], markersize=6),
+    ]
+
+
+def _add_class_legend_lower_right(ax) -> None:
+    ax.legend(
+        handles=_legend_handles_for_classes(),
+        labels=_class_display_labels([0, 1]),
+        loc="lower right",
+        frameon=True,
+        fancybox=True,
+        framealpha=0.92,
+        facecolor="white",
+        edgecolor="#666666",
+    )
+
+
+def _plot_regression_parity_panel(ax, sub: pd.DataFrame, split: str, show_legend: bool) -> None:
+    if sub.empty:
+        ax.set_axis_off()
+        ax.text(0.5, 0.5, f"{split} empty", ha="center", va="center", transform=ax.transAxes)
+        return
+    for class_value, color in WATER_SOLUBLE_PALETTE.items():
+        class_sub = sub[sub["water_miscible"].astype(int) == int(class_value)]
+        if class_sub.empty:
+            continue
+        ax.scatter(class_sub["chi"], class_sub["chi_pred"], s=18, alpha=0.75, color=color, label=_class_display_label(class_value))
+    lo = float(min(sub["chi"].min(), sub["chi_pred"].min()))
+    hi = float(max(sub["chi"].max(), sub["chi_pred"].max()))
+    span = max(hi - lo, 1e-8)
+    pad = 0.04 * span
+    lo_plot = lo - pad
+    hi_plot = hi + pad
+    ax.plot([lo_plot, hi_plot], [lo_plot, hi_plot], "k--", linewidth=1.0)
+    ax.set_xlim(lo_plot, hi_plot)
+    ax.set_ylim(lo_plot, hi_plot)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("True chi")
+    ax.set_ylabel("Predicted chi")
+    ax.grid(alpha=0.3, linestyle="--", linewidth=0.6)
+    reg = regression_metrics(sub["chi"].to_numpy(dtype=float), sub["chi_pred"].to_numpy(dtype=float))
+    ax.text(
+        0.03,
+        0.97,
+        f"MAE={reg['mae']:.3f}\nRMSE={reg['rmse']:.3f}\nR2={reg['r2']:.3f}",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#666666", "alpha": 0.92},
+    )
+    if show_legend:
+        _add_class_legend_lower_right(ax)
 
 
 def plot_class_scores(pred_df: pd.DataFrame, out_path: Path, dpi: int, font_size: int) -> None:
@@ -2425,20 +2693,189 @@ def plot_class_scores(pred_df: pd.DataFrame, out_path: Path, dpi: int, font_size
         return
     with plt.rc_context(plot_rc(font_size)):
         fig, ax = plt.subplots(figsize=(5.2, 4.8))
-        rng = np.random.default_rng(0)
-        x = test["water_miscible"].to_numpy(dtype=float) + rng.normal(0.0, 0.03, len(test))
-        ax.scatter(x, test["class_prob"], s=24, alpha=0.75, color="#59A14F")
-        ax.set_xticks([0, 1])
-        ax.set_xticklabels(["Immisc.", "Misc."])
-        ax.set_xlim(-0.2, 1.2)
-        ax.set_ylim(-0.02, 1.02)
-        ax.set_xlabel("Class")
-        ax.set_ylabel("P(miscible)")
-        ax.grid(alpha=0.3)
+        _plot_classifier_parity_panel(ax, test, split="test", show_legend=True)
         fig.tight_layout()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
+
+
+def _plot_classifier_parity_panel(ax, sub: pd.DataFrame, split: str, show_legend: bool) -> None:
+    if sub.empty:
+        ax.set_axis_off()
+        ax.text(0.5, 0.5, f"{split} empty", ha="center", va="center", transform=ax.transAxes)
+        return
+    rng = np.random.default_rng(0)
+    jitter = rng.normal(0.0, 0.03, len(sub))
+    x = np.clip(sub["water_miscible"].to_numpy(dtype=float) + jitter, -0.08, 1.08)
+    for class_value, color in WATER_SOLUBLE_PALETTE.items():
+        mask = sub["water_miscible"].astype(int).to_numpy() == int(class_value)
+        if not np.any(mask):
+            continue
+        ax.scatter(x[mask], sub["class_prob"].to_numpy(dtype=float)[mask], s=24, alpha=0.75, color=color)
+    ax.plot([0.0, 1.0], [0.0, 1.0], "k--", linewidth=1.0)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(CLASS_DISPLAY_TICKLABELS)
+    ax.set_xlim(-0.12, 1.12)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xlabel("True class")
+    ax.set_ylabel("P(water-miscible)")
+    ax.grid(alpha=0.3, linestyle="--", linewidth=0.6)
+    cls = classification_metrics(sub["water_miscible"].to_numpy(dtype=int), sub["class_prob"].to_numpy(dtype=float))
+    ax.text(
+        0.03,
+        0.97,
+        f"BalAcc={cls['balanced_accuracy']:.3f}\nAUROC={cls['auroc']:.3f}\nAUPRC={cls['auprc']:.3f}",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#666666", "alpha": 0.92},
+    )
+    if show_legend:
+        _add_class_legend_lower_right(ax)
+
+
+def _has_finite_history(history: Dict[str, List[float]], key: str) -> bool:
+    arr = np.asarray(history.get(key, []), dtype=float)
+    return bool(arr.size and np.isfinite(arr).any())
+
+
+def _save_confusion_matrix_figure(sub: pd.DataFrame, out_path: Path, _title: str, dpi: int, font_size: int) -> None:
+    if plt is None or sub.empty:
+        return
+    y_true = sub["water_miscible"].to_numpy(dtype=int)
+    y_pred = sub["class_pred"].to_numpy(dtype=int) if "class_pred" in sub.columns else (sub["class_prob"].to_numpy(dtype=float) >= 0.5).astype(int)
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    with plt.rc_context(plot_rc(font_size)):
+        fig, ax = plt.subplots(figsize=(5.2, 4.6))
+        image = ax.imshow(cm, cmap="Blues")
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, str(int(cm[i, j])), ha="center", va="center", color="black")
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xticklabels(CLASS_DISPLAY_TICKLABELS)
+        ax.set_yticklabels(CLASS_DISPLAY_TICKLABELS)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+
+def make_regression_figures(history: Dict[str, List[float]], pred_df: pd.DataFrame, fig_dir: Path, dpi: int, font_size: int) -> None:
+    if plt is None:
+        return
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    with plt.rc_context(plot_rc(font_size)):
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.plot(history.get("epoch", []), history.get("train_loss", []), label="Train loss")
+        if _has_finite_history(history, "val_loss"):
+            ax.plot(history.get("epoch", []), history.get("val_loss", []), label="Val loss")
+        else:
+            ax.text(0.03, 0.97, "train+val final fit", transform=ax.transAxes, va="top", ha="left")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.legend(loc="best")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(fig_dir / "chi_loss_curve.png", dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+        for split in ["train", "test"]:
+            sub = pred_df[pred_df["split"] == split].copy()
+            if sub.empty:
+                continue
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _plot_regression_parity_panel(ax, sub, split=split, show_legend=True)
+            fig.tight_layout()
+            fig.savefig(fig_dir / f"chi_parity_{split}.png", dpi=dpi, bbox_inches="tight")
+            plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        for split, color in [("train", "#4c78a8"), ("val", "#f58518"), ("test", "#54a24b")]:
+            sub = pred_df[pred_df["split"] == split]
+            if sub.empty or "chi_error" not in sub:
+                continue
+            ax.hist(sub["chi_error"].to_numpy(dtype=float), bins=30, histtype="step", density=True, linewidth=2.0, color=color, label=split)
+        ax.axvline(0.0, color="black", linestyle="--", linewidth=1)
+        ax.set_xlabel("chi prediction error")
+        ax.set_ylabel("Density")
+        ax.legend(loc="best")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(fig_dir / "chi_residual_distribution.png", dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+
+def make_classifier_figures(history: Dict[str, List[float]], pred_df: pd.DataFrame, fig_dir: Path, dpi: int, font_size: int) -> None:
+    if plt is None:
+        return
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    with plt.rc_context(plot_rc(font_size)):
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.plot(history.get("epoch", []), history.get("train_loss", []), label="Train BCE")
+        if _has_finite_history(history, "val_loss"):
+            ax.plot(history.get("epoch", []), history.get("val_loss", []), label="Val BCE")
+        else:
+            ax.text(0.03, 0.97, "train+val final fit", transform=ax.transAxes, va="top", ha="left")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("BCE loss")
+        ax.legend(loc="best")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(fig_dir / "class_loss_curve.png", dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+        for split in ["train", "test"]:
+            sub = pred_df[pred_df["split"] == split].copy()
+            if sub.empty:
+                continue
+            fig, ax = plt.subplots(figsize=(6, 5))
+            _plot_classifier_parity_panel(ax, sub, split=split, show_legend=True)
+            fig.tight_layout()
+            fig.savefig(fig_dir / f"class_parity_{split}.png", dpi=dpi, bbox_inches="tight")
+            plt.close(fig)
+            _save_confusion_matrix_figure(sub, fig_dir / f"class_confusion_matrix_{split}.png", f"Confusion: {split}", dpi, font_size)
+
+            fig, ax = plt.subplots(figsize=(6, 5))
+            for class_value, color in WATER_SOLUBLE_PALETTE.items():
+                vals = sub.loc[sub["water_miscible"].astype(int) == int(class_value), "class_prob"].to_numpy(dtype=float)
+                if len(vals):
+                    ax.hist(vals, bins=20, alpha=0.45, density=True, color=color, label=_class_display_label(class_value))
+            ax.set_xlabel("P(water-miscible)")
+            ax.set_ylabel("Density")
+            ax.legend(loc="best")
+            ax.grid(alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(fig_dir / f"class_prob_distribution_{split}.png", dpi=dpi, bbox_inches="tight")
+            plt.close(fig)
+
+            y_true = sub["water_miscible"].to_numpy(dtype=int)
+            y_prob = sub["class_prob"].to_numpy(dtype=float)
+            if len(np.unique(y_true)) > 1:
+                fpr, tpr, _ = roc_curve(y_true, y_prob)
+                precision, recall, _ = precision_recall_curve(y_true, y_prob)
+                fig, ax = plt.subplots(figsize=(6, 5))
+                ax.plot(fpr, tpr, color="#1f77b4", linewidth=2)
+                ax.plot([0, 1], [0, 1], "k--", linewidth=1)
+                ax.set_xlabel("FPR")
+                ax.set_ylabel("TPR")
+                ax.grid(alpha=0.3)
+                fig.tight_layout()
+                fig.savefig(fig_dir / f"classifier_roc_{split}.png", dpi=dpi, bbox_inches="tight")
+                plt.close(fig)
+
+                fig, ax = plt.subplots(figsize=(6, 5))
+                ax.plot(recall, precision, color="#d62728", linewidth=2)
+                ax.set_xlabel("Recall")
+                ax.set_ylabel("Precision")
+                ax.grid(alpha=0.3)
+                fig.tight_layout()
+                fig.savefig(fig_dir / f"classifier_pr_{split}.png", dpi=dpi, bbox_inches="tight")
+                plt.close(fig)
 
 
 def plot_hpo_progress(trials: pd.DataFrame, out_path: Path, dpi: int, font_size: int) -> None:
@@ -2550,6 +2987,25 @@ def run_task_for_view(
     hpo_seconds = time.perf_counter() - hpo_started_perf
     trials.to_csv(task_dir / "optuna_trials.csv", index=False)
     save_json(best_payload, task_dir / "optuna_best.json")
+    tune_enabled = bool(task_cfg.get("tune", False)) if force_tune is None else bool(force_tune)
+    post_optuna_cv_summary = None
+    if task_kind == "regression" and tune_enabled and bool(task_cfg.get("final_epochs_from_cv", True)):
+        post_optuna_cv_summary = derive_regression_final_epoch_budget(
+            split_df=split_df,
+            X=X,
+            y=y,
+            task_cfg=task_cfg,
+            params=params,
+            split_mode=split_mode,
+            seed=seed + 4242,
+            device=device,
+            raw_inputs=raw_inputs,
+            assets=assets,
+            aux_features=aux_features,
+            metrics_dir=task_dir,
+        )
+        best_payload = {**dict(best_payload), **post_optuna_cv_summary}
+        save_json(best_payload, task_dir / "optuna_best.json")
     final_started_perf = time.perf_counter()
     model, scaler, history, pred_df, metrics_by_split, checkpoint_extra = train_final_and_predict(
         task=task_kind,
@@ -2583,6 +3039,7 @@ def run_task_for_view(
             "final_early_stopping_enabled": False,
             "metrics_by_split": metrics_by_split,
             "backbone_num_layers": int(backbone_num_layers),
+            "post_optuna_cv_retrain": post_optuna_cv_summary,
             "timings": timings,
             "resources": runtime_resources(),
             "run_context": dict(run_context or {}),
@@ -2628,8 +3085,10 @@ def run_task_for_view(
         task_dir / "run_status.json",
     )
     if task_kind == "regression":
+        make_regression_figures(history, pred_df, task_dir / "figures", dpi=dpi, font_size=font_size)
         plot_parity(pred_df, task_dir / "figures" / "test_parity.png", dpi=dpi, font_size=font_size)
     else:
+        make_classifier_figures(history, pred_df, task_dir / "figures", dpi=dpi, font_size=font_size)
         plot_class_scores(pred_df, task_dir / "figures" / "test_class_scores.png", dpi=dpi, font_size=font_size)
     plot_hpo_progress(trials, task_dir / "figures" / "hpo_progress.png", dpi=dpi, font_size=font_size)
     return metrics_rows(task_name, view, metrics_by_split)

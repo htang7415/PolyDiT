@@ -109,7 +109,7 @@ Use these only when you intentionally want to override `config.yaml`.
 
 ## 9) water_miscible five-view run
 
-One argument: `model_size` (`small`, `medium`, `large`, or `xl`). Requires matching trained backbones under `Bi_Diffusion_*/results_<model_size>/`.
+Five-view Step4_1/Step4_2 comparison using the same Step4 logic as `Water_miscible_polymer_discovery`; only the representation/backbone differs. One argument: `model_size` (`small`, `medium`, `large`, or `xl`). Requires matching trained backbones under `Bi_Diffusion_*/results_<model_size>/`.
 
 Local separate submissions:
 
@@ -132,6 +132,8 @@ bash water_miscible/scripts/submit_local_chi.sh small --no_tune --max_rows 800
 bash water_miscible/scripts/submit_local_water.sh small --no_tune --max_rows 800
 ```
 
+Full defaults are heavy: 5 views x `(300 chi Optuna trials + 200 water-classification Optuna trials)`. Use `--no_tune --max_rows ...` for smoke/debug.
+
 Euler/NREL:
 
 ```bash
@@ -139,7 +141,7 @@ bash water_miscible/scripts/submit_euler.sh small
 bash water_miscible/scripts/submit_nrel.sh small
 ```
 
-Local outputs/logs go to `water_miscible/results_<model_size>/` and `water_miscible/logs/local_*`.
+Local outputs/logs go to `water_miscible/results_<model_size>/` and `water_miscible/logs/local_*`. Splits are Polymer-based for both Step4_1 and Step4_2; generated figures intentionally have no titles.
 Euler/NREL submit 17 jobs: 5 shared embedding precompute jobs, `5 views x 2 tasks` train jobs, then one chi postprocess job and one water postprocess job.
 NREL walltime: precompute/train jobs use 24h; postprocess jobs use 2h.
 

@@ -8,8 +8,8 @@ paths:
 
 data:
   random_seed: 42
-  split_mode: "smiles"                   # chi regression split: smiles | random
-  classification_split_mode: "random"    # water classification split: smiles | random
+  split_mode: "polymer"                  # chi regression split: polymer | random
+  classification_split_mode: "polymer"   # water classification split: polymer | random
   holdout_test_ratio: 0.1
   default_temperature: 293.15
   default_phi: 0.2
@@ -66,10 +66,13 @@ chi_regression:
   enabled: true
   tune: true
   n_trials: 50
-  tuning_epochs: 50
+  tuning_epochs: 60
   tuning_patience: 10
   tuning_objective: "val_poly_nrmse"      # val_r2 | val_poly_nrmse
   tuning_cv_folds: 5
+  budget_search_epochs: 250
+  budget_search_patience: 20
+  epoch_selection_metric: "val_poly_nrmse"
   num_epochs: 500
   final_epochs_from_cv: true
   patience: 20
@@ -80,8 +83,12 @@ chi_regression:
   gradient_clip_norm: 1.0
   use_scheduler: true
   scheduler_min_lr: 1.0e-6
+  scheduler_t_max: null
   hidden_sizes: [256, 512, 128]
   dropout: 0.1
+  finetune_last_layers: 0
+  standardize_features: false
+  regression_mode: "direct_chi"
   loss_weighting: "polymer_balanced"      # uniform | polymer_balanced
   loss_weight_clip_ratio: 10.0
   nrmse_std_floor: 0.02
@@ -101,12 +108,12 @@ water_classification:
   enabled: true
   tune: true
   n_trials: 50
-  tuning_epochs: 50
+  tuning_epochs: 60
   tuning_patience: 10
   tuning_objective: "balanced_accuracy"
   tuning_cv_folds: 5
   num_epochs: 500
-  final_epochs_from_cv: true
+  final_epochs_from_cv: false
   patience: 20
   batch_size: 128
   predict_batch_size: 1024
@@ -117,7 +124,9 @@ water_classification:
   scheduler_min_lr: 1.0e-6
   hidden_sizes: [256, 512, 128]
   dropout: 0.1
-  loss_weighting: "class_balanced"       # uniform | class_balanced
+  finetune_last_layers: 0
+  standardize_features: false
+  loss_weighting: "uniform"             # WMPD Step4_2 uses plain BCEWithLogits
   optuna_search_space:
     num_layers: [2, 3, 4, 5]
     hidden_units: [64, 128, 256, 512, 1024]
