@@ -1,34 +1,33 @@
-# water_miscible
+# Water Miscibility
 
-Standalone five-view experiments for:
+This workflow compares five trained representation backbones on:
 
-- `chi` regression: `chi = f(embedding, temperature, phi)`
-- `water_miscible` classification: `water_miscible = f(embedding)`
+- `chi` regression with temperature and volume fraction inputs.
+- `water_miscible` classification from polymer embeddings.
 
-The project consumes already trained Step1 backbones from:
+The script task keys are `chi_regression` and `water_classification`; aliases such as `chi` and `water_miscible` are accepted.
 
-- `Bi_Diffusion_SMILES`
-- `Bi_Diffusion_SMILES_BPE`
-- `Bi_Diffusion_SELFIES`
-- `Bi_Diffusion_Group_SELFIES`
-- `Bi_Diffusion_graph`
+The default chi split groups rows by polymer SMILES so the same structure does not appear in multiple splits.
 
-For chi regression, the default split is grouped by `SMILES`, so all rows for the same polymer structure across different `temperature` and `phi` values stay in the same train/validation/test partition. This avoids relying on incomplete `Polymer` names.
+## Run
 
-Run from the repository root:
-
-```bash
-python water_miscible/scripts/run_five_view_tasks.py --config water_miscible/configs/config_water.yaml
-```
-
-For a fast smoke pass:
+Fast smoke pass:
 
 ```bash
 python water_miscible/scripts/run_five_view_tasks.py --config water_miscible/configs/config_water.yaml --views smiles --no_tune --max_rows 200
 ```
 
-Use `--fresh_embeddings` after changing datasets or moving from a capped debug run to a full run.
+Full local run:
 
-HPO writes trial logs and best-parameter JSON, but not per-trial model checkpoints. Each completed task/view writes one final `checkpoint.pt`; the script does not load previous task-head checkpoints during HPO or final training.
+```bash
+python water_miscible/scripts/run_five_view_tasks.py --config water_miscible/configs/config_water.yaml
+```
 
-Outputs are written under `water_miscible/results/` by default.
+Submit wrappers:
+
+```bash
+bash water_miscible/scripts/submit_local_chi.sh small
+bash water_miscible/scripts/submit_local_water.sh small
+```
+
+Use `--fresh_embeddings` after changing data or moving from a capped debug run to a full run. Full HPO is expensive, so prefer `--no_tune` for smoke tests.

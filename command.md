@@ -1,158 +1,87 @@
-# command.md
+# Runbook
 
-Concise runbook for `PolyDiT`.
+Run diffusion commands inside the chosen `Bi_Diffusion_*` method. Run MVF commands inside `Multi_View_Foundation`. Run water-miscibility commands from the repository root.
 
-## 1) Repo root
-
-```bash
-cd /home/htang228/Machine_learning/Diffusion_model/PolyDiT
-```
-
-## 2) One-time data split
+## One-Time Data Split
 
 ```bash
 python Data/Polymer/split_unlabeled_full_columns.py --overwrite
 ```
 
-## 3) Baseline methods (Step0-2)
+## Diffusion Baselines
+
+Run a full scaled pipeline from a `Bi_Diffusion_*` method:
 
 ```bash
-sbatch scripts/submit_step0_all_nrel.sh
-bash scripts/submit_all_5_methods_nrel.sh all
+python scripts/run_scaling_pipeline.py --model_size small --property Tg --target 300
 ```
 
-## 4) MVF single-scale run (NREL, staged CPU/GPU workflow)
+Run individual steps:
 
-Edit `Multi_View_Foundation/configs/config.yaml` first. In MVF, the recommended workflow is:
+```bash
+python scripts/step0_prepare_data.py --config configs/config.yaml
+python scripts/step1_train_backbone.py --config configs/config.yaml --model_size small
+python scripts/step2_sample_and_evaluate.py --config configs/config.yaml --model_size small --num_samples 1000
+python scripts/step3_train_property_head.py --config configs/config.yaml --model_size small --property Tg
+python scripts/step4_inverse_design.py --config configs/config.yaml --model_size small --property Tg --targets 300 --epsilon 10
+python scripts/step5_class_design.py --config configs/config.yaml --model_size small --polymer_class polyimide
+python scripts/step5_class_design.py --config configs/config.yaml --model_size small --polymer_class polyimide --property Tg --target_value 300 --epsilon 10
+python scripts/step6_hyperparameter_tuning.py --config configs/config.yaml --model_size small --mode property --property Tg
+```
 
-- pass only `model_size` on the command line
-- keep encoder view, property list, F5/F6/F7 settings, and F8 paper settings in `config.yaml`
-- submit all four sizes first
-- run `F8` once after the four size workflows finish
+Use `--skip_step*` flags in `run_scaling_pipeline.py` when reusing trained artifacts. In that wrapper, Step6 is joint class-property design; hyperparameter tuning is run separately with `step6_hyperparameter_tuning.py`.
+
+## Multi-View Foundation
+
+Run the config-driven local pipeline:
+
+```bash
+cd Multi_View_Foundation
+bash scripts/run_pipeline.sh
+```
+
+Run a staged NREL workflow for one model size:
 
 ```bash
 cd Multi_View_Foundation
 bash scripts/submit_property_workflow_nrel.sh small
-bash scripts/submit_property_workflow_nrel.sh medium
-bash scripts/submit_property_workflow_nrel.sh large
-bash scripts/submit_property_workflow_nrel.sh xl
-cd ..
 ```
 
-Per scale this submits: `F0,F1,F2` -> `F3 (array over properties)` -> `F4` -> `F5,F6 (per config)` -> `F7 (per config)`.
-The current NREL wrapper stages work as:
-
-- `F0` on CPU
-- `F1,F2` on GPU
-- `F3` as a GPU array job
-- `F4` on CPU
-- `F5,F6` on GPU
-- `F7` on CPU
-
-The default NREL wrapper uses `f3_parallel=4`. If you need a different array cap, pass it as the fifth argument without changing the config-driven MVF settings.
-F8 is intentionally not included here.
-
-## 5) MVF all four sizes + dependent F8 (NREL)
+Run all model sizes and then F8:
 
 ```bash
 cd Multi_View_Foundation
 bash scripts/submit_multisize_with_f8_nrel.sh small,medium,large,xl
-cd ..
 ```
 
-This submits the staged workflow for all four sizes, then submits one CPU `F8` job that waits for the four final `F7` jobs.
-
-## 6) MVF F8 only (run after all four sizes finish)
+Rerun only selected MVF stages:
 
 ```bash
 cd Multi_View_Foundation
-MVF_PAPER_CLEAN=1 bash scripts/submit_f8_nrel.sh
-cd ..
+MVF_STEP_START=5 MVF_STEP_END=7 bash scripts/run_pipeline.sh
 ```
 
-Run this only after `small`, `medium`, `large`, and `xl` MVF workflows have all finished successfully.
-`F8` reads its paper-package settings from `config.yaml`.
+Useful overrides:
 
-## 7) MVF F5-F7 only (NREL, optional partial rerun)
-
-```bash
-cd Multi_View_Foundation
-MVF_STEP_START=5 MVF_STEP_END=7 MVF_EXPORT_PAPER_PACKAGE=0 bash scripts/submit_nrel.sh small
-cd ..
-```
-
-Compatibility shortcut (auto-routes to the same CPU F8 submit path):
-
-```bash
-cd Multi_View_Foundation
-MVF_STEP_START=8 MVF_STEP_END=8 MVF_PAPER_CLEAN=1 bash scripts/submit_nrel.sh
-cd ..
-```
-
-Optional local fallback:
-
-```bash
-cd Multi_View_Foundation
-python scripts/step8_build_paper_package.py --config configs/config.yaml --clean
-cd ..
-```
-
-## 8) Optional MVF overrides
-
+- `MVF_PROPERTY_LIST=Tg,Tm,Td,Eg`
 - `MVF_F5_RUN_ALL_PROPERTIES=1`
 - `MVF_F6_RUN_ALL_PROPERTIES=1`
-- `MVF_PROPERTY_LIST=Tg,Tm,Td,Eg`
-- `MVF_F5_PROPOSAL_VIEWS=smiles`
+- `MVF_F5_PROPOSAL_VIEWS=smiles,selfies,graph`
 - `MVF_EXPORT_PAPER_PACKAGE=0`
 
-Use these only when you intentionally want to override `config.yaml`.
+## Water Miscibility
 
-## 9) water_miscible five-view run
+Run a fast local smoke pass:
 
-Five-view Step4_1/Step4_2 comparison using the same Step4 logic as `Water_miscible_polymer_discovery`; only the representation/backbone differs. One argument: `model_size` (`small`, `medium`, `large`, or `xl`). Requires matching trained backbones under `Bi_Diffusion_*/results_<model_size>/`.
+```bash
+python water_miscible/scripts/run_five_view_tasks.py --config water_miscible/configs/config_water.yaml --views smiles --no_tune --max_rows 200
+```
 
-Local separate submissions:
+Run local submit wrappers:
 
 ```bash
 bash water_miscible/scripts/submit_local_chi.sh small
 bash water_miscible/scripts/submit_local_water.sh small
 ```
 
-Show local output in terminal:
-
-```bash
-WM_LOCAL_FOREGROUND=1 bash water_miscible/scripts/submit_local_chi.sh small
-WM_LOCAL_FOREGROUND=1 bash water_miscible/scripts/submit_local_water.sh small
-```
-
-Local debug:
-
-```bash
-bash water_miscible/scripts/submit_local_chi.sh small --no_tune --max_rows 800
-bash water_miscible/scripts/submit_local_water.sh small --no_tune --max_rows 800
-```
-
-Full defaults are heavy: 5 views x `(300 chi Optuna trials + 200 water-classification Optuna trials)`. Use `--no_tune --max_rows ...` for smoke/debug.
-
-Euler/NREL:
-
-```bash
-bash water_miscible/scripts/submit_euler.sh small
-bash water_miscible/scripts/submit_nrel.sh small
-```
-
-Local outputs/logs go to `water_miscible/results_<model_size>/` and `water_miscible/logs/local_*`. Splits are Polymer-based for both Step4_1 and Step4_2; generated figures intentionally have no titles.
-Euler/NREL submit 17 jobs: 5 shared embedding precompute jobs, `5 views x 2 tasks` train jobs, then one chi postprocess job and one water postprocess job.
-NREL walltime: precompute/train jobs use 24h; postprocess jobs use 2h.
-
-## 10) Key outputs
-
-```text
-Multi_View_Foundation/results_*/step3_property/
-Multi_View_Foundation/results_*/step4_embedding_research/
-Multi_View_Foundation/results_*/step5_foundation_inverse/files/candidate_scores_<PROP>.csv
-Multi_View_Foundation/results_*/step6_dit_interpretability/files/dit_token_summary_<PROP>.csv
-Multi_View_Foundation/results_*/paper_package/manuscript/figures/Figure_1.png ... Figure_6.png
-Multi_View_Foundation/results_*/paper_package/supporting_information/figures/Figure_S1.png ... Figure_S9.png
-Multi_View_Foundation/results_*/paper_package/*/captions/figure_captions.txt
-```
+Use `--no_tune` and `--max_rows` for debugging; full HPO is expensive.

@@ -1,27 +1,25 @@
-# Multi_View_Foundation
+# Multi-View Foundation
 
-Multi-view polymer foundation workflow built on top of the five single-view diffusion pipelines:
+MVF compares polymer representations through shared alignment, retrieval, property prediction, inverse design, interpretability, and chemistry analysis.
 
-- `smiles`
-- `smiles_bpe`
-- `selfies`
-- `group_selfies`
-- `graph`
+The enabled views are SMILES, SMILES-BPE, SELFIES, Group SELFIES, and Graph. F5 compares proposal views under a shared downstream scorer by default; `property_model_mode: all` can instead export committee predictions from all available F3 heads.
 
-The pipeline stages are:
+## Run
 
-- `F0`: paired polymer dataset across views
-- `F1`: embedding extraction
-- `F2`: cross-view retrieval
-- `F3`: property heads for all views
-- `F4`: embedding research
-- `F5`: inverse-design benchmark under one shared SMILES scorer
-- `F6`: DiT interpretability
-- `F7`: chemistry/physics analysis
-- `F8`: paper-package export
+```bash
+bash scripts/run_pipeline.sh
+```
 
-See:
+Run selected stages:
 
-- [Pipeline.md](/home/htang228/Machine_learning/Diffusion_model/PolyDiT/Multi_View_Foundation/Pipeline.md)
-- [technical_guide.md](/home/htang228/Machine_learning/Diffusion_model/PolyDiT/Multi_View_Foundation/technical_guide.md)
-- [results.md](/home/htang228/Machine_learning/Diffusion_model/PolyDiT/Multi_View_Foundation/results.md)
+```bash
+MVF_STEP_START=5 MVF_STEP_END=7 bash scripts/run_pipeline.sh
+```
+
+Submit one staged NREL workflow:
+
+```bash
+bash scripts/submit_property_workflow_nrel.sh small
+```
+
+Configure properties, proposal views, targets, and paper export in `configs/config.yaml`.
