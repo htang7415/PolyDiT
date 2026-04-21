@@ -181,6 +181,17 @@ def save_json(payload: Mapping[str, Any], path: Path) -> None:
         json.dump(_jsonable(payload), f, indent=2)
 
 
+def resolve_view_override(task_cfg: Mapping[str, Any], key: str, view: Optional[str], default: Any) -> Any:
+    if view:
+        raw = task_cfg.get(f"{key}_by_view")
+        if isinstance(raw, Mapping):
+            view_key = str(view).strip()
+            for candidate in (view_key, view_key.lower()):
+                if candidate in raw:
+                    return raw[candidate]
+    return task_cfg.get(key, default)
+
+
 def repo_relative(path: str | Path) -> str:
     p = Path(path)
     try:
@@ -2124,6 +2135,7 @@ def evaluate_params_cv(
 def tune_or_select_params(
     *,
     task: str,
+    view: Optional[str],
     split_df: pd.DataFrame,
     X: np.ndarray,
     y: np.ndarray,
@@ -2144,6 +2156,7 @@ def tune_or_select_params(
     epochs = int(task_cfg.get("tuning_epochs", 50))
     patience = int(task_cfg.get("tuning_patience", 10))
     search = task_cfg.get("optuna_search_space", {})
+    n_trials = int(resolve_view_override(task_cfg, "n_trials", view, 50))
     trial_rows: List[Dict[str, Any]] = []
 
     if tune_enabled:
@@ -2209,7 +2222,7 @@ def tune_or_select_params(
             trial_rows.append(row)
             return float(value) if np.isfinite(value) else (1e12 if direction == "minimize" else -1e12)
 
-        study.optimize(objective, n_trials=int(task_cfg.get("n_trials", 50)), show_progress_bar=True)
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
         successful_rows = [row for row in trial_rows if row.get("status") != "failed"]
         if not successful_rows:
             if trial_log_path is not None:
@@ -2970,6 +2983,7 @@ def run_task_for_view(
     hpo_started_perf = time.perf_counter()
     params, trials, best_payload = tune_or_select_params(
         task=task_kind,
+        view=view,
         split_df=split_df,
         X=X,
         y=y,

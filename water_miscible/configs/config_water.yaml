@@ -66,6 +66,8 @@ chi_regression:
   enabled: true
   tune: true
   n_trials: 50
+  n_trials_by_view:
+    smiles: 50
   tuning_epochs: 60
   tuning_patience: 10
   tuning_objective: "val_poly_nrmse"      # val_r2 | val_poly_nrmse
@@ -108,6 +110,8 @@ water_classification:
   enabled: true
   tune: true
   n_trials: 50
+  n_trials_by_view:
+    smiles: 150
   tuning_epochs: 60
   tuning_patience: 10
   tuning_objective: "balanced_accuracy"
