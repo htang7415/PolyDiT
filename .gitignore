@@ -20,7 +20,6 @@ Experiments*/
 
 *.md
 !README.md
-command.md
 
 *.txt
 !requirements.txt
