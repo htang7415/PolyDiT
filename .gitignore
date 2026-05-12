@@ -10,13 +10,17 @@ Data/
 DiT_postprocess
 *Data
 *results_small
+*results*
+*config_*
 *logs
 .claude
 .codex
+.AGENTS.md
 
 # 
 experiments*/
 Experiments*/
+DiT_postprocess
 
 *.md
 !README.md
