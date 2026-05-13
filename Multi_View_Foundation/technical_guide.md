@@ -34,12 +34,15 @@ For each property/view pair:
 4. Retrain the selected head on train plus validation.
 5. Evaluate final metrics on the held-out test split.
 
-Default HPO settings:
+Fixed HPO/training settings:
 
 - `n_trials: 50`
 - `tuning_epochs: 50`
 - `tuning_patience: 10`
 - `final_training_epochs: 200`
+- `finetune_last_layers`: Optuna integer range `[0, backbone_num_layers]`
+
+Only the best final checkpoint is saved for each property/view head. HPO trials are recorded as CSV/JSON diagnostics, not as model checkpoints.
 
 Metric files preserve previous property/view rows when one head is rerun, so incomplete size matrices can be filled one command at a time.
 

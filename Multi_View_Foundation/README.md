@@ -27,19 +27,19 @@ Run all configured properties and views for one size:
 bash scripts/run_property_regression.sh medium
 ```
 
-Run one property and one view:
+Submit one Euler job for all configured properties and all five views:
 
 ```bash
-MVF_REQUIRE_CUDA=1 MVF_PROPERTY_FILES=Tg.csv MVF_PROPERTY_VIEWS=smiles_bpe bash scripts/run_property_regression.sh medium
+bash scripts/submit_euler.sh medium
 ```
 
-Direct script form:
+Advanced direct script form for a view subset:
 
 ```bash
 python scripts/step1_property_regression.py --config configs/config.yaml --views smiles_bpe
 ```
 
-Default HPO settings are `50` Optuna trials and `200` final-training epochs.
+HPO is fixed to `50` Optuna trials. Final training with the selected hyperparameters is fixed to `200` epochs and saves only the best final checkpoint. `finetune_last_layers` is included in HPO as an integer range from `0` to the configured backbone layer count for each view.
 
 See:
 

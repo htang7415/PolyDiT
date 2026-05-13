@@ -6,7 +6,6 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_DIR}"
 
 MODEL_SIZE="${1:-}"
-VIEWS_ARG="${2:-${MVF_PROPERTY_VIEWS:-}}"
 CONFIG_PATH="${MVF_CONFIG_PATH:-configs/config.yaml}"
 
 timestamp() {
@@ -24,10 +23,6 @@ run_step() {
   end_ts=$(date +%s)
   echo "[$(timestamp)] Finished ${label} (duration: $((end_ts - start_ts))s)"
 }
-
-if [[ -n "${VIEWS_ARG}" ]]; then
-  export MVF_PROPERTY_VIEWS="${VIEWS_ARG}"
-fi
 
 if [[ -n "${MODEL_SIZE}" ]]; then
   TMP_SUFFIX_RAW="${MVF_TMP_CONFIG_SUFFIX:-}"
@@ -50,19 +45,6 @@ from pathlib import Path
 import yaml
 
 
-def _to_int_or_none(value):
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("Boolean is not a valid integer value.")
-    if isinstance(value, int):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    return int(float(text))
-
-
 def _csv_list(value):
     if value is None:
         return None
@@ -79,7 +61,6 @@ with in_path.open("r", encoding="utf-8") as f:
 paths_cfg = cfg.get("paths", {}) or {}
 results_dir = f"results_{model_size}"
 paths_cfg["results_dir"] = results_dir
-paths_cfg["paired_index"] = str(Path(results_dir) / "paired_index.csv")
 cfg["paths"] = paths_cfg
 
 for key in ("smiles_encoder", "smiles_bpe_encoder", "selfies_encoder", "group_selfies_encoder", "graph_encoder"):
@@ -94,25 +75,14 @@ forced_prop_files = _csv_list(os.environ.get("MVF_PROPERTY_FILES"))
 if forced_prop_files:
     prop_cfg["files"] = forced_prop_files
 
-forced_views = _csv_list(os.environ.get("MVF_PROPERTY_VIEWS"))
-if forced_views:
-    prop_cfg["views"] = forced_views
-
 if os.environ.get("MVF_PROPERTY_DEVICE"):
     prop_cfg["device"] = os.environ["MVF_PROPERTY_DEVICE"].strip()
 
 hpo_cfg = prop_cfg.get("hyperparameter_tuning", {}) or {}
 hpo_cfg["validation_strategy"] = "holdout_8_1_1"
 
-if os.environ.get("MVF_PROPERTY_N_TRIALS"):
-    hpo_cfg["n_trials"] = int(os.environ["MVF_PROPERTY_N_TRIALS"])
-else:
-    hpo_cfg["n_trials"] = int(hpo_cfg.get("n_trials", 50))
-
-if os.environ.get("MVF_PROPERTY_FINAL_EPOCHS"):
-    hpo_cfg["final_training_epochs"] = int(os.environ["MVF_PROPERTY_FINAL_EPOCHS"])
-else:
-    hpo_cfg["final_training_epochs"] = int(hpo_cfg.get("final_training_epochs", 200))
+hpo_cfg["n_trials"] = 50
+hpo_cfg["final_training_epochs"] = 200
 
 if os.environ.get("MVF_PROPERTY_TUNING_EPOCHS"):
     hpo_cfg["tuning_epochs"] = int(os.environ["MVF_PROPERTY_TUNING_EPOCHS"])
@@ -160,9 +130,6 @@ print(
 PY
 
 PROPERTY_CMD=(python scripts/step1_property_regression.py --config "${CONFIG_PATH}")
-if [[ -n "${VIEWS_ARG}" ]]; then
-  PROPERTY_CMD+=(--views "${VIEWS_ARG}")
-fi
 
 case "${MVF_PROPERTY_TUNE:-}" in
   1|true|TRUE|yes|YES|on|ON) PROPERTY_CMD+=(--tune) ;;

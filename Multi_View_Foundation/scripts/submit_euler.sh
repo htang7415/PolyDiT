@@ -11,7 +11,11 @@
 #SBATCH --gres=gpu:1
 #SBATCH --time=8-00:00:00
 
-# Preferred: bash scripts/submit_euler.sh [small|medium|large|xl|base] [smiles|smiles_bpe|selfies|group_selfies|graph]
+# Usage:
+#   bash scripts/submit_euler.sh <small|medium|large|xl>
+#
+# This submits one Euler job for the requested model size. The job runs all
+# configured properties across all five property_regression views.
 
 set -euo pipefail
 
@@ -33,13 +37,29 @@ fi
 LOG_DIR="${REPO_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 
+usage() {
+  echo "Usage: bash scripts/submit_euler.sh <small|medium|large|xl>" >&2
+}
+
+if [[ "$#" -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+MODEL_SIZE="$1"
+case "${MODEL_SIZE}" in
+  small|medium|large|xl) ;;
+  *)
+    echo "ERROR: unknown model size '${MODEL_SIZE}'. Expected one of: small, medium, large, xl." >&2
+    exit 2
+    ;;
+esac
+
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
-  MODEL_SIZE="${1:-small}"
-  PROPERTY_VIEWS="${2:-}"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Submitting MVF Euler job (model_size=${MODEL_SIZE}, property_views=${PROPERTY_VIEWS:-config/default})"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] SLURM stdout/err: ${LOG_DIR}/mvf_<jobid>.out/.err"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Submitting MVF Euler job (model_size=${MODEL_SIZE}, properties=all, views=all)"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] SLURM stdout/err: ${LOG_DIR}/mvf_${MODEL_SIZE}_<jobid>.out/.err"
   sbatch \
-    --job-name=mvf \
+    --job-name="mvf_${MODEL_SIZE}" \
     --output="${LOG_DIR}/%x_%j.out" \
     --error="${LOG_DIR}/%x_%j.err" \
     --nodes=1 \
@@ -52,7 +72,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     --time=8-00:00:00 \
     --chdir="${REPO_DIR}" \
     --export=ALL,MVF_REPO_DIR="${REPO_DIR}" \
-    "${DEFAULT_REPO_DIR}/scripts/submit_euler.sh" "${MODEL_SIZE}" "${PROPERTY_VIEWS}"
+    "${DEFAULT_REPO_DIR}/scripts/submit_euler.sh" "${MODEL_SIZE}"
   exit $?
 fi
 
@@ -99,7 +119,5 @@ PY
 
 nvidia-smi -L || true
 
-MODEL_SIZE="${1:-small}"
-PROPERTY_VIEWS="${2:-}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching MVF pipeline with model_size=${MODEL_SIZE}, property_views=${PROPERTY_VIEWS:-config/default}"
-bash scripts/run_pipeline.sh "${MODEL_SIZE}" "${PROPERTY_VIEWS}"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching MVF pipeline with model_size=${MODEL_SIZE}, properties=all, views=all"
+bash scripts/run_pipeline.sh "${MODEL_SIZE}"

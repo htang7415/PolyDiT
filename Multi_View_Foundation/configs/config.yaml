@@ -6,35 +6,11 @@
 
 # Shared paths/data used by property_regression.
 paths:
-  data_dir: "../Data"
-  polymer_file: "../Data/Polymer/SMiPoly_polymers.gz"
-  polymer_file_d2: "../Data/Polymer/PolyInfo_Homopolymer.csv"
   property_dir: "../Data/Property"
   results_dir: "results"
-  paired_index: "results/paired_index.csv"
 
 data:
   random_seed: 42
-  max_samples_d1: 500000
-  max_samples_d2: null
-  random_sample_d1: true
-  random_sample_d2: false
-
-# View selection for property_regression.
-alignment_views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
-
-views:
-  smiles:
-    enabled: true
-  smiles_bpe:
-    enabled: true
-  selfies:
-    enabled: true
-  group_selfies:
-    enabled: true
-    tokenizer_path: "../Bi_Diffusion_Group_SELFIES/results/tokenizer.pkl"
-  graph:
-    enabled: true
 
 # property_regression args
 property:
@@ -68,7 +44,7 @@ property:
       learning_rate: [4.0e-4, 6.0e-4, 8.0e-4, 1.0e-3]
       dropout: [0.1, 0.2, 0.3]
       batch_size: [4, 8, 16, 32, 64, 128]
-      # Optional: finetune_last_layers. If omitted, property_regression searches the per-view range [0, backbone_num_layers].
+      # finetune_last_layers is always searched as integer range [0, backbone_num_layers].
 
 # Backbone encoder args used by property_regression.
 smiles_encoder:
@@ -84,8 +60,6 @@ smiles_encoder:
   timestep: 1
   batch_size: 256
   device: "auto"
-  max_samples_d1: 500000
-  max_samples_d2: null
 
 smiles_bpe_encoder:
   method_dir: "../Bi_Diffusion_SMILES_BPE"
@@ -100,8 +74,6 @@ smiles_bpe_encoder:
   timestep: 1
   batch_size: 256
   device: "auto"
-  max_samples_d1: 500000
-  max_samples_d2: null
 
 selfies_encoder:
   method_dir: "../Bi_Diffusion_SELFIES"
@@ -116,8 +88,6 @@ selfies_encoder:
   timestep: 1
   batch_size: 256
   device: "auto"
-  max_samples_d1: 500000
-  max_samples_d2: null
 
 group_selfies_encoder:
   method_dir: "../Bi_Diffusion_Group_SELFIES"
@@ -132,8 +102,6 @@ group_selfies_encoder:
   timestep: 1
   batch_size: 128
   device: "auto"
-  max_samples_d1: 500000
-  max_samples_d2: null
 
 graph_encoder:
   method_dir: "../Bi_Diffusion_graph"
@@ -149,5 +117,3 @@ graph_encoder:
   timestep: 1
   batch_size: 64
   device: "auto"
-  max_samples_d1: 500000
-  max_samples_d2: null

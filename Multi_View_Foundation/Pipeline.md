@@ -8,7 +8,8 @@ It compares property prediction quality across five polymer representations:
 ## property_regression
 
 - Script: `python scripts/step1_property_regression.py --config configs/config.yaml`
-- Wrapper: `bash scripts/run_property_regression.sh <size> [views]`
+- Wrapper: `bash scripts/run_property_regression.sh <size>`
+- Euler submit: `bash scripts/submit_euler.sh <size>`
 - Output root: `results_<size>/step1_property_regression/`
 - Default model sizes: `small`, `medium`, `large`, `xl`
 - Default properties: `Tg`, `Tm`, `Td`, `Eg`, `Ced`, `Ea`, `Eib`, `In`
@@ -30,30 +31,20 @@ Run all configured property/view heads for one model size:
 bash scripts/run_property_regression.sh medium
 ```
 
-Run one property and one view:
+Submit one Euler job for all configured properties and all five views:
 
 ```bash
-MVF_REQUIRE_CUDA=1 MVF_PROPERTY_FILES=Tg.csv MVF_PROPERTY_VIEWS=smiles_bpe bash scripts/run_property_regression.sh medium
+bash scripts/submit_euler.sh medium
 ```
 
-Run one property across all five views:
+Allowed model sizes are `small`, `medium`, `large`, and `xl`.
+
+Advanced local run for one property across all five views:
 
 ```bash
 MVF_REQUIRE_CUDA=1 MVF_PROPERTY_FILES=Tg.csv bash scripts/run_property_regression.sh medium
 ```
 
-Run a comma-separated view subset:
-
-```bash
-MVF_REQUIRE_CUDA=1 MVF_PROPERTY_FILES=Tg.csv bash scripts/run_property_regression.sh medium smiles,graph
-```
-
-Override HPO size:
-
-```bash
-MVF_PROPERTY_N_TRIALS=50 MVF_PROPERTY_FINAL_EPOCHS=200 bash scripts/run_property_regression.sh medium
-```
-
 ## Outputs
 
-Each run writes model, metadata, HPO, split, metric, and figure artifacts under `step1_property_regression`. Existing metrics for other property/view pairs are preserved when rerunning one head at a time.
+Each run writes model, metadata, HPO, split, metric, and figure artifacts under `step1_property_regression`. HPO is fixed to 50 Optuna trials, final training is fixed to 200 epochs, and only the best final checkpoint is saved for each property/view head. Existing metrics for other property/view pairs are preserved when rerunning one head at a time.

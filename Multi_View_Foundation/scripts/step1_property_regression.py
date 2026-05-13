@@ -19,6 +19,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
+os.environ.setdefault("MPLCONFIGDIR", str(Path(os.environ.get("TMPDIR", "/tmp")) / "mvf_matplotlib_cache"))
+
 try:
     from sklearn.metrics import root_mean_squared_error
 except Exception:  # pragma: no cover
@@ -51,7 +53,6 @@ from src.utils.runtime import (
     resolve_path as _shared_resolve_path,
     resolve_with_base as _shared_resolve_with_base,
     to_bool as _to_bool,
-    to_int_or_none as _to_int_or_none,
 )
 from src.utils.property_names import (
     normalize_property_name,
@@ -69,6 +70,10 @@ REPRESENTATION_ORDER = [
     "Graph",
     "MultiViewMean",
 ]
+
+DEFAULT_PROPERTY_VIEWS = ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
+DEFAULT_HPO_TRIALS = 50
+DEFAULT_FINAL_TRAINING_EPOCHS = 200
 
 SPLIT_ORDER = ["train", "val", "test"]
 SPLIT_COLORS = {
@@ -1610,16 +1615,9 @@ def _get_backbone_num_layers(backbone: torch.nn.Module) -> int:
     return int(getattr(backbone, "num_layers", 0))
 
 
-def _normalize_finetune_options(options, backbone_num_layers: int) -> List[int]:
+def _finetune_last_layer_range(backbone_num_layers: int) -> List[int]:
     max_layers = max(int(backbone_num_layers), 0)
-    if options is None:
-        return [0, max_layers]
-    normalized = _normalize_numeric_options(options, [0, max_layers], cast=int)
-    clipped = []
-    for value in normalized:
-        clipped.append(min(max(int(value), 0), max_layers))
-    clipped = sorted(set(clipped))
-    return clipped or [0, max_layers]
+    return [0, max_layers]
 
 
 def _suggest_finetune_last_layers(trial, options: List[int]) -> int:
@@ -1777,7 +1775,7 @@ def _build_tuning_config(
 
     cfg = {
         "enabled": enabled,
-        "n_trials": max(int(hyper_cfg.get("n_trials", 100)), 1),
+        "n_trials": DEFAULT_HPO_TRIALS,
         "validation_strategy": "holdout",
         "tuning_epochs": max(int(hyper_cfg.get("tuning_epochs", 35)), 1),
         "tuning_patience": max(int(hyper_cfg.get("tuning_patience", 10)), 1),
@@ -1788,7 +1786,7 @@ def _build_tuning_config(
             "learning_rate": _normalize_numeric_options(search.get("learning_rate"), [4e-4, 6e-4, 8e-4, 1e-3], cast=float),
             "dropout": _normalize_numeric_options(search.get("dropout"), [0.1, 0.2, 0.3], cast=float),
             "batch_size": _normalize_numeric_options(search.get("batch_size"), [8, 16, 32, 64, 128], cast=int),
-            "finetune_last_layers": _normalize_finetune_options(search.get("finetune_last_layers"), int(backbone_num_layers or 0)),
+            "finetune_last_layers": _finetune_last_layer_range(int(backbone_num_layers or 0)),
         },
     }
     return cfg
@@ -2089,7 +2087,7 @@ def _fit_mlp_with_hpo(
     n_trials = int(cfg["n_trials"]) if enabled else 1
     search = cfg["search_space"]
     objective_metric = str(cfg["metric"])
-    final_training_epochs = max(int((hyper_cfg or {}).get("final_training_epochs", 200)), 1)
+    final_training_epochs = DEFAULT_FINAL_TRAINING_EPOCHS
     final_training_patience = max(
         int((hyper_cfg or {}).get("final_training_patience", final_training_epochs + 1)),
         1,
@@ -2292,6 +2290,7 @@ def _fit_mlp_with_hpo(
         "final_epochs_ran": int(final_epochs_ran),
         "activation": "relu",
         "backbone_num_layers": int(backbone_num_layers or 0),
+        "checkpoint_policy": "save_best_final_only",
         **final_bundle["params"],
     }
 
@@ -2314,6 +2313,7 @@ def _save_mlp_bundle(model_path: Path, bundle: dict) -> None:
         "scaler_mean": scaler.mean_.astype(np.float32),
         "scaler_scale": scaler.scale_.astype(np.float32),
         "finetune_last_layers": int(params.get("finetune_last_layers", 0)),
+        "checkpoint_role": "best_final_model",
         "backbone_state_dict": {
             key: value.detach().cpu().clone()
             for key, value in backbone_state.items()
@@ -2387,7 +2387,7 @@ def main(args):
     if not property_files:
         raise FileNotFoundError(f"No property CSV files found in {property_dir}")
 
-    views = args.views.split(",") if args.views else prop_cfg.get("views") or config.get("alignment_views", ["smiles"])
+    views = args.views.split(",") if args.views else prop_cfg.get("views") or DEFAULT_PROPERTY_VIEWS
     views = [v.strip() for v in views if v.strip()]
 
     encoder_cfgs = {
@@ -2810,7 +2810,7 @@ def main(args):
                 "split_file": str(split_path),
                 "validation_strategy": "holdout_8_1_1",
                 "model_type": "mlp",
-                "hpo_trials": int((mlp_hpo_cfg or {}).get("n_trials", 100)),
+                "hpo_trials": int((mlp_hpo_cfg or {}).get("n_trials", DEFAULT_HPO_TRIALS)),
                 "hpo_best": hpo_best,
                 "model_path": str(model_path),
                 "hpo_trials_path": str(trial_path),
@@ -2940,7 +2940,7 @@ def main(args):
                         "split_file": str(split_path),
                         "validation_strategy": "holdout_8_1_1",
                         "model_type": "mlp",
-                        "hpo_trials": int((mlp_hpo_cfg or {}).get("n_trials", 100)),
+                        "hpo_trials": int((mlp_hpo_cfg or {}).get("n_trials", DEFAULT_HPO_TRIALS)),
                         "hpo_best": hpo_best,
                         "model_path": str(model_path),
                         "hpo_trials_path": str(trial_path),

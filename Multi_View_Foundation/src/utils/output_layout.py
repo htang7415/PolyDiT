@@ -4,18 +4,13 @@ Provides a consistent per-step structure:
   <results_dir>/<step_name>/{files,metrics,figures}
 or, for property-scoped artifacts:
   <results_dir>/<step_name>/<property>/{files,metrics,figures}
-
-Writers can optionally mirror artifacts to legacy locations for backward
-compatibility with existing scripts.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable, Optional
-
-import numpy as np
+from typing import Optional
 
 from src.utils.property_names import normalize_property_name
 
@@ -49,32 +44,14 @@ def ensure_step_dirs(results_dir: Path, step_name: str, property_name: Optional[
     }
 
 
-def _iter_unique_paths(primary_path: Path, legacy_paths: Optional[Iterable[Path]]) -> Iterable[Path]:
-    seen = set()
-    candidates = [Path(primary_path)]
-    if legacy_paths:
-        candidates.extend(Path(p) for p in legacy_paths)
-    for path in candidates:
-        resolved = str(path.resolve(strict=False))
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        yield path
+def save_csv(df, primary_path: Path, index: bool = False) -> None:
+    path = Path(primary_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=index)
 
 
-def save_csv(df, primary_path: Path, legacy_paths: Optional[Iterable[Path]] = None, index: bool = False) -> None:
-    for path in _iter_unique_paths(primary_path, legacy_paths):
-        df.to_csv(path, index=index)
-
-
-def save_numpy(array, primary_path: Path, legacy_paths: Optional[Iterable[Path]] = None) -> None:
-    arr = np.asarray(array)
-    for path in _iter_unique_paths(primary_path, legacy_paths):
-        np.save(path, arr)
-
-
-def save_json(payload, primary_path: Path, legacy_paths: Optional[Iterable[Path]] = None, indent: int = 2) -> None:
-    for path in _iter_unique_paths(primary_path, legacy_paths):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=indent)
+def save_json(payload, primary_path: Path, indent: int = 2) -> None:
+    path = Path(primary_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=indent)
