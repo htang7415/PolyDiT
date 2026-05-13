@@ -1,28 +1,10 @@
-# Multi-View Foundation configuration (scaffold)
+# Multi-View Foundation property_regression configuration.
 #
-# Step-to-args map (F0-F7):
-# F0 paired dataset build:
-#   paths.data_dir, paths.polymer_file, paths.polymer_file_d2, paths.paired_index
-#   data.random_seed, data.max_samples_d1, data.max_samples_d2
-#   alignment_views, views.*
-# F1 embedding extraction:
-#   alignment_views, views.*, *_encoder.*
-# F2 retrieval evaluation:
-#   evaluation.*
-# F3 property heads:
-#   property.*
-# F4 embedding research:
-#   embedding_research.*
-# F5 foundation inverse (resample):
-#   foundation_inverse.*
-# F6 DiT interpretability:
-#   dit_interpretability.*
-# F7 chemistry/physics analysis:
-#   chem_physics_analysis.*
-# F8 paper package export:
-#   paper_results.*
+# Active workflow:
+#   python scripts/step1_property_regression.py --config configs/config.yaml
+# The fixed split is train/validation/test = 8/1/1 with data.random_seed=42.
 
-# F0 shared paths/data for paired dataset construction
+# Shared paths/data used by property_regression.
 paths:
   data_dir: "../Data"
   polymer_file: "../Data/Polymer/SMiPoly_polymers.gz"
@@ -38,7 +20,7 @@ data:
   random_sample_d1: true
   random_sample_d2: false
 
-# F0/F1 view selection
+# View selection for property_regression.
 alignment_views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
 
 views:
@@ -54,28 +36,7 @@ views:
   graph:
     enabled: true
 
-# F1 embedding-figure args
-alignment_embeddings:
-  generate_figures: true
-
-# F2 retrieval args
-evaluation:
-  recall_ks: [1, 5, 10]
-  max_samples_d1: 20000
-  max_samples_d2: null
-  generate_figures: true
-
-# F4 embedding-research args
-embedding_research:
-  analysis_dataset: "d2"        # research summary focuses on real-polymer D2 embeddings
-  max_samples_per_view: 10000
-  tokenizer_sample_cap: 10000
-  knn_k: 10
-  property_knn_k: 5
-  min_class_samples: 20
-  generate_figures: true
-
-# F3 property-head args
+# property_regression args
 property:
   files: [
     "Tg.csv",
@@ -87,18 +48,19 @@ property:
     "Eib.csv",
     "In.csv",
   ]
-  test_ratio: 0.1            # 10% holdout; remaining 90% used for CV and final training
+  val_ratio: 0.1             # 10% validation holdout for Optuna HPO
+  test_ratio: 0.1            # 10% test holdout for final comparison only
   model_type: "mlp"
-  views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]   # F3 trains and compares all view-specific heads
+  views: ["smiles", "smiles_bpe", "selfies", "group_selfies", "graph"]
   enable_multiview_mean_head: false
   generate_figures: true
   hyperparameter_tuning:
-    cv_folds: 5
-    n_trials: 200
+    validation_strategy: "holdout_8_1_1"
+    n_trials: 50
     enabled: true
     tuning_epochs: 50
     tuning_patience: 10
-    final_training_epochs: 500
+    final_training_epochs: 200
     metric: "r2"
     search_space:
       num_layers: [2, 3, 4, 5]
@@ -106,125 +68,9 @@ property:
       learning_rate: [4.0e-4, 6.0e-4, 8.0e-4, 1.0e-3]
       dropout: [0.1, 0.2, 0.3]
       batch_size: [4, 8, 16, 32, 64, 128]
-      # Optional: finetune_last_layers. If omitted, F3 searches the per-view range [0, backbone_num_layers].
+      # Optional: finetune_last_layers. If omitted, property_regression searches the per-view range [0, backbone_num_layers].
 
-# F5 foundation inverse args
-foundation_inverse:
-  enabled: true
-  run_all_properties: false
-  property: "Tg"
-  targets:
-    Tg: 320.0
-    Tm: 300.0
-    Td: 450.0
-    Eg: 6.0
-    Ced: 125
-    Ea: 3.10
-    Eib: 1.80
-    In: 5.60
-  target_modes:
-    Tg: ge
-    Tm: ge
-    Td: ge
-    Eg: ge
-    Ced: ge
-    Ea: ge
-    Eib: le
-    In: le
-  epsilons:
-    Tg: 0.0
-    Tm: 0.0
-    Td: 0.0
-    Eg: 0.0
-    Ced: 0.0
-    Ea: 0.0
-    Eib: 0.0
-    In: 0.0
-  target_mode: "ge"  # window: |pred-target|<=epsilon, ge: pred>=target, le: pred<=target
-  epsilon: 0.0
-  sampling_mode: "resample"       # resample 100 per attempt until each proposal view reaches sampling_target accepted polymers
-  sampling_target: 100
-  sampling_num_per_batch: 100
-  sampling_batch_size: 100
-  sampling_max_batches: 10000
-  top_k: 100                   # per-view top-k exported for downstream chemistry analysis
-  proposal_views: "all"         # compare proposal views under one shared smiles property scorer
-  sampling_temperature: null
-  sampling_num_atoms: null
-  # Optional comma-separated class filter. Supported classes:
-  # polyimide, polyester, polyamide, polyurethane, polyether,
-  # polysiloxane, polycarbonate, polysulfone, polyacrylate, polystyrene
-  target_class: ""                  # empty string disables class filter
-  require_validity: true
-  require_two_stars: true
-  require_novel: true
-  require_unique: true
-  max_sa: 3.6
-  per_view_min_hits: 0
-  per_view_quota_relax_after_batches: 0
-  property_model_mode: "single"     # F5 uses one shared smiles property head for all proposal views
-  property_model_path: ""           # explicit scorer path; auto-resolved from F3 results if empty
-  generate_figures: true
-  encoder_view: "smiles"           # backbone used to embed candidates for property scoring
-
-# F6 DiT interpretability args
-dit_interpretability:
-  enabled: true
-  run_all_properties: false
-  encoder_view: "smiles"        # shared scorer view used in F5/F6
-  property: "Tg"
-  property_model_path: ""
-  methods: ["gradient_x_hidden", "integrated_gradients", "attention_rollout"]
-  ig_steps: 16
-  faithfulness_top_k: 3
-  max_samples_per_group: 24
-  max_tokens_in_figure: 16
-  generate_figures: true
-
-# F7 chemistry/physics analysis args
-chem_physics_analysis:
-  enabled: true
-  properties: ["Tg"]
-  # Optional path templates with {property}, e.g.:
-  # "results/step5_foundation_inverse/files/candidate_scores_{property}.csv"
-  # "results/step5_foundation_inverse/files/view_compare_topk_{property}.csv"
-  candidate_scores_template: ""
-  topk_scores_template: ""
-  max_reference_samples: null
-  top_k: 100
-  generate_figures: true
-  reference_class_filter_enabled: false
-  min_candidates_for_analysis: 100
-  min_topk_for_analysis: 10
-  copy_property_figures_to_top_level: true
-  # Optional per-property target config for physics panels.
-  # If omitted, Step7 uses property_hit/abs_error from input files when available.
-  targets: {}
-  target_modes: {}
-  epsilons: {}
-
-# F8 paper package export args (collect F1-F7 into paper-ready structure)
-paper_results:
-  enabled: true
-  output_dir: "paper_package"    # relative path resolves under results_dir
-  # Prefer explicit result directories to avoid mixing stale/partial runs.
-  # Leave empty to use only paths.results_dir.
-  results_dirs: []
-  # Optional broad auto-discovery of BASE_DIR/results* (guarded; default off).
-  auto_discover_results_dirs: true
-  include_large_csv: true        # include large candidate/interpretability tables
-  include_figures: true
-  max_panels_per_figure: 6       # subfigures per composite figure: (a), (b), ...
-  figure_fontsize: 16            # force all generated F8 text labels to font size 16
-  figure_dpi: 600                # save all generated F8 figures at 600 dpi (png)
-  method_dirs:                   # baseline method folders used for Step0-Step2 asset collection
-    - "Bi_Diffusion_SMILES"
-    - "Bi_Diffusion_SMILES_BPE"
-    - "Bi_Diffusion_SELFIES"
-    - "Bi_Diffusion_Group_SELFIES"
-    - "Bi_Diffusion_graph"
-
-# F1 backbone encoder args (used by F1/F5/F6)
+# Backbone encoder args used by property_regression.
 smiles_encoder:
   method_dir: "../Bi_Diffusion_SMILES"
   config_path: "../Bi_Diffusion_SMILES/configs/config.yaml"

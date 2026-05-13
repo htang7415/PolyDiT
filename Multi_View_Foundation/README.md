@@ -1,8 +1,8 @@
 # Multi-View Foundation
 
-MVF compares polymer representations through shared alignment, retrieval, property prediction, inverse design, interpretability, and chemistry analysis.
+MVF is currently scoped to `property_regression`: property prediction from frozen representation backbones.
 
-The enabled views are:
+The active views are:
 
 - `smiles`
 - `smiles_bpe`
@@ -10,39 +10,36 @@ The enabled views are:
 - `group_selfies`
 - `graph`
 
-The pipeline stages are:
+`property_regression` uses a fixed split for every property CSV:
 
-- `F0`: paired polymer dataset across views
-- `F1`: embedding extraction
-- `F2`: cross-view retrieval
-- `F3`: property heads for all views
-- `F4`: embedding research
-- `F5`: inverse-design benchmark under one shared downstream scorer
-- `F6`: DiT interpretability
-- `F7`: chemistry/physics analysis
-- `F8`: paper-package export
+- train: 80%
+- validation: 10%
+- test: 10%
+- random seed: `42`
 
-F5 compares proposal views under a shared downstream scorer by default; `property_model_mode: all` can instead export committee predictions from all available F3 heads.
+Optuna uses only the validation split for hyperparameter selection. The final model is trained on train plus validation, and the test split is used only for final comparison across views and model sizes.
 
 ## Run
 
-```bash
-bash scripts/run_pipeline.sh
-```
-
-Run selected stages:
+Run all configured properties and views for one size:
 
 ```bash
-MVF_STEP_START=5 MVF_STEP_END=7 bash scripts/run_pipeline.sh
+bash scripts/run_property_regression.sh medium
 ```
 
-Submit one staged NREL workflow:
+Run one property and one view:
 
 ```bash
-bash scripts/submit_property_workflow_nrel.sh small
+MVF_REQUIRE_CUDA=1 MVF_PROPERTY_FILES=Tg.csv MVF_PROPERTY_VIEWS=smiles_bpe bash scripts/run_property_regression.sh medium
 ```
 
-Configure properties, proposal views, targets, and paper export in `configs/config.yaml`.
+Direct script form:
+
+```bash
+python scripts/step1_property_regression.py --config configs/config.yaml --views smiles_bpe
+```
+
+Default HPO settings are `50` Optuna trials and `200` final-training epochs.
 
 See:
 

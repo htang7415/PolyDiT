@@ -271,24 +271,6 @@ sampling:
   temperature: 1.0
   use_constraints: true
 
-# Inverse design
-inverse_design:
-  num_candidates: 500
-  epsilon: 30.0  # tolerance for property matching
-
-# Polymer classes (SMARTS patterns)
-polymer_classes:
-  polyimide: "[#6][CX3](=[OX1])[NX3][CX3](=[OX1])[#6]"
-  polyester: "[#6][CX3](=[OX1])[OX2][#6]"
-  polyamide: "[#6][CX3](=[OX1])[NX3;!$([N]([C](=O))[C](=O))][#6;!$([CX3](=[OX1]))]"
-  polyurethane: "[#6][OX2][CX3](=[OX1])[NX3][#6]"
-  polyether: "[#6;!$([CX3](=[OX1]))][OX2][#6;!$([CX3](=[OX1]))]"
-  polysiloxane: "[Si][OX2][Si]"
-  polycarbonate: "[#6][OX2][CX3](=[OX1])[OX2][#6]"
-  polysulfone: "[#6][SX4](=[OX1])(=[OX1])[#6]"
-  polyacrylate: "[#6]-[#6](=O)-[#8]"
-  polystyrene: "[#6]-[#6](c1ccccc1)-[#6]"
-
 # Plotting
 plotting:
   figure_size: [4.5, 4.5]

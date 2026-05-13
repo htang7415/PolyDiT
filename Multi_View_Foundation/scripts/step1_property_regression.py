@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""F3: Property heads on foundation embeddings (multi-view)."""
+"""property_regression on foundation embeddings (multi-view)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import KFold, train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 try:
@@ -184,7 +184,7 @@ def _load_sequence_backbone(
     load_backbone_checkpoint(
         backbone=backbone,
         checkpoint_path=checkpoint_path,
-        map_location=device,
+        map_location="cpu",
         strict=False,
         prefix="backbone.",
         label="sequence backbone",
@@ -296,7 +296,7 @@ def _load_graph_backbone(encoder_cfg: dict, device: str):
     load_backbone_checkpoint(
         backbone=backbone,
         checkpoint_path=checkpoint_path,
-        map_location=device,
+        map_location="cpu",
         strict=False,
         prefix="backbone.",
         label="graph backbone",
@@ -552,6 +552,78 @@ def _view_to_representation(view: str) -> str:
     return mapping.get(token, token.upper() if token else "UNKNOWN")
 
 
+def _representation_to_view(rep: str) -> str:
+    token = str(rep or "").strip()
+    mapping = {
+        "SMILES": "smiles",
+        "SMILES_BPE": "smiles_bpe",
+        "SMILES-BPE": "smiles_bpe",
+        "SELFIES": "selfies",
+        "Group_SELFIES": "group_selfies",
+        "GROUP_SELFIES": "group_selfies",
+        "Graph": "graph",
+        "GRAPH": "graph",
+        "MultiViewMean": "multiview_mean",
+        "MULTIVIEWMEAN": "multiview_mean",
+    }
+    if token in mapping:
+        return mapping[token]
+    lowered = token.lower().replace("-", "_")
+    return lowered or "unknown"
+
+
+def _merge_metrics_with_existing(new_df: pd.DataFrame, existing_paths: Iterable[Path]) -> pd.DataFrame:
+    if new_df.empty:
+        return new_df
+    merged_new = new_df.copy()
+    if "view" not in merged_new.columns:
+        merged_new["view"] = merged_new.get("representation", pd.Series(dtype=str)).map(_representation_to_view)
+
+    replacement_keys = set(
+        zip(
+            merged_new["property"].astype(str),
+            merged_new["view"].astype(str),
+        )
+    )
+
+    existing_frames = []
+    seen_paths = set()
+    for path in existing_paths:
+        path = Path(path)
+        resolved = str(path.resolve(strict=False))
+        if resolved in seen_paths:
+            continue
+        seen_paths.add(resolved)
+        if not path.exists():
+            continue
+        try:
+            candidate = pd.read_csv(path)
+        except Exception:
+            continue
+        if not candidate.empty:
+            existing_frames.append(candidate)
+
+    if not existing_frames:
+        return merged_new
+
+    existing_df = pd.concat(existing_frames, ignore_index=True, sort=False)
+    if "view" not in existing_df.columns:
+        if "representation" in existing_df.columns:
+            existing_df["view"] = existing_df["representation"].map(_representation_to_view)
+        else:
+            existing_df["view"] = "unknown"
+    if "property" not in existing_df.columns:
+        return merged_new
+
+    existing_keys = list(zip(existing_df["property"].astype(str), existing_df["view"].astype(str)))
+    keep_mask = [key not in replacement_keys for key in existing_keys]
+    kept_existing = existing_df.loc[keep_mask].copy()
+    dedupe_cols = [c for c in ["property", "view", "split"] if c in kept_existing.columns]
+    if len(dedupe_cols) == 3:
+        kept_existing = kept_existing.drop_duplicates(subset=dedupe_cols, keep="last")
+    return pd.concat([kept_existing, merged_new], ignore_index=True, sort=False)
+
+
 def _to_float_or_nan(value: Any) -> float:
     try:
         return float(value)
@@ -626,7 +698,7 @@ def _draw_heatmap(
         cbar.set_label(colorbar_label, fontsize=11)
 
 
-def _plot_f3_metrics_by_split(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
+def _plot_property_regression_metrics_by_split(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
     if plt is None or metrics_df.empty:
         return
     properties = sorted(metrics_df["property"].astype(str).unique().tolist())
@@ -691,13 +763,13 @@ def _plot_f3_metrics_by_split(metrics_df: pd.DataFrame, figures_dir: Path) -> No
             else:
                 ax.set_title(metric_label, fontsize=13)
 
-    fig.suptitle("F3: Property Head Metrics by Split (train / val / test)", fontsize=16, fontweight="bold")
+    fig.suptitle("property_regression: Metrics by Split (train / val / test)", fontsize=16, fontweight="bold")
     fig.tight_layout()
-    _save_figure_png(fig, figures_dir / "figure_f3_metrics_by_split")
+    _save_figure_png(fig, figures_dir / "figure_step1_property_regression_metrics_by_split")
     plt.close(fig)
 
 
-def _plot_f3_generalization_heatmaps(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
+def _plot_property_regression_generalization_heatmaps(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
     if plt is None or metrics_df.empty:
         return
     properties = sorted(metrics_df["property"].astype(str).unique().tolist())
@@ -740,12 +812,12 @@ def _plot_f3_generalization_heatmaps(metrics_df: pd.DataFrame, figures_dir: Path
         spec["ax"].text(-0.12, 1.04, label, transform=spec["ax"].transAxes,
                         fontsize=14, fontweight="bold", va="bottom", ha="left")
 
-    fig.suptitle("F3: Generalization Analysis — Test R², Gap, RMSE Ratio", fontsize=16, fontweight="bold")
-    _save_figure_png(fig, figures_dir / "figure_f3_generalization_heatmaps")
+    fig.suptitle("property_regression: Generalization Analysis - Test R², Gap, RMSE Ratio", fontsize=16, fontweight="bold")
+    _save_figure_png(fig, figures_dir / "figure_step1_property_regression_generalization_heatmaps")
     plt.close(fig)
 
 
-def _plot_f3_test_head_leaderboard(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
+def _plot_property_regression_test_head_leaderboard(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
     if plt is None or metrics_df.empty:
         return
     test_df = metrics_df[metrics_df["split"] == "test"].copy()
@@ -816,20 +888,20 @@ def _plot_f3_test_head_leaderboard(metrics_df: pd.DataFrame, figures_dir: Path) 
                     }
                 )
 
-    fig.suptitle("F3: Test-Set Property Head Leaderboard (best view per property)", fontsize=16, fontweight="bold")
+    fig.suptitle("property_regression: Test-Set Leaderboard (best view per property)", fontsize=16, fontweight="bold")
     fig.tight_layout()
-    _save_figure_png(fig, figures_dir / "figure_f3_test_head_leaderboard")
+    _save_figure_png(fig, figures_dir / "figure_step1_property_regression_test_head_leaderboard")
     plt.close(fig)
 
     if ranking_rows:
         save_csv(
             pd.DataFrame(ranking_rows),
-            figures_dir / "figure_f3_test_head_leaderboard.csv",
+            figures_dir / "figure_step1_property_regression_test_head_leaderboard.csv",
             index=False,
         )
 
 
-def _build_f3_fusion_gain_table(metrics_df: pd.DataFrame) -> pd.DataFrame:
+def _build_property_regression_fusion_gain_table(metrics_df: pd.DataFrame) -> pd.DataFrame:
     if metrics_df.empty:
         return pd.DataFrame()
     test_df = metrics_df[metrics_df["split"] == "test"].copy()
@@ -882,10 +954,10 @@ def _build_f3_fusion_gain_table(metrics_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _plot_f3_fusion_gain(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
+def _plot_property_regression_fusion_gain(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
     if plt is None or metrics_df.empty:
         return
-    gain_df = _build_f3_fusion_gain_table(metrics_df)
+    gain_df = _build_property_regression_fusion_gain_table(metrics_df)
     if gain_df.empty:
         return
 
@@ -927,15 +999,15 @@ def _plot_f3_fusion_gain(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
             ax.text(bar.get_x() + bar.get_width() / 2.0, text_y, f"{val:+.3f}", ha="center", va=va, fontsize=13)
 
     fig.tight_layout()
-    _save_figure_png(fig, figures_dir / "figure_f3_fusion_gain_vs_best_single")
+    _save_figure_png(fig, figures_dir / "figure_step1_property_regression_fusion_gain_vs_best_single")
     plt.close(fig)
 
-    save_csv(gain_df, figures_dir / "figure_f3_fusion_gain_vs_best_single.csv", index=False)
+    save_csv(gain_df, figures_dir / "figure_step1_property_regression_fusion_gain_vs_best_single.csv", index=False)
 
 
-def _load_f3_meta_table(model_dir: Path) -> pd.DataFrame:
+def _load_property_regression_meta_table(model_dir: Path) -> pd.DataFrame:
     rows = []
-    for path in sorted(model_dir.glob("*_meta.json")):
+    for path in sorted(model_dir.rglob("*_meta.json")):
         try:
             payload = json.loads(path.read_text())
         except Exception:
@@ -963,10 +1035,10 @@ def _load_f3_meta_table(model_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _plot_f3_head_coverage(model_dir: Path, figures_dir: Path) -> None:
+def _plot_property_regression_head_coverage(model_dir: Path, figures_dir: Path) -> None:
     if plt is None:
         return
-    meta_df = _load_f3_meta_table(model_dir)
+    meta_df = _load_property_regression_meta_table(model_dir)
     if meta_df.empty:
         return
     properties = sorted(meta_df["property"].astype(str).unique().tolist())
@@ -1010,9 +1082,9 @@ def _plot_f3_head_coverage(model_dir: Path, figures_dir: Path) -> None:
             ax.legend(loc="best", fontsize=15)
 
     fig.tight_layout()
-    _save_figure_png(fig, figures_dir / "figure_f3_head_coverage")
+    _save_figure_png(fig, figures_dir / "figure_step1_property_regression_head_coverage")
     plt.close(fig)
-    save_csv(meta_df, figures_dir / "figure_f3_head_coverage.csv", index=False)
+    save_csv(meta_df, figures_dir / "figure_step1_property_regression_head_coverage.csv", index=False)
 
 
 def _parse_trial_file_info(path: Path) -> Tuple[str, str]:
@@ -1036,10 +1108,10 @@ def _parse_trial_file_info(path: Path) -> Tuple[str, str]:
     return base, "SMILES"
 
 
-def _plot_f3_hpo_progress(model_dir: Path, figures_dir: Path) -> None:
+def _plot_property_regression_hpo_progress(model_dir: Path, figures_dir: Path) -> None:
     if plt is None:
         return
-    trial_files = sorted(model_dir.glob("*_mlp_hpo_trials.csv"))
+    trial_files = sorted(model_dir.rglob("*_mlp_hpo_trials.csv"))
     if not trial_files:
         return
 
@@ -1132,7 +1204,7 @@ def _plot_f3_hpo_progress(model_dir: Path, figures_dir: Path) -> None:
             handlelength=1.5,
         )
 
-    _save_figure_png(fig, figures_dir / "figure_f3_hpo_progress")
+    _save_figure_png(fig, figures_dir / "figure_step1_property_regression_hpo_progress")
     plt.close(fig)
 
 
@@ -1145,7 +1217,6 @@ def _save_optuna_process_artifacts(
     files_dir: Path,
     figures_dir: Path,
     save_figures: bool,
-    legacy_files_dirs: Optional[Iterable[Path]] = None,
 ) -> None:
     if trial_df is None or trial_df.empty:
         return
@@ -1159,7 +1230,6 @@ def _save_optuna_process_artifacts(
     save_json(
         summary_payload,
         files_dir / summary_name,
-        legacy_paths=[Path(p) / summary_name for p in (legacy_files_dirs or [])],
     )
 
     if (not save_figures) or plt is None:
@@ -1181,15 +1251,15 @@ def _save_optuna_process_artifacts(
     best_curve = np.maximum.accumulate(objective)
 
     fig1, ax = plt.subplots(1, 1, figsize=(8.8, 4.6))
-    ax.plot(trials, objective, color="#4E79A7", marker="o", linewidth=1.2, alpha=0.85, label="Trial CV mean R2")
-    ax.plot(trials, best_curve, color="#E15759", linewidth=2.0, label="Best-so-far CV mean R2")
+    ax.plot(trials, objective, color="#4E79A7", marker="o", linewidth=1.2, alpha=0.85, label="Trial validation R2")
+    ax.plot(trials, best_curve, color="#E15759", linewidth=2.0, label="Best-so-far validation R2")
     ax.set_xlabel("Trial")
-    ax.set_ylabel("CV mean R2")
-    ax.set_title(f"F3 Optuna History: {safe_property} ({safe_view})")
+    ax.set_ylabel("Validation R2")
+    ax.set_title(f"property_regression Optuna History: {safe_property} ({safe_view})")
     ax.grid(alpha=0.25)
     ax.legend(loc="best", fontsize=12)
     fig1.tight_layout()
-    _save_figure_png(fig1, figures_dir / f"figure_f3_optuna_history_{safe_property}_{safe_view}")
+    _save_figure_png(fig1, figures_dir / f"figure_step1_property_regression_optuna_history_{safe_property}_{safe_view}")
     plt.close(fig1)
 
     param_cols = [c for c in ["num_layers", "neurons", "learning_rate", "dropout", "batch_size", "finetune_last_layers"] if c in df.columns]
@@ -1217,20 +1287,20 @@ def _save_optuna_process_artifacts(
         c = [color_values[idx] for idx in np.where(valid)[0]]
         ax.scatter(vals[valid], objective[valid], c=c, s=42, alpha=0.9, edgecolors="none")
         ax.set_xlabel(col)
-        ax.set_ylabel("CV mean R2")
+        ax.set_ylabel("Validation R2")
         ax.set_title(col)
         ax.grid(alpha=0.22)
 
     for j in range(len(param_cols), len(axes_flat)):
         axes_flat[j].set_axis_off()
 
-    fig2.suptitle(f"F3 Optuna Params vs Objective: {safe_property} ({safe_view})", fontsize=16, fontweight="bold")
+    fig2.suptitle(f"property_regression Optuna Params vs Objective: {safe_property} ({safe_view})", fontsize=16, fontweight="bold")
     fig2.tight_layout()
-    _save_figure_png(fig2, figures_dir / f"figure_f3_optuna_params_{safe_property}_{safe_view}")
+    _save_figure_png(fig2, figures_dir / f"figure_step1_property_regression_optuna_params_{safe_property}_{safe_view}")
     plt.close(fig2)
 
 
-def _plot_f3_cross_view_summary(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
+def _plot_property_regression_cross_view_summary(metrics_df: pd.DataFrame, figures_dir: Path) -> None:
     """Comprehensive cross-view summary figure (2×2):
     (A) Test R² per property per view — grouped bars (best view visible at a glance).
     (B) Test RMSE per property per view — grouped bars.
@@ -1348,13 +1418,13 @@ def _plot_f3_cross_view_summary(metrics_df: pd.DataFrame, figures_dir: Path) -> 
             ax3.text(float(val) + float(std) + 0.005, bar.get_y() + bar.get_height() / 2.0,
                      f"{val:.3f}±{std:.3f}", va="center", ha="left", fontsize=12)
 
-    fig.suptitle("F3: Cross-View Property Prediction Summary", fontsize=18, fontweight="bold")
+    fig.suptitle("property_regression: Cross-View Property Prediction Summary", fontsize=18, fontweight="bold")
     fig.tight_layout()
-    _save_figure_png(fig, figures_dir / "figure_f3_cross_view_summary")
+    _save_figure_png(fig, figures_dir / "figure_step1_property_regression_cross_view_summary")
     plt.close(fig)
 
 
-def _generate_f3_figures(
+def _generate_property_regression_figures(
     *,
     metrics_df: pd.DataFrame,
     model_dir: Path,
@@ -1368,16 +1438,16 @@ def _generate_f3_figures(
     if not generate:
         return
     if plt is None:
-        print("Warning: matplotlib unavailable; skipping F3 figures.")
+        print("Warning: matplotlib unavailable; skipping property_regression figures.")
         return
 
-    _plot_f3_metrics_by_split(metrics_df, figures_dir)
-    _plot_f3_generalization_heatmaps(metrics_df, figures_dir)
-    _plot_f3_test_head_leaderboard(metrics_df, figures_dir)
-    _plot_f3_fusion_gain(metrics_df, figures_dir)
-    _plot_f3_head_coverage(model_dir, figures_dir)
-    _plot_f3_hpo_progress(model_dir, figures_dir)
-    _plot_f3_cross_view_summary(metrics_df, figures_dir)
+    _plot_property_regression_metrics_by_split(metrics_df, figures_dir)
+    _plot_property_regression_generalization_heatmaps(metrics_df, figures_dir)
+    _plot_property_regression_test_head_leaderboard(metrics_df, figures_dir)
+    _plot_property_regression_fusion_gain(metrics_df, figures_dir)
+    _plot_property_regression_head_coverage(model_dir, figures_dir)
+    _plot_property_regression_hpo_progress(model_dir, figures_dir)
+    _plot_property_regression_cross_view_summary(metrics_df, figures_dir)
 
 
 def _resolve_property_columns(df: pd.DataFrame, property_name: str) -> tuple[str, str]:
@@ -1703,14 +1773,12 @@ def _build_tuning_config(
     if configured_metric and configured_metric not in {"r2", "rmse", "mae"}:
         raise ValueError("hyperparameter_tuning.metric must be one of: r2, rmse, mae")
     if configured_metric and configured_metric != "r2":
-        print("Warning: F3 CV objective is fixed to mean validation R2; ignoring hyperparameter_tuning.metric.")
-
-    cv_folds = max(int(hyper_cfg.get("cv_folds", hyper_cfg.get("cv", 5))), 2)
+        print("Warning: property_regression HPO objective is fixed to validation R2; ignoring hyperparameter_tuning.metric.")
 
     cfg = {
         "enabled": enabled,
         "n_trials": max(int(hyper_cfg.get("n_trials", 100)), 1),
-        "cv_folds": cv_folds,
+        "validation_strategy": "holdout",
         "tuning_epochs": max(int(hyper_cfg.get("tuning_epochs", 35)), 1),
         "tuning_patience": max(int(hyper_cfg.get("tuning_patience", 10)), 1),
         "metric": "r2",
@@ -1981,20 +2049,36 @@ def _train_one_trial_joint(
     }, int(trained_epochs)
 
 
+def _concat_model_inputs(first: dict, second: dict) -> dict:
+    if first is None or second is None:
+        return {}
+    combined = {}
+    for key in first:
+        if key not in second:
+            raise KeyError(f"Cannot concatenate model inputs: missing key {key!r}")
+        combined[key] = np.concatenate([np.asarray(first[key]), np.asarray(second[key])], axis=0)
+    return combined
+
+
 def _fit_mlp_with_hpo(
     train_X: np.ndarray,
     train_y: np.ndarray,
+    val_X: np.ndarray,
+    val_y: np.ndarray,
     hyper_cfg: dict,
     seed: int,
     device: str,
     force_enable: Optional[bool] = None,
     raw_inputs: Optional[dict] = None,
+    raw_inputs_val: Optional[dict] = None,
     assets: Optional[dict] = None,
     view_type: str = "sequence",
     backbone_num_layers: Optional[int] = None,
 ) -> tuple[dict, dict, pd.DataFrame]:
     if train_X.shape[0] == 0:
         raise ValueError("Cannot train MLP: empty training set.")
+    if val_X.shape[0] == 0:
+        raise ValueError("Cannot tune property_regression without a validation set.")
 
     cfg = _build_tuning_config(
         hyper_cfg,
@@ -2005,9 +2089,6 @@ def _fit_mlp_with_hpo(
     n_trials = int(cfg["n_trials"]) if enabled else 1
     search = cfg["search_space"]
     objective_metric = str(cfg["metric"])
-    cv_folds = min(max(int(cfg.get("cv_folds", 5)), 2), int(train_X.shape[0]))
-    if cv_folds < 2:
-        raise ValueError("Need at least 2 samples in train pool for cross-validation.")
     final_training_epochs = max(int((hyper_cfg or {}).get("final_training_epochs", 200)), 1)
     final_training_patience = max(
         int((hyper_cfg or {}).get("final_training_patience", final_training_epochs + 1)),
@@ -2015,70 +2096,57 @@ def _fit_mlp_with_hpo(
     )
 
     trial_rows = []
-    supports_joint_training = raw_inputs is not None and assets is not None
-    full_train_rows = np.arange(train_X.shape[0], dtype=np.int64)
+    supports_joint_training = raw_inputs is not None and raw_inputs_val is not None and assets is not None
+    hpo_features = np.concatenate([train_X, val_X], axis=0).astype(np.float32, copy=False)
+    hpo_targets = np.concatenate([train_y, val_y], axis=0).astype(np.float32, copy=False)
+    hpo_train_rows = np.arange(train_X.shape[0], dtype=np.int64)
+    hpo_val_rows = np.arange(train_X.shape[0], train_X.shape[0] + val_X.shape[0], dtype=np.int64)
+    hpo_raw_inputs = _concat_model_inputs(raw_inputs, raw_inputs_val) if supports_joint_training else None
 
-    def _evaluate_params_cv(params: dict, trial_seed: int) -> dict:
-        folds = KFold(n_splits=cv_folds, shuffle=True, random_state=trial_seed)
-        fold_r2 = []
-        fold_rmse = []
-        fold_mae = []
-        fold_best_epoch = []
-        fold_epochs_trained = []
+    def _evaluate_params_holdout(params: dict, trial_seed: int) -> dict:
         finetune_last_layers = int(params.get("finetune_last_layers", 0))
-
-        for fold_idx, (idx_tr, idx_va) in enumerate(folds.split(train_X)):
-            if finetune_last_layers > 0:
-                if not supports_joint_training:
-                    raise RuntimeError("Joint backbone fine-tuning requested but raw inputs/assets are unavailable.")
-                _, _, fold_result, epochs_trained = _train_one_trial_joint(
-                    base_features=train_X,
-                    targets=train_y,
-                    raw_inputs=raw_inputs,
-                    train_rows=idx_tr,
-                    val_rows=idx_va,
-                    assets=assets,
-                    view_type=view_type,
-                    trial_params=params,
-                    tuning_epochs=int(cfg["tuning_epochs"]),
-                    tuning_patience=int(cfg["tuning_patience"]),
-                    objective_metric=objective_metric,
-                    trial_seed=trial_seed + 1009 * (fold_idx + 1),
-                    device=device,
-                )
-            else:
-                _, _, fold_result, epochs_trained = _train_one_trial(
-                    train_X=train_X[idx_tr],
-                    train_y=train_y[idx_tr],
-                    val_X=train_X[idx_va],
-                    val_y=train_y[idx_va],
-                    trial_params=params,
-                    tuning_epochs=int(cfg["tuning_epochs"]),
-                    tuning_patience=int(cfg["tuning_patience"]),
-                    objective_metric=objective_metric,
-                    trial_seed=trial_seed + 1009 * (fold_idx + 1),
-                    device=device,
-                )
-            fold_r2.append(float(fold_result["r2"]))
-            fold_rmse.append(float(fold_result["rmse"]))
-            fold_mae.append(float(fold_result["mae"]))
-            fold_best_epoch.append(int(fold_result["best_epoch"]))
-            fold_epochs_trained.append(int(epochs_trained))
-
+        if finetune_last_layers > 0:
+            if not supports_joint_training:
+                raise RuntimeError("Joint backbone fine-tuning requested but raw train/validation inputs are unavailable.")
+            _, _, result, epochs_trained = _train_one_trial_joint(
+                base_features=hpo_features,
+                targets=hpo_targets,
+                raw_inputs=hpo_raw_inputs,
+                train_rows=hpo_train_rows,
+                val_rows=hpo_val_rows,
+                assets=assets,
+                view_type=view_type,
+                trial_params=params,
+                tuning_epochs=int(cfg["tuning_epochs"]),
+                tuning_patience=int(cfg["tuning_patience"]),
+                objective_metric=objective_metric,
+                trial_seed=trial_seed,
+                device=device,
+            )
+        else:
+            _, _, result, epochs_trained = _train_one_trial(
+                train_X=train_X,
+                train_y=train_y,
+                val_X=val_X,
+                val_y=val_y,
+                trial_params=params,
+                tuning_epochs=int(cfg["tuning_epochs"]),
+                tuning_patience=int(cfg["tuning_patience"]),
+                objective_metric=objective_metric,
+                trial_seed=trial_seed,
+                device=device,
+            )
         return {
-            "cv_mean_r2": float(np.mean(fold_r2)) if fold_r2 else float("nan"),
-            "cv_std_r2": float(np.std(fold_r2)) if fold_r2 else float("nan"),
-            "cv_mean_rmse": float(np.mean(fold_rmse)) if fold_rmse else float("nan"),
-            "cv_std_rmse": float(np.std(fold_rmse)) if fold_rmse else float("nan"),
-            "cv_mean_mae": float(np.mean(fold_mae)) if fold_mae else float("nan"),
-            "cv_std_mae": float(np.std(fold_mae)) if fold_mae else float("nan"),
-            "cv_best_epoch_mean": float(np.mean(fold_best_epoch)) if fold_best_epoch else float("nan"),
-            "cv_epochs_trained_mean": float(np.mean(fold_epochs_trained)) if fold_epochs_trained else float("nan"),
+            "val_r2": float(result["r2"]),
+            "val_rmse": float(result["rmse"]),
+            "val_mae": float(result["mae"]),
+            "best_epoch": int(result["best_epoch"]),
+            "epochs_trained": int(epochs_trained),
         }
 
     if enabled:
         if optuna is None:
-            raise ImportError("optuna is required for F3 hyperparameter tuning but is not installed.")
+            raise ImportError("optuna is required for property_regression hyperparameter tuning but is not installed.")
 
         sampler = optuna.samplers.TPESampler(seed=seed)
         study = optuna.create_study(direction="maximize", sampler=sampler)
@@ -2092,27 +2160,24 @@ def _fit_mlp_with_hpo(
                 "batch_size": int(trial.suggest_categorical("batch_size", search["batch_size"])),
                 "finetune_last_layers": _suggest_finetune_last_layers(trial, search["finetune_last_layers"]),
             }
-            cv_summary = _evaluate_params_cv(params, trial_seed=seed + 10007 * (trial.number + 1))
+            val_summary = _evaluate_params_holdout(params, trial_seed=seed + 10007 * (trial.number + 1))
             row = {
                 "trial": int(trial.number + 1),
                 "tuning_enabled": True,
-                "objective_split": "cv",
+                "objective_split": "validation_holdout",
                 "objective_metric": "r2",
-                "objective_value": float(cv_summary["cv_mean_r2"]),
-                "val_rmse": float(cv_summary["cv_mean_rmse"]),
-                "val_mae": float(cv_summary["cv_mean_mae"]),
-                "val_r2": float(cv_summary["cv_mean_r2"]),
-                "best_epoch": int(round(cv_summary["cv_best_epoch_mean"])) if np.isfinite(cv_summary["cv_best_epoch_mean"]) else 0,
-                "epochs_trained": int(round(cv_summary["cv_epochs_trained_mean"])) if np.isfinite(cv_summary["cv_epochs_trained_mean"]) else 0,
-                "cv_folds": int(cv_folds),
-                "cv_std_r2": float(cv_summary["cv_std_r2"]),
-                "cv_std_rmse": float(cv_summary["cv_std_rmse"]),
-                "cv_std_mae": float(cv_summary["cv_std_mae"]),
+                "objective_value": float(val_summary["val_r2"]),
+                "val_rmse": float(val_summary["val_rmse"]),
+                "val_mae": float(val_summary["val_mae"]),
+                "val_r2": float(val_summary["val_r2"]),
+                "best_epoch": int(val_summary["best_epoch"]),
+                "epochs_trained": int(val_summary["epochs_trained"]),
+                "validation_strategy": "holdout_8_1_1",
                 "activation": "relu",
                 **params,
             }
             trial_rows.append(row)
-            return float(cv_summary["cv_mean_r2"])
+            return float(val_summary["val_r2"])
 
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         if not trial_rows:
@@ -2127,22 +2192,19 @@ def _fit_mlp_with_hpo(
             "batch_size": int(search["batch_size"][0]),
             "finetune_last_layers": int(search["finetune_last_layers"][0]),
         }
-        cv_summary = _evaluate_params_cv(params, trial_seed=seed + 10007)
+        val_summary = _evaluate_params_holdout(params, trial_seed=seed + 10007)
         best_summary = {
             "trial": 1,
             "tuning_enabled": False,
-            "objective_split": "cv",
+            "objective_split": "validation_holdout",
             "objective_metric": "r2",
-            "objective_value": float(cv_summary["cv_mean_r2"]),
-            "val_rmse": float(cv_summary["cv_mean_rmse"]),
-            "val_mae": float(cv_summary["cv_mean_mae"]),
-            "val_r2": float(cv_summary["cv_mean_r2"]),
-            "best_epoch": int(round(cv_summary["cv_best_epoch_mean"])) if np.isfinite(cv_summary["cv_best_epoch_mean"]) else 0,
-            "epochs_trained": int(round(cv_summary["cv_epochs_trained_mean"])) if np.isfinite(cv_summary["cv_epochs_trained_mean"]) else 0,
-            "cv_folds": int(cv_folds),
-            "cv_std_r2": float(cv_summary["cv_std_r2"]),
-            "cv_std_rmse": float(cv_summary["cv_std_rmse"]),
-            "cv_std_mae": float(cv_summary["cv_std_mae"]),
+            "objective_value": float(val_summary["val_r2"]),
+            "val_rmse": float(val_summary["val_rmse"]),
+            "val_mae": float(val_summary["val_mae"]),
+            "val_r2": float(val_summary["val_r2"]),
+            "best_epoch": int(val_summary["best_epoch"]),
+            "epochs_trained": int(val_summary["epochs_trained"]),
+            "validation_strategy": "holdout_8_1_1",
             "activation": "relu",
             **params,
         }
@@ -2156,15 +2218,19 @@ def _fit_mlp_with_hpo(
         "batch_size": int(best_summary["batch_size"]),
         "finetune_last_layers": int(best_summary.get("finetune_last_layers", 0)),
     }
+    final_train_X = np.concatenate([train_X, val_X], axis=0).astype(np.float32, copy=False)
+    final_train_y = np.concatenate([train_y, val_y], axis=0).astype(np.float32, copy=False)
+    final_raw_inputs = _concat_model_inputs(raw_inputs, raw_inputs_val) if supports_joint_training else None
+    final_train_rows = np.arange(final_train_X.shape[0], dtype=np.int64)
 
     if int(best_params.get("finetune_last_layers", 0)) > 0:
         if not supports_joint_training:
             raise RuntimeError("Joint backbone fine-tuning selected but raw inputs/assets are unavailable.")
         final_predictor, final_scaler, final_result, final_epochs_ran = _train_one_trial_joint(
-            base_features=train_X,
-            targets=train_y,
-            raw_inputs=raw_inputs,
-            train_rows=full_train_rows,
+            base_features=final_train_X,
+            targets=final_train_y,
+            raw_inputs=final_raw_inputs,
+            train_rows=final_train_rows,
             val_rows=np.zeros((0,), dtype=np.int64),
             assets=assets,
             view_type=view_type,
@@ -2184,9 +2250,9 @@ def _fit_mlp_with_hpo(
         }
     else:
         final_model, final_scaler, final_result, final_epochs_ran = _train_one_trial(
-            train_X=train_X,
-            train_y=train_y,
-            val_X=np.zeros((0, train_X.shape[1]), dtype=np.float32),
+            train_X=final_train_X,
+            train_y=final_train_y,
+            val_X=np.zeros((0, final_train_X.shape[1]), dtype=np.float32),
             val_y=np.zeros((0,), dtype=np.float32),
             trial_params=best_params,
             tuning_epochs=final_training_epochs,
@@ -2205,21 +2271,19 @@ def _fit_mlp_with_hpo(
 
     hpo_best = {
         "tuning_enabled": enabled,
+        "validation_strategy": "holdout_8_1_1",
         "objective_metric": objective_metric,
         "objective_value": float(best_summary["objective_value"]),
-        "cv_folds": int(best_summary.get("cv_folds", cv_folds)),
-        "cv_mean_r2": float(best_summary["val_r2"]),
-        "cv_mean_rmse": float(best_summary["val_rmse"]),
-        "cv_mean_mae": float(best_summary["val_mae"]),
-        "cv_std_r2": float(best_summary.get("cv_std_r2", float("nan"))),
-        "cv_std_rmse": float(best_summary.get("cv_std_rmse", float("nan"))),
-        "cv_std_mae": float(best_summary.get("cv_std_mae", float("nan"))),
+        "validation_r2": float(best_summary["val_r2"]),
+        "validation_rmse": float(best_summary["val_rmse"]),
+        "validation_mae": float(best_summary["val_mae"]),
         "best_rmse_hpo": float(best_summary["val_rmse"]),
         "best_mae_hpo": float(best_summary["val_mae"]),
         "best_r2_hpo": float(best_summary["val_r2"]),
         "best_epoch_hpo": int(best_summary["best_epoch"]),
         "final_training_epochs": int(final_training_epochs),
         "final_training_patience": int(final_training_patience),
+        "final_training_pool": "train_plus_validation",
         "final_objective_split": final_result["objective_split"],
         "final_best_epoch": int(final_result["best_epoch"]),
         "final_rmse": float(final_result["rmse"]),
@@ -2258,21 +2322,6 @@ def _save_mlp_bundle(model_path: Path, bundle: dict) -> None:
     torch.save(checkpoint, model_path)
 
 
-def _save_mlp_bundle_with_legacy(model_path: Path, bundle: dict, legacy_paths: Optional[Iterable[Path]] = None) -> None:
-    seen = set()
-    candidates = [Path(model_path)]
-    if legacy_paths:
-        candidates.extend(Path(p) for p in legacy_paths)
-
-    for path in candidates:
-        key = str(path.resolve()) if path.exists() else str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _save_mlp_bundle(path, bundle)
-
-
 def _slice_model_inputs(raw_inputs: dict, rows: List[int]) -> dict:
     row_idx = np.asarray(rows, dtype=np.int64)
     return {
@@ -2285,7 +2334,7 @@ def main(args):
     config = load_config(args.config)
     results_dir = _resolve_path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
-    step_dirs = ensure_step_dirs(results_dir, "step3_property")
+    step_dirs = ensure_step_dirs(results_dir, "step1_property_regression")
     save_config(config, results_dir / "config_used.yaml")
     save_config(config, step_dirs["files_dir"] / "config_used.yaml")
 
@@ -2293,19 +2342,15 @@ def main(args):
     if args.figures_only:
         metrics_candidates = [
             step_dirs["metrics_dir"] / "metrics_property.csv",
-            step_dirs["step_dir"] / "metrics_property.csv",
-            results_dir / "metrics_property.csv",
         ]
         metrics_path = next((p for p in metrics_candidates if p.exists()), None)
         if metrics_path is None:
             raise FileNotFoundError(
-                "No metrics_property.csv found. Run F3 training first or provide the expected metrics file."
+                "No metrics_property.csv found. Run property_regression first or provide the expected metrics file."
             )
         metrics_df = pd.read_csv(metrics_path)
-        model_dir = step_dirs["files_dir"]
-        if not any(model_dir.glob("*_meta.json")) and any(step_dirs["step_dir"].glob("*_meta.json")):
-            model_dir = step_dirs["step_dir"]
-        _generate_f3_figures(
+        model_dir = step_dirs["root_step_dir"]
+        _generate_property_regression_figures(
             metrics_df=metrics_df,
             model_dir=model_dir,
             figures_dir=step_dirs["figures_dir"],
@@ -2315,26 +2360,22 @@ def main(args):
         for prop in sorted(metrics_df.get("property", pd.Series(dtype=str)).astype(str).unique().tolist()):
             if not prop:
                 continue
-            prop_dirs = ensure_step_dirs(results_dir, "step3_property", prop)
+            prop_dirs = ensure_step_dirs(results_dir, "step1_property_regression", prop)
             prop_model_dir = prop_dirs["files_dir"]
-            if not any(prop_model_dir.glob("*_meta.json")):
-                fallback_dir = prop_dirs["step_dir"]
-                if any(fallback_dir.glob("*_meta.json")):
-                    prop_model_dir = fallback_dir
             if not any(prop_model_dir.glob("*_meta.json")):
                 continue
             save_config(config, prop_dirs["files_dir"] / "config_used.yaml")
             prop_metrics = metrics_df[metrics_df["property"].astype(str) == prop].copy()
             if prop_metrics.empty:
                 continue
-            _generate_f3_figures(
+            _generate_property_regression_figures(
                 metrics_df=prop_metrics,
                 model_dir=prop_model_dir,
                 figures_dir=prop_dirs["figures_dir"],
                 prop_cfg=prop_cfg,
                 args=args,
             )
-        print(f"Saved F3 figures to {step_dirs['figures_dir']}")
+        print(f"Saved property_regression figures to {step_dirs['figures_dir']}")
         return
 
     property_dir = _resolve_path(config["paths"]["property_dir"])
@@ -2364,9 +2405,9 @@ def main(args):
     if require_cuda and training_device != "cuda":
         raise RuntimeError("MVF_REQUIRE_CUDA is set but CUDA is unavailable.")
     if training_device == "cpu":
-        print("Warning: training device is CPU; F3 can be very slow.")
+        print("Warning: training device is CPU; property_regression can be very slow.")
     else:
-        print("Using CUDA for F3 property-head training.")
+        print("Using CUDA for property_regression training.")
 
     view_specs = {
         "smiles": {
@@ -2448,9 +2489,15 @@ def main(args):
     if not view_assets:
         raise RuntimeError("No valid views configured for property prediction.")
 
+    val_ratio = float(prop_cfg.get("val_ratio", 0.1))
     test_ratio = float(prop_cfg.get("test_ratio", 0.1))
+    if not (0.0 < val_ratio < 1.0):
+        raise ValueError("property.val_ratio must be in (0, 1).")
     if not (0.0 < test_ratio < 1.0):
         raise ValueError("property.test_ratio must be in (0, 1).")
+    if val_ratio + test_ratio >= 1.0:
+        raise ValueError("property.val_ratio + property.test_ratio must be less than 1.")
+    train_ratio = 1.0 - val_ratio - test_ratio
 
     seed = int(config.get("data", {}).get("random_seed", 42))
     random.seed(seed)
@@ -2469,8 +2516,7 @@ def main(args):
         optuna_figures_enabled = _to_bool(prop_cfg.get("generate_figures", True), True)
     enable_multiview_mean_head = _to_bool(prop_cfg.get("enable_multiview_mean_head", False), False)
 
-    model_dir = step_dirs["files_dir"]
-    legacy_model_dir = step_dirs["step_dir"]
+    model_dir = step_dirs["root_step_dir"]
 
     # Cache per-view embeddings by raw p-SMILES across property files.
     view_embedding_cache: Dict[str, Dict[str, np.ndarray]] = {view: {} for view in view_assets}
@@ -2482,10 +2528,9 @@ def main(args):
     for prop_path in property_files:
         df = pd.read_csv(prop_path)
         prop_name = normalize_property_name(prop_path.stem)
-        prop_step_dirs = ensure_step_dirs(results_dir, "step3_property", prop_name)
+        prop_step_dirs = ensure_step_dirs(results_dir, "step1_property_regression", prop_name)
         save_config(config, prop_step_dirs["files_dir"] / "config_used.yaml")
         prop_model_dir = prop_step_dirs["files_dir"]
-        prop_legacy_model_dir = prop_step_dirs["step_dir"]
         smiles_col, value_col = _resolve_property_columns(df, prop_name)
 
         df = df[[smiles_col, value_col]].dropna()
@@ -2502,16 +2547,41 @@ def main(args):
         num_samples = len(smiles_list)
 
         indices = np.arange(num_samples)
-        train_idx, test_idx = train_test_split(
+        train_val_idx, test_idx = train_test_split(
             indices,
             test_size=test_ratio,
             random_state=seed,
             shuffle=True,
         )
+        relative_val_ratio = val_ratio / (1.0 - test_ratio)
+        train_idx, val_idx = train_test_split(
+            train_val_idx,
+            test_size=relative_val_ratio,
+            random_state=seed,
+            shuffle=True,
+        )
         splits = {
             "train": train_idx.tolist(),
+            "val": val_idx.tolist(),
             "test": test_idx.tolist(),
         }
+        split_labels = np.full(num_samples, "train", dtype=object)
+        split_labels[val_idx] = "val"
+        split_labels[test_idx] = "test"
+        split_df = pd.DataFrame(
+            {
+                "row_index": np.arange(num_samples, dtype=np.int64),
+                "p_smiles": smiles_list,
+                "target": targets,
+                "split": split_labels,
+            }
+        )
+        split_path = prop_step_dirs["files_dir"] / f"{prop_name}_split_seed{seed}.csv"
+        save_csv(
+            split_df,
+            split_path,
+            index=False,
+        )
 
         view_data: Dict[str, Dict] = {}
         for view, assets in view_assets.items():
@@ -2616,17 +2686,25 @@ def main(args):
             train_rows = [index_map[i] for i in train_indices]
             if not train_rows:
                 continue
+            val_indices = [i for i in splits["val"] if i in index_map]
+            val_rows = [index_map[i] for i in val_indices]
+            if not val_rows:
+                print(f"Skipping {prop_name}/{view}: no validation rows after representation conversion.")
+                continue
             test_indices = [i for i in splits["test"] if i in index_map]
             test_rows = [index_map[i] for i in test_indices]
 
             model_bundle, hpo_best, trial_df = _fit_mlp_with_hpo(
                 train_X=embeddings[train_rows],
                 train_y=targets[train_indices],
+                val_X=embeddings[val_rows],
+                val_y=targets[val_indices],
                 hyper_cfg=mlp_hpo_cfg,
                 seed=_stable_seed(seed, f"{prop_name}:{view}"),
                 device=training_device,
                 force_enable=args.tune,
                 raw_inputs=_slice_model_inputs(raw_inputs, train_rows),
+                raw_inputs_val=_slice_model_inputs(raw_inputs, val_rows),
                 assets=view_assets[view],
                 view_type=view_type,
                 backbone_num_layers=backbone_num_layers,
@@ -2652,6 +2730,8 @@ def main(args):
             rows.append(
                 {
                     "method": "Multi_View_Foundation",
+                    "stage": "property_regression",
+                    "view": view,
                     "representation": rep,
                     "model_size": data["model_size"],
                     "property": prop_name,
@@ -2665,14 +2745,16 @@ def main(args):
             rows.append(
                 {
                     "method": "Multi_View_Foundation",
+                    "stage": "property_regression",
+                    "view": view,
                     "representation": rep,
                     "model_size": data["model_size"],
                     "property": prop_name,
                     "split": "val",
-                    "split_detail": f"cv_mean_{int(hpo_best.get('cv_folds', 5))}fold",
-                    "mae": _to_float_or_nan(hpo_best.get("cv_mean_mae")),
-                    "rmse": _to_float_or_nan(hpo_best.get("cv_mean_rmse")),
-                    "r2": _to_float_or_nan(hpo_best.get("cv_mean_r2")),
+                    "split_detail": "validation_holdout",
+                    "mae": _to_float_or_nan(hpo_best.get("validation_mae")),
+                    "rmse": _to_float_or_nan(hpo_best.get("validation_rmse")),
+                    "r2": _to_float_or_nan(hpo_best.get("validation_r2")),
                 }
             )
             rows_by_property.setdefault(prop_name, []).append(rows[-1])
@@ -2695,6 +2777,8 @@ def main(args):
             rows.append(
                 {
                     "method": "Multi_View_Foundation",
+                    "stage": "property_regression",
+                    "view": view,
                     "representation": rep,
                     "model_size": data["model_size"],
                     "property": prop_name,
@@ -2706,25 +2790,12 @@ def main(args):
             rows_by_property.setdefault(prop_name, []).append(rows[-1])
 
             model_path = prop_model_dir / f"{prop_name}_{view}_mlp.pt"
-            _save_mlp_bundle_with_legacy(
-                model_path,
-                model_bundle,
-                legacy_paths=[
-                    model_dir / model_path.name,
-                    prop_legacy_model_dir / model_path.name,
-                    legacy_model_dir / model_path.name,
-                ],
-            )
+            _save_mlp_bundle(model_path, model_bundle)
 
             trial_path = prop_model_dir / f"{prop_name}_{view}_mlp_hpo_trials.csv"
             save_csv(
                 trial_df,
                 trial_path,
-                legacy_paths=[
-                    model_dir / trial_path.name,
-                    prop_legacy_model_dir / trial_path.name,
-                    legacy_model_dir / trial_path.name,
-                ],
                 index=False,
             )
 
@@ -2732,10 +2803,12 @@ def main(args):
                 "property": prop_name,
                 "view": view,
                 "num_samples": num_samples,
-                "train_ratio": float(1.0 - test_ratio),
-                "val_ratio": 0.0,
+                "train_ratio": float(train_ratio),
+                "val_ratio": float(val_ratio),
                 "test_ratio": test_ratio,
-                "cv_folds": int(hpo_best.get("cv_folds", 5)),
+                "split_seed": seed,
+                "split_file": str(split_path),
+                "validation_strategy": "holdout_8_1_1",
                 "model_type": "mlp",
                 "hpo_trials": int((mlp_hpo_cfg or {}).get("n_trials", 100)),
                 "hpo_best": hpo_best,
@@ -2746,11 +2819,6 @@ def main(args):
             save_json(
                 meta_payload,
                 meta_path,
-                legacy_paths=[
-                    model_dir / meta_path.name,
-                    prop_legacy_model_dir / meta_path.name,
-                    legacy_model_dir / meta_path.name,
-                ],
             )
             _save_optuna_process_artifacts(
                 trial_df=trial_df,
@@ -2760,7 +2828,6 @@ def main(args):
                 files_dir=prop_model_dir,
                 figures_dir=prop_step_dirs["figures_dir"],
                 save_figures=bool(optuna_figures_enabled),
-                legacy_files_dirs=[model_dir, prop_legacy_model_dir, legacy_model_dir],
             )
 
         if enable_multiview_mean_head and len(view_data) >= 2:
@@ -2779,12 +2846,16 @@ def main(args):
 
                 train_indices = [i for i in splits["train"] if i in fused_map]
                 train_rows = [fused_map[i] for i in train_indices]
+                val_indices = [i for i in splits["val"] if i in fused_map]
+                val_rows = [fused_map[i] for i in val_indices]
                 test_indices = [i for i in splits["test"] if i in fused_map]
                 test_rows = [fused_map[i] for i in test_indices]
-                if train_rows:
+                if train_rows and val_rows:
                     model_bundle, hpo_best, trial_df = _fit_mlp_with_hpo(
                         train_X=fused[train_rows],
                         train_y=targets[train_indices],
+                        val_X=fused[val_rows],
+                        val_y=targets[val_indices],
                         hyper_cfg=mlp_hpo_cfg,
                         seed=_stable_seed(seed, f"{prop_name}:multiview_mean"),
                         device=training_device,
@@ -2798,6 +2869,8 @@ def main(args):
                     rows.append(
                         {
                             "method": "Multi_View_Foundation",
+                            "stage": "property_regression",
+                            "view": "multiview_mean",
                             "representation": "MultiViewMean",
                             "model_size": "mixed",
                             "property": prop_name,
@@ -2811,14 +2884,16 @@ def main(args):
                     rows.append(
                         {
                             "method": "Multi_View_Foundation",
+                            "stage": "property_regression",
+                            "view": "multiview_mean",
                             "representation": "MultiViewMean",
                             "model_size": "mixed",
                             "property": prop_name,
                             "split": "val",
-                            "split_detail": f"cv_mean_{int(hpo_best.get('cv_folds', 5))}fold",
-                            "mae": _to_float_or_nan(hpo_best.get("cv_mean_mae")),
-                            "rmse": _to_float_or_nan(hpo_best.get("cv_mean_rmse")),
-                            "r2": _to_float_or_nan(hpo_best.get("cv_mean_r2")),
+                            "split_detail": "validation_holdout",
+                            "mae": _to_float_or_nan(hpo_best.get("validation_mae")),
+                            "rmse": _to_float_or_nan(hpo_best.get("validation_rmse")),
+                            "r2": _to_float_or_nan(hpo_best.get("validation_r2")),
                         }
                     )
                     rows_by_property.setdefault(prop_name, []).append(rows[-1])
@@ -2831,6 +2906,8 @@ def main(args):
                     rows.append(
                         {
                             "method": "Multi_View_Foundation",
+                            "stage": "property_regression",
+                            "view": "multiview_mean",
                             "representation": "MultiViewMean",
                             "model_size": "mixed",
                             "property": prop_name,
@@ -2842,25 +2919,12 @@ def main(args):
                     rows_by_property.setdefault(prop_name, []).append(rows[-1])
 
                     model_path = prop_model_dir / f"{prop_name}_multiview_mean_mlp.pt"
-                    _save_mlp_bundle_with_legacy(
-                        model_path,
-                        model_bundle,
-                        legacy_paths=[
-                            model_dir / model_path.name,
-                            prop_legacy_model_dir / model_path.name,
-                            legacy_model_dir / model_path.name,
-                        ],
-                    )
+                    _save_mlp_bundle(model_path, model_bundle)
 
                     trial_path = prop_model_dir / f"{prop_name}_multiview_mean_mlp_hpo_trials.csv"
                     save_csv(
                         trial_df,
                         trial_path,
-                        legacy_paths=[
-                            model_dir / trial_path.name,
-                            prop_legacy_model_dir / trial_path.name,
-                            legacy_model_dir / trial_path.name,
-                        ],
                         index=False,
                     )
 
@@ -2869,10 +2933,12 @@ def main(args):
                         "view": "multiview_mean",
                         "num_samples": num_samples,
                         "num_common": len(common),
-                        "train_ratio": float(1.0 - test_ratio),
-                        "val_ratio": 0.0,
+                        "train_ratio": float(train_ratio),
+                        "val_ratio": float(val_ratio),
                         "test_ratio": test_ratio,
-                        "cv_folds": int(hpo_best.get("cv_folds", 5)),
+                        "split_seed": seed,
+                        "split_file": str(split_path),
+                        "validation_strategy": "holdout_8_1_1",
                         "model_type": "mlp",
                         "hpo_trials": int((mlp_hpo_cfg or {}).get("n_trials", 100)),
                         "hpo_best": hpo_best,
@@ -2883,11 +2949,6 @@ def main(args):
                     save_json(
                         meta_payload,
                         meta_path,
-                        legacy_paths=[
-                            model_dir / meta_path.name,
-                            prop_legacy_model_dir / meta_path.name,
-                            legacy_model_dir / meta_path.name,
-                        ],
                     )
                     _save_optuna_process_artifacts(
                         trial_df=trial_df,
@@ -2897,19 +2958,22 @@ def main(args):
                         files_dir=prop_model_dir,
                         figures_dir=prop_step_dirs["figures_dir"],
                         save_figures=bool(optuna_figures_enabled),
-                        legacy_files_dirs=[model_dir, prop_legacy_model_dir, legacy_model_dir],
                     )
 
         prop_metrics_rows = rows_by_property.get(prop_name, [])
         if prop_metrics_rows:
-            prop_metrics_df = pd.DataFrame(prop_metrics_rows)
+            prop_metrics_df = _merge_metrics_with_existing(
+                pd.DataFrame(prop_metrics_rows),
+                [
+                    prop_step_dirs["metrics_dir"] / "metrics_property.csv",
+                ],
+            )
             save_csv(
                 prop_metrics_df,
                 prop_step_dirs["metrics_dir"] / "metrics_property.csv",
-                legacy_paths=[prop_step_dirs["step_dir"] / "metrics_property.csv"],
                 index=False,
             )
-            _generate_f3_figures(
+            _generate_property_regression_figures(
                 metrics_df=prop_metrics_df,
                 model_dir=prop_model_dir,
                 figures_dir=prop_step_dirs["figures_dir"],
@@ -2917,20 +2981,26 @@ def main(args):
                 args=args,
             )
 
-    metrics_df = pd.DataFrame(rows)
-    save_csv(
-        metrics_df,
-        step_dirs["metrics_dir"] / "metrics_property.csv",
-        legacy_paths=[results_dir / "metrics_property.csv"],
-        index=False,
+    metrics_df = _merge_metrics_with_existing(
+        pd.DataFrame(rows),
+        [
+            step_dirs["metrics_dir"] / "metrics_property.csv",
+            *sorted(step_dirs["root_step_dir"].glob("*/metrics/metrics_property.csv")),
+        ],
     )
-    _generate_f3_figures(
-        metrics_df=metrics_df,
-        model_dir=model_dir,
-        figures_dir=step_dirs["figures_dir"],
-        prop_cfg=prop_cfg,
-        args=args,
-    )
+    if not metrics_df.empty:
+        save_csv(
+            metrics_df,
+            step_dirs["metrics_dir"] / "metrics_property.csv",
+            index=False,
+        )
+        _generate_property_regression_figures(
+            metrics_df=metrics_df,
+            model_dir=model_dir,
+            figures_dir=step_dirs["figures_dir"],
+            prop_cfg=prop_cfg,
+            args=args,
+        )
     print(f"Saved metrics_property.csv to {results_dir}")
 
 
@@ -2943,6 +3013,6 @@ if __name__ == "__main__":
     parser.add_argument("--generate_figures", dest="generate_figures", action="store_true")
     parser.add_argument("--no_figures", dest="generate_figures", action="store_false")
     parser.set_defaults(generate_figures=None)
-    parser.add_argument("--figures_only", action="store_true", help="Regenerate F3 figures from existing metrics/models without retraining.")
+    parser.add_argument("--figures_only", action="store_true", help="Regenerate property_regression figures from existing metrics/models without retraining.")
     parser.add_argument("--views", type=str, default=None, help="comma-separated list of views")
     main(parser.parse_args())
