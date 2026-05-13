@@ -24,9 +24,9 @@ DiT_postprocess
 
 *.md
 !README.md
-!Multi_View_Foundation/Pipeline.md
-!Multi_View_Foundation/results.md
-!Multi_View_Foundation/technical_guide.md
+!readme.md
+!**/README.md
+!**/readme.md
 
 *.txt
 !requirements.txt
@@ -44,10 +44,4 @@ DiT_postprocess
 *.ipynb
 *.pptx
 *.sh
-!Multi_View_Foundation/scripts/run_pipeline.sh
-!Multi_View_Foundation/scripts/run_property_regression.sh
-!Multi_View_Foundation/scripts/submit_euler.sh
-!Multi_View_Foundation/scripts/submit_nrel.sh
-!Multi_View_Foundation/scripts/submit_property_workflow_euler.sh
-!Multi_View_Foundation/scripts/submit_property_workflow_nrel.sh
 *.gz
