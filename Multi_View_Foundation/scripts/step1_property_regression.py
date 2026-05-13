@@ -2290,36 +2290,11 @@ def _fit_mlp_with_hpo(
         "final_epochs_ran": int(final_epochs_ran),
         "activation": "relu",
         "backbone_num_layers": int(backbone_num_layers or 0),
-        "checkpoint_policy": "save_best_final_only",
+        "checkpoint_policy": "no_property_checkpoints",
         **final_bundle["params"],
     }
 
     return final_bundle, hpo_best, pd.DataFrame(trial_rows)
-
-
-def _save_mlp_bundle(model_path: Path, bundle: dict) -> None:
-    model = bundle["model"].to("cpu")
-    scaler: StandardScaler = bundle["scaler"]
-    params = bundle["params"]
-    backbone_state = bundle.get("backbone_state_dict") or {}
-    checkpoint = {
-        "format": "mvf_torch_mlp",
-        "input_dim": int(model.net[0].in_features),
-        "num_layers": int(params["num_layers"]),
-        "neurons": int(params["neurons"]),
-        "dropout": float(params["dropout"]),
-        "activation": "relu",
-        "state_dict": model.state_dict(),
-        "scaler_mean": scaler.mean_.astype(np.float32),
-        "scaler_scale": scaler.scale_.astype(np.float32),
-        "finetune_last_layers": int(params.get("finetune_last_layers", 0)),
-        "checkpoint_role": "best_final_model",
-        "backbone_state_dict": {
-            key: value.detach().cpu().clone()
-            for key, value in backbone_state.items()
-        },
-    }
-    torch.save(checkpoint, model_path)
 
 
 def _slice_model_inputs(raw_inputs: dict, rows: List[int]) -> dict:
@@ -2789,9 +2764,6 @@ def main(args):
             )
             rows_by_property.setdefault(prop_name, []).append(rows[-1])
 
-            model_path = prop_model_dir / f"{prop_name}_{view}_mlp.pt"
-            _save_mlp_bundle(model_path, model_bundle)
-
             trial_path = prop_model_dir / f"{prop_name}_{view}_mlp_hpo_trials.csv"
             save_csv(
                 trial_df,
@@ -2812,7 +2784,8 @@ def main(args):
                 "model_type": "mlp",
                 "hpo_trials": int((mlp_hpo_cfg or {}).get("n_trials", DEFAULT_HPO_TRIALS)),
                 "hpo_best": hpo_best,
-                "model_path": str(model_path),
+                "checkpoint_saved": False,
+                "checkpoint_policy": "no_property_checkpoints",
                 "hpo_trials_path": str(trial_path),
             }
             meta_path = prop_model_dir / f"{prop_name}_{view}_meta.json"
@@ -2918,9 +2891,6 @@ def main(args):
                     )
                     rows_by_property.setdefault(prop_name, []).append(rows[-1])
 
-                    model_path = prop_model_dir / f"{prop_name}_multiview_mean_mlp.pt"
-                    _save_mlp_bundle(model_path, model_bundle)
-
                     trial_path = prop_model_dir / f"{prop_name}_multiview_mean_mlp_hpo_trials.csv"
                     save_csv(
                         trial_df,
@@ -2942,7 +2912,8 @@ def main(args):
                         "model_type": "mlp",
                         "hpo_trials": int((mlp_hpo_cfg or {}).get("n_trials", DEFAULT_HPO_TRIALS)),
                         "hpo_best": hpo_best,
-                        "model_path": str(model_path),
+                        "checkpoint_saved": False,
+                        "checkpoint_policy": "no_property_checkpoints",
                         "hpo_trials_path": str(trial_path),
                     }
                     meta_path = prop_model_dir / f"{prop_name}_multiview_mean_meta.json"

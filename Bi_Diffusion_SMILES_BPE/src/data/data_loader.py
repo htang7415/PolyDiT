@@ -2,9 +2,8 @@
 
 import gzip
 import pandas as pd
-import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Tuple
 from sklearn.model_selection import train_test_split
 
 from ..utils.chemistry import canonicalize_smiles, is_valid_psmiles, compute_sa_score
@@ -60,54 +59,6 @@ class PolymerDataLoader:
             raise ValueError(f"Column '{smiles_col}' not found in {polymer_file}")
 
         return df[[smiles_col]].rename(columns={smiles_col: 'p_smiles'})
-
-    def load_property_data(self, property_name: str) -> pd.DataFrame:
-        """Load property data from CSV file.
-
-        Args:
-            property_name: Name of the property (e.g., 'Tg', 'Tm').
-
-        Returns:
-            DataFrame with p-SMILES and property values.
-        """
-        property_dir = self._resolve_data_path(self.config['paths']['property_dir'])
-        property_file = property_dir / f"{property_name}.csv"
-
-        if not property_file.exists():
-            requested_name = f"{property_name}.csv".lower()
-            for candidate in sorted(property_dir.glob("*.csv")):
-                if candidate.name.lower() == requested_name:
-                    property_file = candidate
-                    break
-
-        if not property_file.exists():
-            available = ", ".join(sorted(p.stem for p in property_dir.glob("*.csv"))) or "none"
-            raise FileNotFoundError(
-                f"Property file not found: {property_file}\n"
-                f"Resolved property_dir: {property_dir}\n"
-                f"Available properties: {available}"
-            )
-
-        df = pd.read_csv(property_file)
-
-        # The property column might have different names
-        smiles_col = 'SMILES'
-        value_col = None
-
-        for col in df.columns:
-            if col.lower() == smiles_col.lower():
-                smiles_col = col
-            elif col.lower() not in ['smiles']:
-                value_col = col
-
-        if value_col is None:
-            # Use second column as value
-            value_col = df.columns[1]
-
-        df = df[[smiles_col, value_col]].copy()
-        df.columns = ['p_smiles', property_name]
-
-        return df
 
     def clean_and_filter(
         self,
@@ -183,43 +134,6 @@ class PolymerDataLoader:
 
         return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
 
-    def split_property(
-        self,
-        df: pd.DataFrame
-    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Split property data into train/val/test.
-
-        Args:
-            df: DataFrame with property data.
-
-        Returns:
-            Tuple of (train_df, val_df, test_df).
-        """
-        train_ratio = self.config['data']['property_train_ratio']
-        val_ratio = self.config['data']['property_val_ratio']
-        test_ratio = self.config['data']['property_test_ratio']
-
-        # First split: train vs (val + test)
-        train_df, temp_df = train_test_split(
-            df,
-            train_size=train_ratio,
-            random_state=self.random_seed
-        )
-
-        # Second split: val vs test
-        val_size = val_ratio / (val_ratio + test_ratio)
-        val_df, test_df = train_test_split(
-            temp_df,
-            train_size=val_size,
-            random_state=self.random_seed
-        )
-
-        return (
-            train_df.reset_index(drop=True),
-            val_df.reset_index(drop=True),
-            test_df.reset_index(drop=True)
-        )
-
     def prepare_unlabeled_data(self) -> Dict[str, pd.DataFrame]:
         """Prepare unlabeled data: load, clean, split.
 
@@ -243,38 +157,11 @@ class PolymerDataLoader:
 
         return {'train': train_df, 'val': val_df}
 
-    def prepare_property_data(self, property_name: str) -> Dict[str, pd.DataFrame]:
-        """Prepare property data: load, clean, split.
-
-        Args:
-            property_name: Name of the property.
-
-        Returns:
-            Dictionary with 'train', 'val', and 'test' DataFrames.
-        """
-        # Load data
-        df = self.load_property_data(property_name)
-        print(f"Loaded {len(df)} samples for property {property_name}")
-
-        # Clean and filter
-        df = self.clean_and_filter(df)
-        print(f"After cleaning: {len(df)} valid p-SMILES")
-
-        # Compute SA scores
-        df = self.compute_sa_scores(df)
-
-        # Split
-        train_df, val_df, test_df = self.split_property(df)
-        print(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
-
-        return {'train': train_df, 'val': val_df, 'test': test_df}
-
-    def get_statistics(self, df: pd.DataFrame, property_name: Optional[str] = None) -> Dict:
+    def get_statistics(self, df: pd.DataFrame) -> Dict:
         """Compute statistics for a dataset.
 
         Args:
             df: DataFrame with data.
-            property_name: Name of property column (if applicable).
 
         Returns:
             Dictionary of statistics.
@@ -299,22 +186,4 @@ class PolymerDataLoader:
             stats['sa_min'] = round(float(sa.min()), 4)
             stats['sa_max'] = round(float(sa.max()), 4)
 
-        # Property statistics (round floats to 4 decimal places)
-        if property_name and property_name in df.columns:
-            prop = df[property_name].dropna()
-            stats[f'{property_name}_mean'] = round(float(prop.mean()), 4)
-            stats[f'{property_name}_std'] = round(float(prop.std()), 4)
-            stats[f'{property_name}_min'] = round(float(prop.min()), 4)
-            stats[f'{property_name}_max'] = round(float(prop.max()), 4)
-
         return stats
-
-    def get_available_properties(self) -> List[str]:
-        """Get list of available property files.
-
-        Returns:
-            List of property names.
-        """
-        property_dir = self._resolve_data_path(self.config['paths']['property_dir'])
-        property_files = list(property_dir.glob("*.csv"))
-        return [f.stem for f in property_files]

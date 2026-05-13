@@ -335,7 +335,7 @@ class GraphDiffusionBackbone(nn.Module):
         M: torch.Tensor,
         pooling: str = 'mean'
     ) -> torch.Tensor:
-        """Get pooled node embeddings (for property prediction).
+        """Get pooled graph embeddings.
 
         Args:
             X: (B, Nmax) node tokens.

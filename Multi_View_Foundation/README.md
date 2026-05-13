@@ -39,7 +39,7 @@ Advanced direct script form for a view subset:
 python scripts/step1_property_regression.py --config configs/config.yaml --views smiles_bpe
 ```
 
-HPO is fixed to `50` Optuna trials. Final training with the selected hyperparameters is fixed to `200` epochs and saves only the best final checkpoint. `finetune_last_layers` is included in HPO as an integer range from `0` to the configured backbone layer count for each view.
+HPO is fixed to `50` Optuna trials. Final training with the selected hyperparameters is fixed to `200` epochs. Property-regression checkpoints are not saved; the workflow keeps metrics, splits, HPO diagnostics, metadata, and figures. `finetune_last_layers` is included in HPO as an integer range from `0` to the configured backbone layer count for each view.
 
 See:
 

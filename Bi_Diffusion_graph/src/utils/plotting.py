@@ -3,7 +3,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict
 
 from collections import Counter
 from matplotlib.ticker import MaxNLocator
@@ -108,79 +108,6 @@ class PlotUtils:
         if save_path:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
-            plt.close(fig)
-
-        return fig
-
-    def property_distribution_plot(
-        self,
-        predictions: List[float],
-        target_value: float,
-        xlabel: str,
-        ylabel: str = "Count",
-        title: Optional[str] = None,
-        save_path: Optional[str] = None,
-        bins: int = 50,
-        color: str = "steelblue"
-    ) -> plt.Figure:
-        """Plot property distribution with a target reference line.
-
-        Args:
-            predictions: Predicted property values.
-            target_value: Target property value to mark.
-            xlabel: X-axis label.
-            ylabel: Y-axis label.
-            title: Plot title.
-            save_path: Path to save the figure.
-            bins: Number of histogram bins.
-            color: Histogram color.
-
-        Returns:
-            Matplotlib figure.
-        """
-        fig, ax = plt.subplots(figsize=self.figure_size)
-
-        if predictions:
-            ax.hist(
-                predictions,
-                bins=bins,
-                color=color,
-                alpha=0.8,
-                edgecolor="white",
-                linewidth=0.5
-            )
-        else:
-            span = max(1.0, abs(target_value) * 0.1)
-            ax.set_xlim(target_value - span, target_value + span)
-            ax.text(
-                0.5,
-                0.5,
-                "No valid samples",
-                transform=ax.transAxes,
-                ha="center",
-                va="center"
-            )
-
-        ax.axvline(
-            target_value,
-            color="red",
-            linestyle="--",
-            linewidth=1.5,
-            label=f"Target = {target_value}"
-        )
-
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        if title:
-            ax.set_title(title)
-        ax.legend(framealpha=0.9)
-        ax.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-
-        if save_path:
-            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(save_path, dpi=self.dpi, bbox_inches="tight")
             plt.close(fig)
 
         return fig
