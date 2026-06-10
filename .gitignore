@@ -16,6 +16,7 @@ DiT_postprocess
 .claude
 .codex
 .AGENTS.md
+.vscode/
 
 # 
 experiments*/
@@ -23,10 +24,7 @@ Experiments*/
 DiT_postprocess
 
 *.md
-!README.md
-!readme.md
-!**/README.md
-!**/readme.md
+!/README.md
 
 *.txt
 !requirements.txt
@@ -44,4 +42,5 @@ DiT_postprocess
 *.ipynb
 *.pptx
 *.sh
+*.sub
 *.gz

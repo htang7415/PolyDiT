@@ -2,7 +2,7 @@
 """Aggregate Step1/Step2 metrics for five Bi_Diffusion methods and build figures.
 
 Expected workflow:
-1) bash scripts/submit_all_5_methods_nrel.sh all
+1) run the five representation workflows for the desired model sizes
 2) python scripts/aggregate_metrics.py --model_sizes all
 
 Step1:
