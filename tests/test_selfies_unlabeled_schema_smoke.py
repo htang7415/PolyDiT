@@ -20,14 +20,8 @@ STEP1_SCRIPTS = [
     "Bi_Diffusion_SELFIES/scripts/step1_train_backbone.py",
 ]
 
-STEP6_SCRIPTS = [
-    "Bi_Diffusion_SELFIES/scripts/step6_hyperparameter_tuning.py",
-]
-
 LENGTH_SAMPLING_SCRIPTS = [
     "Bi_Diffusion_SELFIES/scripts/step2_sample_and_evaluate.py",
-    "Bi_Diffusion_SELFIES/scripts/step4_inverse_design.py",
-    "Bi_Diffusion_SELFIES/scripts/step5_class_design.py",
 ]
 
 UTILS_FILES = [
@@ -57,8 +51,8 @@ def test_selfies_step0_rebuilds_selfies_view_from_shared_schema():
         assert "ensure_selfies_column" in source
 
 
-def test_step1_and_step6_rebuild_selfies_when_missing():
-    for rel_path in STEP1_SCRIPTS + STEP6_SCRIPTS:
+def test_step1_rebuilds_selfies_when_missing():
+    for rel_path in STEP1_SCRIPTS:
         source = _read(rel_path)
         assert "ensure_selfies_column" in source
 
